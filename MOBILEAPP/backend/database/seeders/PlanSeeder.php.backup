@@ -1,0 +1,72 @@
+<?php
+
+namespace Database\Seeders;
+
+use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\DB;
+
+class PlanSeeder extends Seeder
+{
+    /**
+     * Run the database seeds.
+     */
+    public function run(): void
+    {
+        $plans = [
+            [
+                'name' => 'Basic Plan',
+                'description' => 'Basic internet plan for home users with 25 Mbps speed',
+                'price' => 999.00,
+                'is_active' => true,
+                'modified_date' => now(),
+                'modified_by' => 'system@ampere.com',
+                'created_at' => now(),
+                'updated_at' => now()
+            ],
+            [
+                'name' => 'Premium Plan',
+                'description' => 'High-speed internet plan for businesses with 100 Mbps speed',
+                'price' => 1999.00,
+                'is_active' => true,
+                'modified_date' => now(),
+                'modified_by' => 'system@ampere.com',
+                'created_at' => now(),
+                'updated_at' => now()
+            ],
+            [
+                'name' => 'Enterprise Plan',
+                'description' => 'Ultra-fast internet plan for large enterprises with 500 Mbps speed',
+                'price' => 4999.00,
+                'is_active' => true,
+                'modified_date' => now(),
+                'modified_by' => 'system@ampere.com',
+                'created_at' => now(),
+                'updated_at' => now()
+            ],
+            [
+                'name' => 'Student Plan',
+                'description' => 'Affordable internet plan for students with 15 Mbps speed',
+                'price' => 599.00,
+                'is_active' => true,
+                'modified_date' => now(),
+                'modified_by' => 'system@ampere.com',
+                'created_at' => now(),
+                'updated_at' => now()
+            ],
+            [
+                'name' => 'Family Plan',
+                'description' => 'Perfect for families with multiple devices, 50 Mbps speed',
+                'price' => 1499.00,
+                'is_active' => true,
+                'modified_date' => now(),
+                'modified_by' => 'system@ampere.com',
+                'created_at' => now(),
+                'updated_at' => now()
+            ]
+        ];
+
+        foreach ($plans as $plan) {
+            DB::table('plans')->insert($plan);
+        }
+    }
+}

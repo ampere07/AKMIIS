@@ -1,0 +1,27 @@
+{
+  "build": {
+    "preview": {
+      "android": {
+        "image": "latest",
+        "buildType": "apk"
+      },
+      "ios": {
+        "simulator": true
+      }
+    },
+    "production": {
+      "android": {
+        "image": "latest",
+        "buildType": "app-bundle",
+        "autoIncrement": true
+      },
+      "ios": {
+        "image": "latest",
+        "autoIncrement": true
+      }
+    }
+  },
+  "cli": {
+    "appVersionSource": "remote"
+  }
+}
