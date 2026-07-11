@@ -30,6 +30,7 @@ interface InvoiceRecord {
 interface ServiceOrderRecord {
     id: string;
     date: string;
+    rawTimestamp: string | null;
     requestId: string;
     issue: string;
     issueDetails: string;
@@ -156,6 +157,8 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                         if (isNaN(d.getTime())) return '';
                         return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
                     })() : '',
+                    // Preserve the precise submission time for the support cooldown calc.
+                    rawTimestamp: order.created_at || null,
                     requestId: order.ticket_id,
                     issue: order.concern || '',
                     issueDetails: order.concern_remarks || '',

@@ -121,14 +121,25 @@ const Support: React.FC<SupportProps> = ({ forceLightMode }) => {
       if (req.date === todayStr) {
         count++;
         if (!lastSubmitTime) {
-          // First match is the latest since requests are sorted newest-first
-          // Try to parse a more precise time from the raw data
+          // First match is the latest since requests are sorted newest-first.
+          // Use the precise submission timestamp so the cooldown reflects the
+          // actual submit time — NOT "now" (which would show a bogus fresh
+          // countdown on every page open even without submitting).
           const raw = (req as any).rawTimestamp || (req as any).timestamp || (req as any).created_at;
           if (raw) {
             const parsed = new Date(raw);
             if (!isNaN(parsed.getTime())) lastSubmitTime = parsed;
           }
-          if (!lastSubmitTime) lastSubmitTime = today; // fallback
+          // Fallback: the ticket's calendar date at midnight (never the current
+          // moment). A ticket created earlier today will then be well past the
+          // 1-hour cooldown instead of restarting it.
+          if (!lastSubmitTime && req.date) {
+            const [mm, dd, yyyy] = req.date.split('/').map((n) => parseInt(n, 10));
+            if (mm && dd && yyyy) {
+              const midnight = new Date(yyyy, mm - 1, dd);
+              if (!isNaN(midnight.getTime())) lastSubmitTime = midnight;
+            }
+          }
         }
       }
     }
