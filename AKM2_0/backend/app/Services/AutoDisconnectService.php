@@ -9,7 +9,6 @@ use App\Models\BillingConfig;
 use App\Models\SMSTemplate;
 use App\Models\EmailTemplate;
 use App\Services\EmailQueueService;
-use App\Services\RadiusQueueService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
@@ -18,21 +17,6 @@ use Exception;
 
 class AutoDisconnectService
 {
-    /**
-     * Billing-day disconnection schedule (ported from auto_dc.php).
-     *
-     * Maps today's day-of-month (the scheduled DC day) to the Billing Day of the
-     * accounts that should be disconnected on that day. Auto disconnect only runs
-     * on the days present as keys here; any other day is a no-op.
-     */
-    private const DC_DAY_MAP = [
-        10 => 30,
-        15 => 5,
-        22 => 12,
-        25 => 15,
-        30 => 20,
-    ];
-
     private $logName = 'Auto_DC';
     private $radiusService;
     private $smsService;
@@ -79,72 +63,39 @@ class AutoDisconnectService
                 throw new Exception("Billing configuration not found");
             }
 
+            $dcActualOffset = $config->disconnection_day ?? 4;
             $dcFee = $config->disconnection_fee ?? 0.00;
-
-            // Billing-day disconnection schedule (ported from auto_dc.php):
-            // Auto disconnect only runs on scheduled DC days, and on each of those
-            // days it targets accounts whose Billing Day maps to today.
-            $currentDay = (int) Carbon::today()->day;
-            $targetBillingDay = self::DC_DAY_MAP[$currentDay] ?? null;
-
+            $targetDate = Carbon::today()->subDays($dcActualOffset)->format('Y-m-d');
+            
+            $this->writeLog("[CONFIG] Disconnection Day Offset: {$dcActualOffset} days");
             $this->writeLog("[CONFIG] Disconnection Fee: ₱" . number_format($dcFee, 2));
-            $this->writeLog("[CONFIG] Current Day: {$currentDay}");
-
-            if ($targetBillingDay === null) {
-                $this->writeLog("[INFO] Today (Day {$currentDay}) is not a scheduled DC day. Skipping auto disconnect.");
-                $endTime = Carbon::now();
-                $duration = $endTime->diffInSeconds($startTime);
-                $this->writeLog("");
-                $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
-                $this->writeLog("║         AUTO DISCONNECTION COMPLETE (No Actions)               ║");
-                $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
-                $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
-                $this->writeLog("Duration: {$duration} second(s)");
-                $this->writeLog("");
-
-                $this->releaseLock();
-                return [
-                    'success' => true,
-                    'processed' => 0,
-                    'skipped' => 0,
-                    'errors' => [],
-                    'duration' => $duration
-                ];
-            }
-
-            $this->writeLog("[CONFIG] DC Triggered: Today is Day {$currentDay}. Target Billing Day is {$targetBillingDay}.");
+            $this->writeLog("[CONFIG] Target Due Date: {$targetDate}");
             $this->writeLog("");
 
-            // Find Active accounts on the target Billing Day that still owe money
-            // (latest invoice Unpaid/Partial), mirroring the auto_dc.php selection.
-            $this->writeLog("[QUERY] Searching for accounts due for disconnection...");
-
-            // 1. Active accounts whose Billing Day maps to today
-            $activeStatusId = DB::table('billing_status')->where('status_name', 'Active')->value('id');
-            $targetAccountNos = DB::table('billing_accounts')
-                ->where('billing_day', $targetBillingDay)
-                ->when($activeStatusId, fn ($query) => $query->where('billing_status_id', $activeStatusId))
-                ->pluck('account_no');
-
-            // 2. Latest invoice per matching account, kept only if Unpaid/Partial
+            // Fetch ONLY the latest invoice for each account and check if IT is overdue
+            $this->writeLog("[QUERY] Searching for latest overdue invoices...");
+            
+            // 1. Get the IDs of the absolute latest invoice for every account
             $latestInvoiceIds = DB::table('invoices')
                 ->select(DB::raw('MAX(id) as id'))
-                ->whereIn('account_no', $targetAccountNos)
                 ->groupBy('account_no')
                 ->pluck('id');
 
+            // 2. Fetch those specific latest invoices and filter by EXACT disconnection day
+            // Logic: Due Date + Offset == Today (calculated as Due Date == Today - Offset)
             $invoices = Invoice::with(['billingAccount.customer', 'billingAccount.technicalDetails'])
                 ->whereIn('id', $latestInvoiceIds)
                 ->whereIn('status', ['Unpaid', 'Partial'])
+                ->whereDate('due_date', $targetDate) 
                 ->get();
 
             $totalCount = $invoices->count();
-            $this->writeLog("[RESULT] Found {$totalCount} account(s) on Billing Day {$targetBillingDay} with an unpaid/partial invoice");
+            $this->writeLog("[RESULT] Found {$totalCount} account(s) where (Due Date: {$targetDate} + Offset: {$dcActualOffset}) matches Today");
             $this->writeLog("");
 
             if ($totalCount === 0) {
                 $this->writeLog("[INFO] No invoices to process for disconnection today.");
-                $this->writeLog("[INFO] Criteria: Status IN ('Unpaid', 'Partial') AND Billing Day = {$targetBillingDay}");
+                $this->writeLog("[INFO] Criteria: Status IN ('Unpaid', 'Partial') AND Due Date = {$targetDate}");
                 $endTime = Carbon::now();
                 $duration = $endTime->diffInSeconds($startTime);
                 $this->writeLog("");
@@ -179,7 +130,7 @@ class AutoDisconnectService
                 $this->writeLog("");
                 $this->writeLog("[{$counter}/{$totalCount}] ══════════════════════════════════════════════");
                 
-                $result = $this->processDisconnection($invoice);
+                $result = $this->processDisconnection($invoice, $dcActualOffset);
                 
                 if ($result['success']) {
                     $processedCount++;
@@ -251,7 +202,7 @@ class AutoDisconnectService
     /**
      * Process a single disconnection
      */
-    private function processDisconnection(Invoice $invoice): array
+    private function processDisconnection(Invoice $invoice, int $dcActualOffset): array
     {
         $accountNo = $invoice->account_no;
         $this->writeLog("[ACCOUNT] {$accountNo}");
@@ -305,48 +256,23 @@ class AutoDisconnectService
         // Create transaction to ensure atomicity
         DB::beginTransaction();
         try {
-            // 1. Restrict via RADIUS first (retry 3 times, then queue)
+            // 1. Restrict via RADIUS first
             $this->writeLog("  [RADIUS] Initiating restriction...");
-            $radiusParams = [
+            $restrictResult = $this->radiusService->restrictedUser([
                 'username' => $username,
                 'accountNumber' => $accountNo,
                 'remarks' => 'Auto DC',
                 'updatedBy' => 'System'
-            ];
-            $radiusSuccess = false;
-            $lastRadiusError = '';
-            for ($attempt = 1; $attempt <= 3; $attempt++) {
-                try {
-                    $restrictResult = $this->radiusService->restrictedUser($radiusParams);
-                    if (($restrictResult['status'] ?? '') === 'success') {
-                        $radiusSuccess = true;
-                        $this->writeLog("  [RADIUS] ✓ Successfully restricted on attempt {$attempt}");
-                        break;
-                    }
-                    $lastRadiusError = $restrictResult['message'] ?? 'Unknown RADIUS error';
-                    $this->writeLog("  [RADIUS] ✗ Attempt {$attempt}/3 failed: {$lastRadiusError}");
-                } catch (\Exception $radEx) {
-                    $lastRadiusError = $radEx->getMessage();
-                    $this->writeLog("  [RADIUS] ✗ Attempt {$attempt}/3 exception: {$lastRadiusError}");
-                }
-                if ($attempt < 3) sleep(2);
-            }
+            ]);
 
-            if (!$radiusSuccess) {
-                $this->writeLog("  [RADIUS] ✗ All 3 attempts failed. Queuing for retry.");
-                \Log::channel('radiusrelated')->error('[AUTO DC RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $lastRadiusError);
-                // We no longer throw an exception and rollback. We let the DB transaction commit so the user is marked as Inactive locally.
-                $this->queueRadiusRetry([
-                    'organization_id' => $billingAccount->organization_id ?? null,
-                    'source_type' => 'auto_disconnect',
-                    'source_id' => $invoice->id,
-                    'account_no' => $accountNo,
-                    'operation' => 'restricted_user',
-                    'params' => $radiusParams,
-                    'last_error' => $lastRadiusError,
-                    'created_by' => 'System',
-                ]);
+            if ($restrictResult['status'] !== 'success') {
+                $reason = $restrictResult['message'] ?? 'Unknown RADIUS error';
+                $this->writeLog("  [CRITICAL] RADIUS failure: {$reason}. STOPPING ENTIRE PROCESS.");
+                \Log::channel('radiusrelated')->error('[AUTO DC RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $reason);
+                DB::rollBack();
+                throw new Exception("CRITICAL RADIUS FAILURE: {$reason}");
             }
+            $this->writeLog("  [RADIUS] ✓ Successfully restricted");
 
             // 2. Apply disconnection fee if configured
             $config = BillingConfig::first();
@@ -456,194 +382,6 @@ class AutoDisconnectService
             }
             
             throw $e;
-        }
-    }
-
-    /**
-     * Apply delayed Grace Period charges (ported from auto_dc.php).
-     *
-     * For every account that was auto-disconnected EXACTLY 7 days ago and is still
-     * Inactive/Pullout, charge a pro-rated slice of the plan price to the oldest open
-     * invoice and the account balance. The algorithm mirrors auto_dc.php; only the
-     * table/column names are mapped onto this database's schema.
-     */
-    public function processGracePeriodCharge(): array
-    {
-        $this->writeLog("");
-        $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
-        $this->writeLog("║         STARTING GRACE PERIOD CHARGE PROCESS                   ║");
-        $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
-        $startTime = Carbon::now();
-        $this->writeLog("Start Time: " . $startTime->format('Y-m-d H:i:s'));
-        $this->writeLog("");
-
-        try {
-            $config = BillingConfig::first();
-
-            if (!$config) {
-                $this->writeLog("[ERROR] Billing configuration not found");
-                throw new Exception("Billing configuration not found");
-            }
-
-            // Days worth of plan to charge (mirrors auto_dc.php CONF_DC_ACTUAL_OFFSET, default 10)
-            $daysToCharge = $config->disconnection_day ?? 10;
-
-            // Look back EXACTLY 7 days to the original auto disconnection
-            $targetDate = Carbon::today()->subDays(7)->format('Y-m-d');
-
-            $this->writeLog("[CONFIG] Grace Period Days to Charge: {$daysToCharge}");
-            $this->writeLog("[CONFIG] Target DC Date (7 days ago): {$targetDate}");
-            $this->writeLog("");
-
-            $this->writeLog("[QUERY] Searching for accounts auto-disconnected on {$targetDate}...");
-            $logs = DB::table('disconnected_logs')
-                ->whereDate('created_at', $targetDate)
-                ->where('remarks', 'like', '%Auto DC%')
-                ->get();
-
-            $totalCount = $logs->count();
-            $this->writeLog("[RESULT] Found {$totalCount} disconnection log(s) eligible for Grace Period review");
-            $this->writeLog("");
-
-            $chargedCount = 0;
-            $skippedCount = 0;
-            $errors = [];
-            $counter = 0;
-
-            foreach ($logs as $log) {
-                $counter++;
-                $this->writeLog("");
-                $this->writeLog("[{$counter}/{$totalCount}] ══════════════════════════════════════════════");
-
-                $billingAccount = BillingAccount::with(['plan', 'billingStatus'])->find($log->account_id);
-                if (!$billingAccount) {
-                    $this->writeLog("  [SKIP] Billing account not found for log ID {$log->id}");
-                    $skippedCount++;
-                    continue;
-                }
-
-                $accountNo = $billingAccount->account_no;
-                $this->writeLog("[ACCOUNT] {$accountNo}");
-
-                // Only charge accounts that are still Inactive or Pullout (skip if reconnected)
-                $statusName = $billingAccount->billingStatus ? $billingAccount->billingStatus->status_name : '';
-                if (!in_array($statusName, ['Inactive', 'Pullout'])) {
-                    $this->writeLog("  [SKIP] Status is '{$statusName}' (not Inactive/Pullout) - user likely reconnected");
-                    $skippedCount++;
-                    continue;
-                }
-
-                $planPrice = floatval($billingAccount->plan->price ?? 0);
-                if ($planPrice <= 0) {
-                    $this->writeLog("  [SKIP] Plan price is zero or unavailable");
-                    $skippedCount++;
-                    continue;
-                }
-
-                $dailyRate = $planPrice / 30;
-                $chargeAmount = round($dailyRate * $daysToCharge, 2);
-                $this->writeLog("  [INFO] Plan Price: ₱" . number_format($planPrice, 2) . " | Daily Rate: ₱" . number_format($dailyRate, 2));
-                $this->writeLog("  [INFO] Grace Period Charge ({$daysToCharge} days): ₱" . number_format($chargeAmount, 2));
-
-                // Apply the charge to the oldest still-open invoice
-                $targetInvoice = Invoice::where('account_no', $accountNo)
-                    ->whereIn('status', ['Unpaid', 'Partial'])
-                    ->orderBy('due_date', 'asc')
-                    ->first();
-
-                DB::beginTransaction();
-                try {
-                    // 1. Add to the invoice (Service Charge, Total, and Balance)
-                    if ($targetInvoice) {
-                        $newServiceCharge = floatval($targetInvoice->service_charge ?? 0) + $chargeAmount;
-                        $newTotalAmount = floatval($targetInvoice->total_amount ?? 0) + $chargeAmount;
-                        $newInvoiceBalance = floatval($targetInvoice->invoice_balance ?? 0) + $chargeAmount;
-
-                        DB::table('invoices')
-                            ->where('id', $targetInvoice->id)
-                            ->update([
-                                'service_charge' => $newServiceCharge,
-                                'total_amount' => $newTotalAmount,
-                                'invoice_balance' => $newInvoiceBalance,
-                                'updated_by' => 'System_GP',
-                                'updated_at' => Carbon::now()
-                            ]);
-                        $this->writeLog("  [INVOICE] Added Grace Period charge to Invoice ID {$targetInvoice->id}");
-                    } else {
-                        $this->writeLog("  [INVOICE] Warning: No open invoice found. Adding to balance only.");
-                    }
-
-                    // 2. Add to the account balance
-                    $newBalance = floatval($billingAccount->account_balance) + $chargeAmount;
-                    DB::table('billing_accounts')
-                        ->where('id', $billingAccount->id)
-                        ->update([
-                            'account_balance' => $newBalance,
-                            'updated_by' => 'System_GP',
-                            'updated_at' => Carbon::now()
-                        ]);
-
-                    DB::commit();
-                    $chargedCount++;
-                    $this->writeLog("  [COMPLETE] Applied Grace Period charge for {$accountNo}. New Balance: ₱" . number_format($newBalance, 2));
-                } catch (Throwable $e) {
-                    DB::rollBack();
-                    $this->writeLog("  [ERROR] Failed to charge Grace Period for {$accountNo}: " . $e->getMessage());
-                    $errors[] = "Account {$accountNo}: " . $e->getMessage();
-                    $skippedCount++;
-                }
-            }
-
-            $endTime = Carbon::now();
-            $duration = $endTime->diffInSeconds($startTime);
-
-            $this->writeLog("");
-            $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
-            $this->writeLog("║         GRACE PERIOD CHARGE COMPLETE                           ║");
-            $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
-            $this->writeLog("Summary:");
-            $this->writeLog("  • Total Found: {$totalCount}");
-            $this->writeLog("  • Charged: {$chargedCount}");
-            $this->writeLog("  • Skipped: {$skippedCount}");
-            $this->writeLog("  • Errors: " . count($errors));
-            $this->writeLog("  • Duration: {$duration} second(s)");
-            $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
-            $this->writeLog("");
-
-            if (!empty($errors)) {
-                $this->writeLog("[ERROR DETAILS]");
-                foreach ($errors as $error) {
-                    $this->writeLog("  × {$error}");
-                }
-                $this->writeLog("");
-            }
-
-            return [
-                'success' => true,
-                'charged' => $chargedCount,
-                'skipped' => $skippedCount,
-                'errors' => $errors,
-                'duration' => $duration
-            ];
-
-        } catch (Throwable $e) {
-            $endTime = Carbon::now();
-            $duration = $endTime->diffInSeconds($startTime);
-
-            $this->writeLog("");
-            $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
-            $this->writeLog("║         CRITICAL ERROR                                         ║");
-            $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
-            $this->writeLog("[CRITICAL] " . $e->getMessage());
-            $this->writeLog("[TRACE] " . $e->getTraceAsString());
-            $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
-            $this->writeLog("Duration: {$duration} second(s)");
-            $this->writeLog("");
-
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
         }
     }
 
@@ -784,46 +522,21 @@ class AutoDisconnectService
                     $this->createPulloutRequest($billingAccount, $pulloutOffset);
                     $this->writeLog("  [CREATE] ✓ Pullout service order created");
 
-                    // 2. Restrict user via RADIUS (retry 3 times, then queue)
+                    // 2. Restrict user via RADIUS (also creates disconnected_logs entry)
                     $this->writeLog("  [RADIUS] Restricting user via RADIUS...");
-                    $radiusParams = [
+                    $restrictResult = $this->radiusService->restrictedUser([
                         'username' => $username,
                         'accountNumber' => $accountNo,
                         'remarks' => 'Pullout',
                         'updatedBy' => 'System'
-                    ];
-                    $radiusSuccess = false;
-                    $lastRadiusError = '';
-                    for ($attempt = 1; $attempt <= 3; $attempt++) {
-                        try {
-                            $restrictResult = $this->radiusService->restrictedUser($radiusParams);
-                            if (($restrictResult['status'] ?? '') === 'success') {
-                                $radiusSuccess = true;
-                                $this->writeLog("  [RADIUS] ✓ Successfully restricted on attempt {$attempt}");
-                                break;
-                            }
-                            $lastRadiusError = $restrictResult['message'] ?? 'Unknown';
-                            $this->writeLog("  [RADIUS] ✗ Attempt {$attempt}/3 failed: {$lastRadiusError}");
-                        } catch (\Exception $radEx) {
-                            $lastRadiusError = $radEx->getMessage();
-                            $this->writeLog("  [RADIUS] ✗ Attempt {$attempt}/3 exception: {$lastRadiusError}");
-                        }
-                        if ($attempt < 3) sleep(2);
-                    }
+                    ]);
 
-                    if (!$radiusSuccess) {
-                        $this->writeLog("  [RADIUS] ✗ All 3 attempts failed. Queuing for retry.");
-                        \Log::channel('radiusrelated')->error('[AUTO PULLOUT RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $lastRadiusError);
-                        $this->queueRadiusRetry([
-                            'organization_id' => $billingAccount->organization_id ?? null,
-                            'source_type' => 'auto_pullout',
-                            'source_id' => $billingAccount->id,
-                            'account_no' => $accountNo,
-                            'operation' => 'restricted_user',
-                            'params' => $radiusParams,
-                            'last_error' => $lastRadiusError,
-                            'created_by' => 'System',
-                        ]);
+                    if ($restrictResult['status'] === 'success') {
+                        $this->writeLog("  [RADIUS] ✓ Successfully restricted");
+                    } else {
+                        $reason = $restrictResult['message'] ?? 'Unknown';
+                        $this->writeLog("  [RADIUS] ✗ Restrict failed: " . $reason);
+                        \Log::channel('radiusrelated')->error('[AUTO PULLOUT RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $reason);
                     }
 
                     // 3. Update billing status to Inactive
@@ -1105,7 +818,7 @@ class AutoDisconnectService
 
     private function replaceGlobalVariables(string $message, string $name = '', string $accountNo = '', string $balance = ''): string
     {
-        $portalUrl = 'sync.akmiis.com';
+        $portalUrl = 'sync.atssfiber.ph';
         $brandName = \DB::table('form_ui')->value('brand_name') ?? 'Your ISP';
 
         $message = str_replace('{{portal_url}}', $portalUrl, $message);
@@ -1118,29 +831,6 @@ class AutoDisconnectService
         if ($balance) $message = str_replace('{{balance}}', $balance, $message);
 
         return $message;
-    }
-
-    /**
-     * Queue a failed RADIUS operation for automatic retry.
-     *
-     * Wraps RadiusQueueService::queue so a failure of the FALLBACK itself (e.g. the
-     * insert silently failing) is logged loudly instead of disappearing — the queue is
-     * the last line of defense, so it must never fail quietly.
-     */
-    private function queueRadiusRetry(array $data): void
-    {
-        $queuedId = RadiusQueueService::queue($data);
-
-        if ($queuedId) {
-            $this->writeLog("  [QUEUE] ✓ RADIUS operation queued for retry (ID: {$queuedId}) for " . ($data['account_no'] ?? 'N/A'));
-        } else {
-            $this->writeLog("  [QUEUE] ✗ CRITICAL: RADIUS FAILED and could NOT be queued for " . ($data['account_no'] ?? 'N/A'));
-            \Log::channel('radiusrelated')->error('[AUTO DC/PULLOUT QUEUE FAILURE] RADIUS operation failed AND the queue insert also failed', [
-                'operation'   => $data['operation'] ?? null,
-                'account_no'  => $data['account_no'] ?? null,
-                'source_type' => $data['source_type'] ?? null,
-            ]);
-        }
     }
 
     /**
