@@ -139,7 +139,21 @@ class PppoeUsernameService
 
             case 'port':
                 return strtoupper($customerData['port'] ?? '');
-            
+
+            case 'date_installed':
+                // Installation date AND time as a digits-only string (YYYYMMDDHHMMSS),
+                // e.g. "2026-07-10 14:30:45" => "20260710143045". All separators
+                // (dashes, colons, spaces) are stripped so it is username-safe.
+                $dateInstalled = $customerData['date_installed'] ?? null;
+                if (empty($dateInstalled)) {
+                    return '';
+                }
+                try {
+                    return \Carbon\Carbon::parse($dateInstalled)->format('YmdHis');
+                } catch (\Throwable $e) {
+                    return '';
+                }
+
             case 'random_4_digits':
                 return str_pad(random_int(0, 9999), 4, '0', STR_PAD_LEFT);
             

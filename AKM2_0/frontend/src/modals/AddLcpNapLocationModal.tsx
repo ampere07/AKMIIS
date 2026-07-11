@@ -566,8 +566,37 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
 
       clearInterval(progressInterval);
       setShowLoadingModal(false);
+
+      // Prefer the backend's message (e.g. duplicate LCPNAP) over the generic axios message
+      const responseData = error?.response?.data;
+      let message: string | undefined = responseData?.message || responseData?.error;
+
+      // If the backend returned field validation errors, surface the first one
+      if (responseData?.errors) {
+        const fieldErrors = responseData.errors as Record<string, string[] | string>;
+        const firstField = Object.values(fieldErrors)[0];
+        const firstMessage = Array.isArray(firstField) ? firstField[0] : firstField;
+        if (firstMessage) {
+          message = message && message !== 'Validation failed' ? message : firstMessage;
+        }
+
+        // Flag a duplicate name against the LCPNAP field so it also highlights inline
+        if (fieldErrors.lcpnap_name) {
+          const lcpnapErr = fieldErrors.lcpnap_name;
+          setErrors(prev => ({
+            ...prev,
+            lcpnap_name: Array.isArray(lcpnapErr) ? lcpnapErr[0] : lcpnapErr,
+          }));
+        }
+      }
+
+      // Duplicate LCPNAP comes back as a plain message with a 422 status
+      if (error?.response?.status === 422 && message?.toLowerCase().includes('already exists')) {
+        setErrors(prev => ({ ...prev, lcpnap_name: message! }));
+      }
+
       setResultType('error');
-      setResultMessage(error.message || 'Failed to save LCP/NAP location');
+      setResultMessage(message || error.message || 'Failed to save LCP/NAP location');
       setShowResultModal(true);
     } finally {
       setLoading(false);

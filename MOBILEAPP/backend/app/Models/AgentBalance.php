@@ -18,7 +18,6 @@ class AgentBalance extends Model
         'incentives',
         'Bonus',
         'bonus',
-        'achievement',
         'quota',
         'incentives_value',
         'remarks',

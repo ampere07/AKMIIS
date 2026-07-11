@@ -237,21 +237,31 @@ class RadiusQueueService
         $password = $params['password'] ?? '';
         $group = $params['group'] ?? '';
         $organizationId = $params['organization_id'] ?? null;
+        $city = $params['city'] ?? null;
 
         if (empty($username) || empty($password)) {
             $this->writeLog("  [ERROR] create_user: Missing username or password");
             return false;
         }
 
-        // Get RADIUS config
-        $radiusConfigs = $organizationId
-            ? RadiusConfig::where('organization_id', $organizationId)->orderBy('id')->get()
-            : RadiusConfig::whereNull('organization_id')->orderBy('id')->get();
-            
-        if ($radiusConfigs->isEmpty() && $organizationId) {
-            // Fallback to null organization
-            $radiusConfigs = RadiusConfig::whereNull('organization_id')->orderBy('id')->get();
+        $resolver = app(RadiusServerResolver::class);
+
+        // A create places a NEW account, so pick the target server the same way
+        // JobOrderController does — by the customer's city — when we know it. This keeps
+        // the account on exactly one server rather than creating it on all of them.
+        if (!empty($city)) {
+            $config = $resolver->resolveForCity($city, $organizationId);
+            if (!$config) {
+                $this->writeLog("  [ERROR] create_user: No RADIUS config found for city '{$city}'");
+                return false;
+            }
+            $this->writeLog("  [RADIUS] create_user targeting city-mapped server (Config #{$config->id} | {$config->ip}) for '{$username}'");
+            return $this->putCreateUser($config, $resolver, $username, $password, $group);
         }
+
+        // No city recorded on the queued item: fall back to the ordered configs and stop
+        // on the first server that accepts the create (never creating on more than one).
+        $radiusConfigs = $resolver->orderedConfigs($organizationId);
 
         if ($radiusConfigs->isEmpty()) {
             $this->writeLog("  [ERROR] create_user: No RADIUS config found");
@@ -259,37 +269,47 @@ class RadiusQueueService
         }
 
         foreach ($radiusConfigs as $config) {
-            $protocols = ['https', 'http'];
-            
-            foreach ($protocols as $protocol) {
-                $radiusUrl = $protocol . '://' . $config->ip . ':' . $config->port . '/rest/user-manage/user';
-                
-                $this->writeLog("  [RADIUS] PUT {$radiusUrl} | User: {$username} | Group: {$group}");
-
-                try {
-                    $response = Http::withOptions(['verify' => false, 'timeout' => 5])
-                        ->withBasicAuth($config->username, $config->password)
-                        ->put($radiusUrl, [
-                            'name'     => $username,
-                            'group'    => $group,
-                            'password' => $password,
-                        ]);
-
-                    $statusCode = $response->status();
-
-                    if ($statusCode === 204 || $response->successful()) {
-                        $this->writeLog("  [RADIUS] ✓ create_user SUCCESS (HTTP {$statusCode}) via {$protocol}");
-                        return true;
-                    }
-
-                    $this->writeLog("  [RADIUS] ✗ create_user FAILED (HTTP {$statusCode}) via {$protocol} - " . $response->body());
-                } catch (\Exception $e) {
-                    $this->writeLog("  [RADIUS] ✗ create_user EXCEPTION via {$protocol}: " . $e->getMessage());
-                }
+            if ($this->putCreateUser($config, $resolver, $username, $password, $group)) {
+                return true;
             }
         }
-        
+
         $this->writeLog("  [ERROR] create_user failed on all endpoints.");
+        return false;
+    }
+
+    /**
+     * PUT a create_user request to a single RADIUS config, trying the configured protocol
+     * first then the alternate. Returns true on the first successful server.
+     */
+    private function putCreateUser(RadiusConfig $config, RadiusServerResolver $resolver, string $username, string $password, string $group): bool
+    {
+        foreach ($resolver->baseUrlsFor($config) as $baseUrl) {
+            $radiusUrl = $baseUrl . '/rest/user-manage/user';
+            $this->writeLog("  [RADIUS] PUT {$radiusUrl} | User: {$username} | Group: {$group}");
+
+            try {
+                $response = Http::withOptions(['verify' => false, 'timeout' => 5])
+                    ->withBasicAuth($config->username, $config->password)
+                    ->put($radiusUrl, [
+                        'name'     => $username,
+                        'group'    => $group,
+                        'password' => $password,
+                    ]);
+
+                $statusCode = $response->status();
+
+                if ($statusCode === 204 || $response->successful()) {
+                    $this->writeLog("  [RADIUS] ✓ create_user SUCCESS (HTTP {$statusCode}) at {$baseUrl}");
+                    return true;
+                }
+
+                $this->writeLog("  [RADIUS] ✗ create_user FAILED (HTTP {$statusCode}) at {$baseUrl} - " . $response->body());
+            } catch (\Exception $e) {
+                $this->writeLog("  [RADIUS] ✗ create_user EXCEPTION at {$baseUrl}: " . $e->getMessage());
+            }
+        }
+
         return false;
     }
 

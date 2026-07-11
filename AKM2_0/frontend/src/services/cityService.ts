@@ -25,6 +25,7 @@ export interface Borough {
   id: number;
   city_id: number;
   name: string;
+  radius_config_id?: number | null;
   code?: string;
   description?: string;
   is_active?: boolean;
@@ -34,6 +35,34 @@ export interface Borough {
   modified_by?: string;
   modified_at?: string;
 }
+
+export interface RadiusConfigOption {
+  id: number;
+  ssl_type?: string;
+  ip?: string;
+  port?: string;
+  username?: string;
+}
+
+// Get available RADIUS configurations (used as options when assigning to a barangay)
+export const getRadiusConfigs = async (): Promise<RadiusConfigOption[]> => {
+  try {
+    const response = await apiClient.get('/radius-config');
+    const data = response.data as any;
+
+    if (Array.isArray(data)) {
+      return data;
+    }
+
+    if (data.success && Array.isArray(data.data)) {
+      return data.data;
+    }
+
+    return [];
+  } catch (error: any) {
+    return [];
+  }
+};
 
 export interface LocationDetail {
   id: number;
@@ -160,7 +189,7 @@ export const createCity = async (data: { name: string; region_id: number; code?:
 };
 
 // Create a new barangay with city foreign key
-export const createBarangay = async (data: { name: string; city_id: number; code?: string; description?: string; modified_by?: string; is_active?: boolean; organization_id?: number | null }): Promise<Borough> => {
+export const createBarangay = async (data: { name: string; city_id: number; radius_config_id?: number | null; code?: string; description?: string; modified_by?: string; is_active?: boolean; organization_id?: number | null }): Promise<Borough> => {
   try {
     const response = await apiClient.post<ApiResponse<Borough>>('/barangays', data);
     if (response.data.success && response.data.data) {
@@ -216,7 +245,7 @@ export const updateCity = async (id: number, data: { name: string; modified_by?:
 };
 
 // Update a barangay
-export const updateBarangay = async (id: number, data: { name: string; modified_by?: string; is_active?: boolean }): Promise<Borough> => {
+export const updateBarangay = async (id: number, data: { name: string; radius_config_id?: number | null; modified_by?: string; is_active?: boolean }): Promise<Borough> => {
   try {
     const response = await apiClient.put<ApiResponse<Borough>>(`/barangays/${id}`, data);
     if (response.data.success && response.data.data) {

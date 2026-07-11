@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "jsEngine": "hermes",
     "splash": {
-      "image": "./assets/applogo.png",
+      "image": "./assets/logo2.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
@@ -75,8 +75,8 @@
       [
         "expo-media-library",
         {
-          "photosPermission": "Allow ATSS to access your photos to select job order images.",
-          "savePhotosPermission": "Allow ATSS to save taken photos to your phone gallery."
+          "photosPermission": "Allow AKM to access your photos to select job order images.",
+          "savePhotosPermission": "Allow AKM to save taken photos to your phone gallery."
         }
       ],
       [

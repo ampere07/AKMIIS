@@ -5,115 +5,109 @@
     <title>Summary Report</title>
     <style>
         body {
-            font-family: 'Helvetica', 'Arial', sans-serif;
-            color: #333;
-            line-height: 1.5;
+            font-family: 'Helvetica Neue', 'Helvetica', 'Arial', sans-serif;
+            color: #1e293b;
+            line-height: 1.4;
             margin: 0;
-            padding: 20px;
+            padding: 10px;
         }
         .header {
             text-align: center;
             border-bottom: 2px solid #7c3aed;
-            padding-bottom: 20px;
-            margin-bottom: 30px;
+            padding-bottom: 12px;
+            margin-bottom: 20px;
         }
         .header h1 {
             color: #7c3aed;
             margin: 0;
-            font-size: 28px;
+            font-size: 24px;
             text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
         .header p {
-            margin: 5px 0 0;
-            color: #666;
-            font-size: 14px;
+            margin: 4px 0 0;
+            color: #64748b;
+            font-size: 12px;
         }
         .info-section {
-            margin-bottom: 25px;
+            margin-bottom: 20px;
             background: #f8fafc;
-            padding: 15px;
-            border-radius: 8px;
+            padding: 12px;
+            border-radius: 6px;
             border: 1px solid #e2e8f0;
         }
         .info-grid {
             width: 100%;
         }
         .info-grid td {
-            padding: 5px 0;
-            font-size: 13px;
+            padding: 4px 0;
+            font-size: 11px;
+            vertical-align: top;
         }
         .label {
             font-weight: bold;
-            color: #4b5563;
-            width: 120px;
+            color: #475569;
+            width: 100px;
         }
         .value {
-            color: #1f2937;
+            color: #0f172a;
         }
-        .section-title {
-            font-size: 18px;
-            color: #1f2937;
-            margin: 30px 0 15px;
-            padding-left: 10px;
-            border-left: 4px solid #7c3aed;
-        }
-        .metrics-grid {
+        
+        .metrics-table {
             width: 100%;
             border-collapse: collapse;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
+            font-size: 11px;
         }
-        .metrics-grid th, .metrics-grid td {
+        .metrics-table th, .metrics-table td {
+            padding: 6px 10px;
+            border: 1px solid #e2e8f0;
             text-align: left;
-            padding: 12px 15px;
-            border-bottom: 1px solid #e2e8f0;
         }
-        .metrics-grid th {
-            background-color: #f1f5f9;
-            color: #475569;
-            font-size: 12px;
+        .metrics-table th {
+            background-color: #7c3aed;
+            color: white;
+            font-weight: bold;
             text-transform: uppercase;
+            font-size: 10px;
             letter-spacing: 0.05em;
         }
-        .metrics-grid td {
-            font-size: 14px;
+        .metrics-table .number {
+            text-align: right;
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+        }
+        .section-header {
+            background-color: #f1f5f9;
+            color: #1e293b;
+            font-weight: bold;
+            font-size: 11px;
+            padding: 8px 10px;
+            border-bottom: 2px solid #cbd5e1;
+        }
+        .indent {
+            padding-left: 25px !important;
+            color: #475569;
         }
         .highlight {
             font-weight: bold;
-            color: #7c3aed;
+            background-color: #faf5ff;
         }
+        
         .footer {
-            margin-top: 50px;
+            margin-top: 30px;
             text-align: center;
-            font-size: 11px;
+            font-size: 9px;
             color: #94a3b8;
             border-top: 1px solid #e2e8f0;
-            padding-top: 20px;
-        }
-        .summary-box {
-            background-color: #7c3aed;
-            color: white;
-            padding: 20px;
-            border-radius: 12px;
-            margin-bottom: 30px;
-            text-align: center;
-        }
-        .summary-box h2 {
-            margin: 0 0 10px;
-            font-size: 14px;
-            opacity: 0.9;
-            text-transform: uppercase;
-        }
-        .summary-box .grand-total {
-            font-size: 36px;
-            font-weight: bold;
-            margin: 0;
+            padding-top: 12px;
         }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>ATSS FIBER</h1>
-        <p>Managed Internet Services - Summary Report</p>
+        <h1>SYNC</h1>
+        <p>Reporting</p>
     </div>
 
     <div class="info-section">
@@ -122,7 +116,7 @@
                 <td class="label">Report Name:</td>
                 <td class="value">{{ $reportName }}</td>
                 <td class="label">Generated:</td>
-                <td class="value">{{ now()->format('F d, Y h:i A') }}</td>
+                <td class="value">{{ $generatedAt }}</td>
             </tr>
             <tr>
                 <td class="label">Date Range:</td>
@@ -133,105 +127,248 @@
         </table>
     </div>
 
-    <div class="summary-box">
-        <h2>Total Sales Value</h2>
-        <p class="grand-total">₱{{ number_format($metrics['Sales Total (Value)'], 2) }}</p>
-    </div>
-
-    <div class="section-title">Financial Summary</div>
-    <table class="metrics-grid">
+    <table class="metrics-table">
         <thead>
             <tr>
-                <th>Category</th>
-                <th>Count</th>
-                <th>Total Value</th>
+                <th style="width: 70%;">Report</th>
+                <th style="width: 30%; text-align: right;">Value</th>
             </tr>
         </thead>
         <tbody>
+            <!-- ─── Financial Status ─── -->
             <tr>
-                <td>Manual Transactions</td>
-                <td>{{ number_format($metrics['Transactions Count']) }}</td>
-                <td>₱{{ number_format($metrics['Transactions Total Received Payment'], 2) }}</td>
+                <td colspan="2" class="section-header">Invoices &amp; Billing</td>
             </tr>
             <tr>
-                <td>Payment Portal</td>
-                <td>{{ number_format($metrics['Payment Portal Logs Count']) }}</td>
-                <td>₱{{ number_format($metrics['Payment Portal Logs Total Amount'], 2) }}</td>
+                <td>Total Unpaid Invoices (Count)</td>
+                <td class="number">{{ number_format($metrics['Total Unpaid Invoices (Count)'] ?? 0) }}</td>
             </tr>
-            <tr style="background-color: #f8fafc; font-weight: bold;">
-                <td>Total Revenue</td>
-                <td>{{ number_format($metrics['Sales Total (Count)']) }}</td>
-                <td class="highlight">₱{{ number_format($metrics['Sales Total (Value)'], 2) }}</td>
+            <tr class="highlight">
+                <td>Total Unpaid Invoices (Amount)</td>
+                <td class="number">PHP {{ number_format($metrics['Total Unpaid Invoices (Amount)'] ?? 0, 2) }}</td>
             </tr>
-        </tbody>
-    </table>
+            <tr>
+                <td>Total Paid Invoices (Count)</td>
+                <td class="number">{{ number_format($metrics['Total Paid Invoices (Count)'] ?? 0) }}</td>
+            </tr>
+            <tr class="highlight">
+                <td>Total Paid Invoices (Amount)</td>
+                <td class="number">PHP {{ number_format($metrics['Total Paid Invoices (Amount)'] ?? 0, 2) }}</td>
+            </tr>
 
-    <div class="section-title">Operational metrics</div>
-    <table class="metrics-grid">
-        <thead>
+            <!-- ─── Payment Portal & Transactions ─── -->
             <tr>
-                <th>Department</th>
-                <th>Metric</th>
-                <th>Value</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>Inventory</td>
-                <td>Good Stock Items</td>
-                <td>{{ number_format($metrics['Good Stock Count']) }}</td>
+                <td colspan="2" class="section-header">Payments &amp; Collections</td>
             </tr>
             <tr>
-                <td>Inventory</td>
-                <td style="color: #ef4444;">Low Stock Items</td>
-                <td style="color: #ef4444;">{{ number_format($metrics['Low Stock Count']) }}</td>
+                <td>Payment Portal Logs (Count)</td>
+                <td class="number">{{ number_format($metrics['Payment Portal Logs Count'] ?? 0) }}</td>
+            </tr>
+            <tr class="highlight">
+                <td>Payment Portal Logs Total Amount</td>
+                <td class="number">PHP {{ number_format($metrics['Payment Portal Logs Total Amount'] ?? 0, 2) }}</td>
             </tr>
             <tr>
-                <td>Job Orders</td>
-                <td>Completed (Done)</td>
-                <td>{{ number_format($metrics['Job Orders (Onsite Status = Done)']) }}</td>
+                <td>Transactions Table (Count)</td>
+                <td class="number">{{ number_format($metrics['Transactions Count'] ?? 0) }}</td>
+            </tr>
+            <tr class="highlight">
+                <td>Transactions Table Total Amount</td>
+                <td class="number">PHP {{ number_format($metrics['Transactions Total Amount'] ?? 0, 2) }}</td>
+            </tr>
+            
+            <!-- Payment Methods -->
+            @php
+                $hasPaymentMethods = false;
+                foreach($metrics as $k => $v) {
+                    if(strpos($k, 'Payment Method: ') === 0) {
+                        $hasPaymentMethods = true;
+                        break;
+                    }
+                }
+            @endphp
+            @if($hasPaymentMethods)
+                <tr>
+                    <td colspan="2" class="section-header" style="font-size: 10px; background-color: #f8fafc;">Payment Methods Breakdown</td>
+                </tr>
+                @foreach($metrics as $k => $v)
+                    @if(strpos($k, 'Payment Method: ') === 0)
+                        <tr>
+                            <td class="indent">{{ str_replace('Payment Method: ', '', $k) }}</td>
+                            <td class="number">
+                                @if(strpos($k, '(Amount)') !== false)
+                                    PHP {{ number_format($v, 2) }}
+                                @else
+                                    {{ number_format($v) }}
+                                @endif
+                            </td>
+                        </tr>
+                    @endif
+                @endforeach
+            @endif
+
+            <!-- ─── Pull Out Concern Service Orders ─── -->
+            <tr>
+                <td colspan="2" class="section-header">Pull Out Service Orders</td>
             </tr>
             <tr>
-                <td>Job Orders</td>
-                <td>In Progress</td>
-                <td>{{ number_format($metrics['Job Orders (Onsite Status = In Progress)']) }}</td>
+                <td>Number of Pull Out Concern Service Orders (Total)</td>
+                <td class="number">{{ number_format($metrics['Number of Pull Out Concern Service Orders'] ?? 0) }}</td>
             </tr>
             <tr>
-                <td>Service Orders</td>
-                <td>Resolved Tickets</td>
-                <td>{{ number_format($metrics['Service Orders (Support Status = Resolved)']) }}</td>
+                <td class="indent">In Progress Pullout</td>
+                <td class="number">{{ number_format($metrics['Pull Out In Progress'] ?? 0) }}</td>
             </tr>
             <tr>
-                <td>Service Orders</td>
-                <td>Successful Visits (Done)</td>
-                <td>{{ number_format($metrics['Service Orders (Visit Status = Done)']) }}</td>
+                <td class="indent">Done Pullout</td>
+                <td class="number">{{ number_format($metrics['Pull Out Done'] ?? 0) }}</td>
             </tr>
             <tr>
-                <td>Service Orders</td>
-                <td>Visits In Progress</td>
-                <td>{{ number_format($metrics['Service Orders (Visit Status = In Progress)']) }}</td>
+                <td class="indent">Failed Pullout</td>
+                <td class="number">{{ number_format($metrics['Pull Out Failed'] ?? 0) }}</td>
+            </tr>
+
+            <!-- ─── Job Orders ─── -->
+            <tr>
+                <td colspan="2" class="section-header">Job Orders</td>
             </tr>
             <tr>
-                <td>Service Orders</td>
-                <td>Pullout Requests</td>
-                <td>{{ number_format($metrics['Service Orders (Repair Category = Pullout)']) }}</td>
+                <td>Total Job Orders</td>
+                <td class="number">{{ number_format($metrics['Total Job Orders'] ?? 0) }}</td>
             </tr>
             <tr>
-                <td>Work Orders</td>
-                <td>Completed</td>
-                <td>{{ number_format($metrics['Work Orders (Completed)']) }}</td>
+                <td class="indent">Done</td>
+                <td class="number">{{ number_format($metrics['Job Orders - Done'] ?? 0) }}</td>
             </tr>
             <tr>
-                <td>Work Orders</td>
-                <td>Pending</td>
-                <td>{{ number_format($metrics['Work Orders (Pending)']) }}</td>
+                <td class="indent">In Progress</td>
+                <td class="number">{{ number_format($metrics['Job Orders - In Progress'] ?? 0) }}</td>
             </tr>
+            <tr>
+                <td class="indent">Failed</td>
+                <td class="number">{{ number_format($metrics['Job Orders - Failed'] ?? 0) }}</td>
+            </tr>
+
+            <!-- ─── Service Orders ─── -->
+            <tr>
+                <td colspan="2" class="section-header">Service Orders</td>
+            </tr>
+            <tr>
+                <td>Total Service Orders</td>
+                <td class="number">{{ number_format($metrics['Total Service Orders'] ?? 0) }}</td>
+            </tr>
+            <tr>
+                <td class="indent">Done</td>
+                <td class="number">{{ number_format($metrics['Service Orders - Done'] ?? 0) }}</td>
+            </tr>
+            <tr>
+                <td class="indent">In Progress</td>
+                <td class="number">{{ number_format($metrics['Service Orders - In Progress'] ?? 0) }}</td>
+            </tr>
+            <tr>
+                <td class="indent">Failed</td>
+                <td class="number">{{ number_format($metrics['Service Orders - Failed'] ?? 0) }}</td>
+            </tr>
+            
+            <!-- Service Orders per Concern -->
+            @php
+                $hasConcerns = false;
+                foreach($metrics as $k => $v) {
+                    if(strpos($k, 'Service Orders per Concern: ') === 0) {
+                        $hasConcerns = true;
+                        break;
+                    }
+                }
+            @endphp
+            @if($hasConcerns)
+                <tr>
+                    <td colspan="2" class="section-header" style="font-size: 10px; background-color: #f8fafc;">Service Orders per Concern</td>
+                </tr>
+                @foreach($metrics as $k => $v)
+                    @if(strpos($k, 'Service Orders per Concern: ') === 0)
+                        <tr>
+                            <td class="indent">{{ str_replace('Service Orders per Concern: ', '', $k) }}</td>
+                            <td class="number">{{ number_format($v) }}</td>
+                        </tr>
+                    @endif
+                @endforeach
+            @endif
+
+            <!-- ─── Network Infrastructure ─── -->
+            <tr>
+                <td colspan="2" class="section-header">Network Infrastructure</td>
+            </tr>
+            <tr>
+                <td>Total LCP/NAP Locations</td>
+                <td class="number">{{ number_format($metrics['Total LCP/NAP'] ?? 0) }}</td>
+            </tr>
+
+            <!-- ─── Inventory ─── -->
+            <tr>
+                <td colspan="2" class="section-header">Inventory Status</td>
+            </tr>
+            <tr>
+                <td>Good Stock (Inventory Items)</td>
+                <td class="number">{{ number_format($metrics['Good Stock (Inventory Items)'] ?? 0) }}</td>
+            </tr>
+            <tr style="color: #b91c1c;">
+                <td>Bad Stock / Low Quantity Alerts (Inventory Items)</td>
+                <td class="number">{{ number_format($metrics['Bad Stock (Inventory Items)'] ?? 0) }}</td>
+            </tr>
+
+            <!-- ─── Applications per Barangay ─── -->
+            @php
+                $hasBarangayApps = false;
+                foreach($metrics as $k => $v) {
+                    if(strpos($k, 'Applications: ') === 0) {
+                        $hasBarangayApps = true;
+                        break;
+                    }
+                }
+            @endphp
+            @if($hasBarangayApps)
+                <tr>
+                    <td colspan="2" class="section-header">Total Applications per Barangay</td>
+                </tr>
+                @foreach($metrics as $k => $v)
+                    @if(strpos($k, 'Applications: ') === 0)
+                        <tr>
+                            <td class="indent">{{ str_replace('Applications: ', '', $k) }}</td>
+                            <td class="number">{{ number_format($v) }}</td>
+                        </tr>
+                    @endif
+                @endforeach
+            @endif
+
+            <!-- ─── Online Subscribers per Barangay ─── -->
+            @php
+                $hasBarangayOnline = false;
+                foreach($metrics as $k => $v) {
+                    if(strpos($k, 'Subscribers Online: ') === 0) {
+                        $hasBarangayOnline = true;
+                        break;
+                    }
+                }
+            @endphp
+            @if($hasBarangayOnline)
+                <tr>
+                    <td colspan="2" class="section-header">Online Subscribers per Barangay</td>
+                </tr>
+                @foreach($metrics as $k => $v)
+                    @if(strpos($k, 'Subscribers Online: ') === 0)
+                        <tr>
+                            <td class="indent">{{ str_replace('Subscribers Online: ', '', $k) }}</td>
+                            <td class="number">{{ number_format($v) }}</td>
+                        </tr>
+                    @endif
+                @endforeach
+            @endif
         </tbody>
     </table>
 
     <div class="footer">
-        <p>This report was automatically generated by the ATSS FIBER Management System.</p>
-        <p>&copy; {{ date('Y') }} ATSS FIBER. All rights reserved.</p>
+        <p>This report was automatically generated by the Sync.</p>
+        <p>&copy; {{ date('Y') }} Sync. All rights reserved.</p>
     </div>
 </body>
 </html>

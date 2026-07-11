@@ -1757,25 +1757,30 @@ class JobOrderController extends Controller
 
             $organizationId = $jobOrder->organization_id ?? auth()->user()?->organization_id ?? null;
 
-            // Select the RADIUS server by the customer's city. The account does not exist
-            // on any server yet, so placement is decided deliberately from the city mapping
-            // (see RadiusServerResolver::CITY_SERVER_MAP) rather than by a failover lookup.
+            // Select the RADIUS server from the barangay's assigned radius_config_id.
+            // The account does not exist on any server yet, so placement is decided
+            // deliberately from the barangay configuration — with NO fallback to another
+            // server. If the barangay has no RADIUS config assigned (or it is missing),
+            // we error out instead of silently using a different server.
+            $barangay = $jobOrder->application?->barangay ?? null;
             $city = $jobOrder->application?->city ?? null;
-            $radiusConfig = app(RadiusServerResolver::class)->resolveForCity($city, $organizationId);
+            $radiusConfig = app(RadiusServerResolver::class)->resolveForBarangay($barangay, $city, $organizationId);
 
             if (!$radiusConfig) {
-                \Log::channel('radiusrelated')->error('RADIUS configuration not found in database for JobOrder: ' . $id, [
+                \Log::channel('radiusrelated')->error('RADIUS configuration could not be resolved from barangay for JobOrder: ' . $id, [
                     'job_order_id' => $id,
+                    'barangay'     => $barangay,
                     'city'         => $city,
                 ]);
                 return [
                     'success' => false,
-                    'message' => 'RADIUS configuration not found. Please configure RADIUS settings first.',
+                    'message' => 'No RADIUS server is assigned to this barangay. Please assign a RADIUS Config to the barangay before creating the account.',
                 ];
             }
 
             \Log::channel('radiusrelated')->info('RADIUS server selected for JobOrder account creation', [
                 'job_order_id'     => $id,
+                'barangay'         => $barangay,
                 'city'             => $city,
                 'radius_config_id' => $radiusConfig->id,
                 'radius_ip'        => $radiusConfig->ip,

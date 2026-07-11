@@ -21,26 +21,54 @@ class RadiusStatusSyncService
             'synced' => 0,
             'inserted' => 0,
             'updated' => 0,
+            'skipped' => 0,
             'not_found' => 0,
             'offline' => 0,
             'online' => 0,
             'restricted' => 0,
             'disconnected' => 0,
-            'errors' => 0
+            'errors' => 0,
+            'radius_users_per_config' => [],
+            'radius_sessions_per_config' => [],
+            'duplicate_records' => 0,
+            'unique_records' => 0,
         ];
 
         try {
             // Step 1: Sync billing accounts to online_status quickly (outside of a long transaction)
             $this->syncAccountsToOnlineStatus($stats);
-            
-            $radiusConfigs = RadiusConfig::all();
+
+            // Ordered by id so the labels "Radius Config 1", "Radius Config 2", ... are stable.
+            $radiusConfigs = RadiusConfig::orderBy('id')->get();
             if ($radiusConfigs->isEmpty()) {
                 throw new \Exception('RADIUS configuration not found');
             }
 
-            // Step 2: Fetch RADIUS data (potentially slow I/O)
-            $radiusUsers = $this->fetchRadiusUsers($radiusConfigs);
-            $radiusSessions = $this->fetchRadiusSessions($radiusConfigs);
+            // Step 2: Fetch from EVERY radius config, merged and de-duplicated by username.
+            // Each server is queried independently — one being down does not stop the others.
+            $usersReport    = $this->fetchRadiusUsers($radiusConfigs);
+            $sessionsReport = $this->fetchRadiusSessions($radiusConfigs);
+
+            $radiusUsers    = $usersReport['users'];
+            $radiusSessions = $sessionsReport['sessions'];
+
+            // Surface per-source + de-duplication metrics.
+            $stats['radius_users_per_config']    = $usersReport['per_config'];
+            $stats['radius_sessions_per_config'] = $sessionsReport['per_config'];
+            $stats['duplicate_records']          = $usersReport['duplicates'];
+            $stats['unique_records']             = $usersReport['unique'];
+
+            foreach ($usersReport['per_config'] as $label => $count) {
+                Log::info("[STATUS SYNC] {$label}: {$count} user record(s) retrieved");
+            }
+            Log::info('[STATUS SYNC] Duplicate users across servers: ' . $usersReport['duplicates']);
+            Log::info('[STATUS SYNC] Unique users to process: ' . $usersReport['unique']);
+
+            // Guard: if EVERY server was unreachable for users, abort instead of wrongly
+            // flagging every account as "Not Found"/offline from an empty dataset.
+            if ($usersReport['reachable'] === 0) {
+                throw new \RuntimeException('All RADIUS servers were unreachable for user data; aborting to avoid mass status changes.');
+            }
 
             // Anti-timeout: ensure DB connection is alive after API calls
             try {
@@ -65,6 +93,15 @@ class RadiusStatusSyncService
             }
 
             DB::commit();
+
+            Log::info('[STATUS SYNC] Complete', [
+                'unique_records' => $stats['unique_records'],
+                'duplicates'     => $stats['duplicate_records'],
+                'inserted'       => $stats['inserted'],
+                'updated'        => $stats['updated'],
+                'skipped'        => $stats['skipped'],
+                'errors'         => $stats['errors'],
+            ]);
 
             return $stats;
 
@@ -98,58 +135,128 @@ class RadiusStatusSyncService
         }
     }
 
+    /**
+     * Fetch users from EVERY radius config, merge them, and de-duplicate by username
+     * (the unique identifier). Each server is queried independently; a failure on one
+     * server is logged and skipped so the remaining server(s) still contribute.
+     *
+     * @return array{users: array, per_config: array<string,int>, duplicates: int, unique: int, reachable: int}
+     */
     private function fetchRadiusUsers($radiusConfigs): array
     {
-        $users = [];
-        $response = $this->callRadiusApi('/rest/user-manage/user', 'GET', $radiusConfigs);
+        $merged     = [];
+        $perConfig  = [];
+        $duplicates = 0;
+        $reachable  = 0;
 
-        if ($response && is_array($response)) {
+        foreach ($radiusConfigs as $index => $config) {
+            $label = 'Radius Config ' . ($index + 1);
+            $response = $this->callRadiusApiForConfig($config, '/rest/user-manage/user', 'GET');
+
+            if ($response === null || !is_array($response)) {
+                $perConfig[$label] = 0;
+                \Log::channel('radiusrelated')->warning("[STATUS SYNC] {$label} ({$config->ip}) unreachable for users; continuing with remaining server(s).");
+                continue;
+            }
+
+            $reachable++;
+            $count = 0;
+
             foreach ($response as $user) {
                 $username = $user['name'] ?? null;
-                if ($username) {
-                    $users[$username] = [
-                        'id' => $user['.id'] ?? '',
-                        'group' => $user['group'] ?? '',
-                        'disabled' => ($user['disabled'] ?? 'false') === 'true'
-                    ];
+                if (!$username) {
+                    continue;
                 }
+                $count++;
+
+                // De-dup by username: if the same account exists on more than one
+                // server, keep the first seen and only tally the duplicate. This
+                // guarantees a single insert/update per account downstream.
+                if (isset($merged[$username])) {
+                    $duplicates++;
+                    continue;
+                }
+
+                $merged[$username] = [
+                    'id'       => $user['.id'] ?? '',
+                    'group'    => $user['group'] ?? '',
+                    'disabled' => ($user['disabled'] ?? 'false') === 'true',
+                    'source'   => $label,
+                ];
             }
-            Log::info('Fetched RADIUS users', ['count' => count($users)]);
+
+            $perConfig[$label] = $count;
+            Log::info("[STATUS SYNC] Fetched RADIUS users from {$label}", ['count' => $count]);
         }
 
-        return $users;
+        return [
+            'users'      => $merged,
+            'per_config' => $perConfig,
+            'duplicates' => $duplicates,
+            'unique'     => count($merged),
+            'reachable'  => $reachable,
+        ];
     }
 
+    /**
+     * Fetch sessions from EVERY radius config and merge by username. If a user somehow
+     * has active sessions on more than one server, the active counts are summed and the
+     * most recently seen session details are kept. Per-server failures are isolated.
+     *
+     * @return array{sessions: array, per_config: array<string,int>, reachable: int}
+     */
     private function fetchRadiusSessions($radiusConfigs): array
     {
-        $sessions = [];
-        $response = $this->callRadiusApi('/rest/user-manage/session', 'GET', $radiusConfigs);
+        $sessions  = [];
+        $perConfig = [];
+        $reachable = 0;
 
-        if ($response && is_array($response)) {
+        foreach ($radiusConfigs as $index => $config) {
+            $label = 'Radius Config ' . ($index + 1);
+            $response = $this->callRadiusApiForConfig($config, '/rest/user-manage/session', 'GET');
+
+            if ($response === null || !is_array($response)) {
+                $perConfig[$label] = 0;
+                \Log::channel('radiusrelated')->warning("[STATUS SYNC] {$label} ({$config->ip}) unreachable for sessions; continuing with remaining server(s).");
+                continue;
+            }
+
+            $reachable++;
+            $count = 0;
+
             foreach ($response as $session) {
                 $username = $session['user'] ?? null;
-                if ($username) {
-                    if (!isset($sessions[$username])) {
-                        $sessions[$username] = [
-                            'active_count' => 0,
-                            'last_session' => null
-                        ];
-                    }
-                    
-                    $sessions[$username]['active_count']++;
-                    $sessions[$username]['last_session'] = [
-                        'session_id' => $session['.id'] ?? '',
-                        'ip' => $session['user-address'] ?? '',
-                        'mac' => $session['calling-station-id'] ?? '',
-                        'upload' => $session['upload'] ?? 0,
-                        'download' => $session['download'] ?? 0
+                if (!$username) {
+                    continue;
+                }
+                $count++;
+
+                if (!isset($sessions[$username])) {
+                    $sessions[$username] = [
+                        'active_count' => 0,
+                        'last_session' => null,
                     ];
                 }
+
+                $sessions[$username]['active_count']++;
+                $sessions[$username]['last_session'] = [
+                    'session_id' => $session['.id'] ?? '',
+                    'ip'         => $session['user-address'] ?? '',
+                    'mac'        => $session['calling-station-id'] ?? '',
+                    'upload'     => $session['upload'] ?? 0,
+                    'download'   => $session['download'] ?? 0,
+                ];
             }
-            Log::info('Fetched RADIUS sessions', ['count' => count($sessions)]);
+
+            $perConfig[$label] = $count;
+            Log::info("[STATUS SYNC] Fetched RADIUS sessions from {$label}", ['count' => $count]);
         }
 
-        return $sessions;
+        return [
+            'sessions'   => $sessions,
+            'per_config' => $perConfig,
+            'reachable'  => $reachable,
+        ];
     }
 
     private function processAccounts(array $radiusUsers, array $radiusSessions, array &$stats): void
@@ -168,6 +275,7 @@ class RadiusStatusSyncService
                 $username = trim($account->username ?? '');
                 if ($username === '') {
                     // Skip records with empty usernames
+                    $stats['skipped']++;
                     continue;
                 }
                 $accountNo = $account->account_no;
@@ -259,52 +367,60 @@ class RadiusStatusSyncService
         $stats['synced'] = $stats['updated'];
     }
 
-    private function callRadiusApi(string $path, string $method, $radiusConfigs): ?array
+    /**
+     * Call the RADIUS API for a SINGLE config, trying https then http with retries.
+     * Returns the decoded array on success, or null if this server is unreachable —
+     * the caller isolates the failure and continues with the other server(s).
+     */
+    private function callRadiusApiForConfig($config, string $path, string $method): ?array
     {
-        foreach ($radiusConfigs as $config) {
-            $protocols = ['https', 'http'];
+        $protocols = ['https', 'http'];
 
-            foreach ($protocols as $protocol) {
-                $url = sprintf('%s://%s:%s%s', $protocol, $config->ip, $config->port, $path);
+        foreach ($protocols as $protocol) {
+            $url = sprintf('%s://%s:%s%s', $protocol, $config->ip, $config->port, $path);
 
-                for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
-                    try {
-                        $response = Http::withBasicAuth($config->username, $config->password)
-                            ->withOptions([
-                                'verify' => false,
-                                'timeout' => 5,
-                            ])
-                            ->$method($url);
+            for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
+                try {
+                    $response = Http::withBasicAuth($config->username, $config->password)
+                        ->withOptions([
+                            'verify' => false,
+                            'timeout' => 5,
+                        ])
+                        ->$method($url);
 
-                        if ($response->successful()) {
-                            return $response->json();
-                        }
-
-                        Log::warning('RADIUS API request failed', [
-                            'url' => $url,
-                            'attempt' => $attempt,
-                            'status' => $response->status(),
-                            'body' => $response->body()
-                        ]);
-
-                    } catch (\Exception $e) {
-                        Log::warning('RADIUS API request exception', [
-                            'url' => $url,
-                            'attempt' => $attempt,
-                            'error' => $e->getMessage()
-                        ]);
+                    if ($response->successful()) {
+                        return $response->json();
                     }
 
-                    if ($attempt < self::MAX_RETRIES) {
-                        sleep(self::RETRY_DELAY);
-                    }
+                    Log::warning('RADIUS API request failed', [
+                        'url' => $url,
+                        'attempt' => $attempt,
+                        'status' => $response->status(),
+                        'body' => $response->body()
+                    ]);
+
+                } catch (\Exception $e) {
+                    Log::warning('RADIUS API request exception', [
+                        'url' => $url,
+                        'attempt' => $attempt,
+                        'error' => $e->getMessage()
+                    ]);
+                }
+
+                if ($attempt < self::MAX_RETRIES) {
+                    sleep(self::RETRY_DELAY);
                 }
             }
         }
 
-        $errorMsg = 'Failed to connect to RADIUS API after trying all configs and protocols. Path: ' . $path;
-        \Log::channel('radiusrelated')->error('[STATUS SYNC API FAILED] ' . $errorMsg);
-        throw new \RuntimeException($errorMsg);
+        \Log::channel('radiusrelated')->error(sprintf(
+            '[STATUS SYNC API FAILED] Config #%s (%s) unreachable for path %s after all protocols/retries.',
+            $config->id ?? '?',
+            $config->ip ?? '?',
+            $path
+        ));
+
+        return null;
     }
 }
 

@@ -1905,6 +1905,14 @@ class ServiceOrderController extends Controller
                 \Log::error('[SERVICE ORDER PULLOUT EMAIL EXCEPTION] ' . $e->getMessage());
             }
 
+            // Update customer's user account to inactive
+            try {
+                \App\Models\User::where('username', $accountNo)->update(['active' => 0]);
+                \Log::info('[SERVICE ORDER PULLOUT DB] Updated user active status to 0 for Account: ' . $accountNo);
+            } catch (\Exception $e) {
+                \Log::error('[SERVICE ORDER PULLOUT DB USER EXCEPTION] ' . $e->getMessage());
+            }
+
             return 'success';
 
         }

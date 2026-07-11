@@ -262,6 +262,10 @@ class EnhancedBillingGenerationServiceWithNotifications
             $adjustedDate = $this->calculateAdjustedBillingDate($account, $statementDate);
             $dueDate = $adjustedDate->copy()->addDays($dueDateOffset);
 
+            // First-time customer detection (no invoice history yet). Detected here so the
+            // SOA mirrors the pro-rated amount that the first invoice will carry.
+            $firstInvoiceProRate = $this->calculateFirstInvoiceProRate($account, $plan->price);
+
             // Create initial statement to get the ID
             $statement = StatementOfAccount::create([
                 'account_no' => $account->account_no,
@@ -284,6 +288,13 @@ class EnhancedBillingGenerationServiceWithNotifications
             ]);
 
             $prorateAmount = $this->calculateProrateAmount($account, $plan->price, $adjustedDate);
+
+            // First bill for a newly installed customer: use the pro-rated amount so the
+            // SOA matches the invoice. Existing customers keep the normal monthly amount.
+            if ($firstInvoiceProRate !== null) {
+                $prorateAmount = $firstInvoiceProRate['amount'];
+            }
+
             $monthlyFeeGross = $prorateAmount / (1 + self::VAT_RATE);
             $vat = $monthlyFeeGross * self::VAT_RATE;
 
@@ -407,6 +418,11 @@ class EnhancedBillingGenerationServiceWithNotifications
             $adjustedDate = $this->calculateAdjustedBillingDate($account, $invoiceDate);
             $dueDate = $adjustedDate->copy()->addDays($dueDateOffset);
 
+            // Detect a first-time (newly installed, never billed) customer BEFORE creating
+            // the invoice row below, otherwise the invoice-existence check would be fooled
+            // by this very invoice and never pro-rate the first bill.
+            $firstInvoiceProRate = $this->calculateFirstInvoiceProRate($account, $plan->price);
+
             // Create initial invoice to get the ID
             $invoice = Invoice::create([
                 'account_no' => $account->account_no,
@@ -426,6 +442,13 @@ class EnhancedBillingGenerationServiceWithNotifications
             ]);
             
             $prorateAmount = $this->calculateProrateAmount($account, $plan->price, $adjustedDate);
+
+            // First bill for a newly installed customer: replace the full monthly amount
+            // with the pro-rated (install-date -> billing-day) amount. Existing customers
+            // return null here and keep the normal monthly amount above.
+            if ($firstInvoiceProRate !== null) {
+                $prorateAmount = $firstInvoiceProRate['amount'];
+            }
 
             // Reconnection pro-rate for a customer skipped last cycle but reconnected
             // inside the generation window. Added to invoice_balance and total_amount.
@@ -605,6 +628,106 @@ class EnhancedBillingGenerationServiceWithNotifications
         }
 
         return $monthlyFee;
+    }
+
+    /**
+     * Pro-rate the VERY FIRST invoice for a newly installed customer.
+     *
+     * A customer is "first-time billed" when no invoice record exists yet for the
+     * account. Their first bill only covers the partial period from the installation
+     * date up to their configured billing day, charged on a fixed 30-day basis:
+     *
+     *     Daily Rate       = Monthly Plan Amount / 30
+     *     Pro-rated Amount = Daily Rate * Remaining Billable Days
+     *
+     * Where Remaining Billable Days is the number of days from the installation date
+     * to the upcoming billing_day. If the customer installed exactly on their billing
+     * day (or a full cycle away) the full monthly amount is charged instead.
+     *
+     * Returns null for customers who already have invoice history, so they follow the
+     * normal monthly billing process untouched. The returned 'amount' is a drop-in
+     * replacement for the monthly plan price (VAT-inclusive, same basis as the plan
+     * price) and carries no side effects — first-invoice detection stays purely a
+     * function of invoice existence, which prevents duplicate pro-rated first invoices.
+     *
+     * @return array{amount: float, pro_rate_days: int, daily_rate: float, full_month: bool}|null
+     */
+    protected function calculateFirstInvoiceProRate(BillingAccount $account, float $monthlyFee): ?array
+    {
+        // Existing customers (any invoice on record) are billed the normal monthly way.
+        $hasInvoiceHistory = Invoice::where('account_no', $account->account_no)->exists();
+        if ($hasInvoiceHistory) {
+            return null;
+        }
+
+        $dailyRate = $monthlyFee / self::DAYS_IN_MONTH;
+
+        // Defensive: an account with no installation date cannot be pro-rated by days,
+        // so it is billed the full monthly amount (still flagged as first-time).
+        if (empty($account->date_installed)) {
+            $this->log('warning', 'First-time customer has no installation date; charging full monthly amount', [
+                'account_no'    => $account->account_no,
+                'is_first_time' => true,
+                'billing_day'   => (int) $account->billing_day,
+            ]);
+
+            return [
+                'amount'        => round($monthlyFee, 2),
+                'pro_rate_days' => self::DAYS_IN_MONTH,
+                'daily_rate'    => round($dailyRate, 2),
+                'full_month'    => true,
+            ];
+        }
+
+        $installDate = Carbon::parse($account->date_installed)->startOfDay();
+        $installDay  = (int) $installDate->day;
+
+        // Remaining days are counted on a fixed 30-day cycle, NOT on actual calendar
+        // days, so the charge is identical whether the month has 28, 30, or 31 days.
+        // End-of-month billing and any day beyond the 30-day frame normalize to 30.
+        $rawBillingDay = (int) $account->billing_day;
+        $billingDay = ($rawBillingDay === self::END_OF_MONTH_BILLING || $rawBillingDay > self::DAYS_IN_MONTH)
+            ? self::DAYS_IN_MONTH
+            : $rawBillingDay;
+        if ($installDay > self::DAYS_IN_MONTH) {
+            $installDay = self::DAYS_IN_MONTH;
+        }
+
+        // Remaining billable days on a fixed 30-day cycle (calendar month length is
+        // irrelevant). The span runs from the install day up to the billing day.
+        if ($installDay < $billingDay) {
+            // Same cycle: install day through billing day, inclusive of both ends.
+            // e.g. installed on the 1st with billing day 30 => 30 - 1 + 1 = 30 days.
+            $proRateDays = $billingDay - $installDay + 1;
+        } else {
+            // Installed on/after the billing day => bill from the install day up to the
+            // NEXT cycle's billing day. Installing exactly on the billing day gives a
+            // full 30-day cycle. e.g. install day 20, billing day 10 => 30 - 10 = 20 days.
+            $proRateDays = self::DAYS_IN_MONTH - ($installDay - $billingDay);
+        }
+
+        // A full 30-day span is simply the normal monthly amount.
+        $fullMonth = ($proRateDays >= self::DAYS_IN_MONTH);
+        $amount = $fullMonth ? $monthlyFee : ($dailyRate * $proRateDays);
+
+        $this->log('info', 'First-time customer detected: pro-rating first invoice', [
+            'account_no'    => $account->account_no,
+            'is_first_time' => true,
+            'install_date'  => $installDate->format('Y-m-d'),
+            'billing_day'   => $rawBillingDay,
+            'pro_rate_days' => $proRateDays,
+            'daily_rate'    => round($dailyRate, 2),
+            'monthly_amount' => round($monthlyFee, 2),
+            'final_amount'  => round($amount, 2),
+            'full_month'    => $fullMonth,
+        ]);
+
+        return [
+            'amount'        => round($amount, 2),
+            'pro_rate_days' => $proRateDays,
+            'daily_rate'    => round($dailyRate, 2),
+            'full_month'    => $fullMonth,
+        ];
     }
 
     /**

@@ -16,6 +16,11 @@ use Throwable;
  * not yet been counted, and for every full multiple of the agent's quota it
  * adds the configured `incentives_value` to the agent's `incentives` balance.
  *
+ * Each full quota cycle is a "batch". An agent with 20 completed Job Orders and
+ * a quota of 10 is awarded 2 batches in one run (10 Job Orders tagged to each),
+ * and batch numbers keep incrementing per agent across runs (batch 1, 2, 3, …).
+ * Any remainder (< quota) carries over unprocessed to the next run.
+ *
  * Idempotency / no-double-pay is guaranteed two ways:
  *   1. Only Job Orders absent from `agent_incentive_history` are counted.
  *   2. Every counted Job Order is recorded in `agent_incentive_history`, which
@@ -202,12 +207,22 @@ class AgentIncentiveService
         $now           = Carbon::now();
         $orgId         = $balance->organization_id ?? null;
 
-        $this->writeLog("  [CALC] Quota reached x{$cycles} → awarding " . number_format($totalAward, 2) . " (= {$cycles} x " . number_format($incentiveValue, 2) . ")");
+        // Batches are numbered per-agent and keep incrementing across runs so the
+        // history reads as batch 1, 2, 3, … over the agent's lifetime. Each full
+        // quota cycle awarded in this run gets its own consecutive batch number.
+        $lastBatch  = (int) DB::table('agent_incentive_history')
+            ->where('agent_id', $agentId)
+            ->max('batch_number');
+        $startBatch = $lastBatch + 1;
+        $endBatch   = $startBatch + $cycles - 1;
+
+        $this->writeLog("  [CALC] Quota reached x{$cycles} → awarding " . number_format($totalAward, 2) . " (= {$cycles} x " . number_format($incentiveValue, 2) . ") — batch(es) {$startBatch}" . ($cycles > 1 ? "-{$endBatch}" : ""));
 
         // Per-cycle detail (auditable, mirrors AutoDisconnect's per-item logging).
         for ($c = 0; $c < $cycles; $c++) {
-            $cycleIds = array_slice($idsToProcess, $c * $quota, $quota);
-            $this->writeLog("    [CYCLE " . ($c + 1) . "/{$cycles}] +" . number_format($incentiveValue, 2) . " for job order ID(s): " . implode(', ', $cycleIds));
+            $cycleIds     = array_slice($idsToProcess, $c * $quota, $quota);
+            $batchNumber  = $startBatch + $c;
+            $this->writeLog("    [BATCH {$batchNumber}] (cycle " . ($c + 1) . "/{$cycles}) +" . number_format($incentiveValue, 2) . " for job order ID(s): " . implode(', ', $cycleIds));
         }
 
         $this->writeLog("  [DB] Recording {$processCount} job order(s) to agent_incentive_history and updating balance...");
@@ -215,13 +230,16 @@ class AgentIncentiveService
         // All-or-nothing per agent: record the ledger rows and bump the balance
         // together. If the history insert collides (UNIQUE job_order_id) the whole
         // award rolls back, so a Job Order can never be paid without being recorded.
-        DB::transaction(function () use ($idsToProcess, $quota, $incentiveValue, $orgId, $now, $balance, $awardStr) {
+        DB::transaction(function () use ($idsToProcess, $quota, $incentiveValue, $orgId, $now, $balance, $awardStr, $startBatch) {
             $rows = [];
-            foreach ($idsToProcess as $jobOrderId) {
+            foreach ($idsToProcess as $index => $jobOrderId) {
+                // Every $quota job orders form one cycle → the next batch number.
+                $batchNumber = $startBatch + intdiv($index, $quota);
                 $rows[] = [
                     'agent_id'        => (int) $balance->agent_id,
                     'job_order_id'    => $jobOrderId,
                     'quota_reached'   => $quota,
+                    'batch_number'    => $batchNumber,
                     'incentive_value' => $incentiveValue,
                     'organization_id' => $orgId,
                     'processed_at'    => $now,

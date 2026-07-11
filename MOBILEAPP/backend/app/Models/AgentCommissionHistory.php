@@ -22,8 +22,7 @@ class AgentCommissionHistory extends Model
         'commission_id_list',
         'updated_by',
         'updated_at',
-        'approved_by',
-        'type'
+        'approved_by'
     ];
     
     public $timestamps = false; // The table has created_at but uses CURRENT_TIMESTAMP, and no updated_at

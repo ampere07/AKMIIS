@@ -18,6 +18,21 @@ use Exception;
 
 class AutoDisconnectService
 {
+    /**
+     * Billing-day disconnection schedule (ported from auto_dc.php).
+     *
+     * Maps today's day-of-month (the scheduled DC day) to the Billing Day of the
+     * accounts that should be disconnected on that day. Auto disconnect only runs
+     * on the days present as keys here; any other day is a no-op.
+     */
+    private const DC_DAY_MAP = [
+        10 => 30,
+        15 => 5,
+        22 => 12,
+        25 => 15,
+        30 => 20,
+    ];
+
     private $logName = 'Auto_DC';
     private $radiusService;
     private $smsService;
@@ -64,39 +79,72 @@ class AutoDisconnectService
                 throw new Exception("Billing configuration not found");
             }
 
-            $dcActualOffset = $config->disconnection_day ?? 4;
             $dcFee = $config->disconnection_fee ?? 0.00;
-            $targetDate = Carbon::today()->subDays($dcActualOffset)->format('Y-m-d');
-            
-            $this->writeLog("[CONFIG] Disconnection Day Offset: {$dcActualOffset} days");
+
+            // Billing-day disconnection schedule (ported from auto_dc.php):
+            // Auto disconnect only runs on scheduled DC days, and on each of those
+            // days it targets accounts whose Billing Day maps to today.
+            $currentDay = (int) Carbon::today()->day;
+            $targetBillingDay = self::DC_DAY_MAP[$currentDay] ?? null;
+
             $this->writeLog("[CONFIG] Disconnection Fee: ₱" . number_format($dcFee, 2));
-            $this->writeLog("[CONFIG] Target Due Date: {$targetDate}");
+            $this->writeLog("[CONFIG] Current Day: {$currentDay}");
+
+            if ($targetBillingDay === null) {
+                $this->writeLog("[INFO] Today (Day {$currentDay}) is not a scheduled DC day. Skipping auto disconnect.");
+                $endTime = Carbon::now();
+                $duration = $endTime->diffInSeconds($startTime);
+                $this->writeLog("");
+                $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
+                $this->writeLog("║         AUTO DISCONNECTION COMPLETE (No Actions)               ║");
+                $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
+                $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
+                $this->writeLog("Duration: {$duration} second(s)");
+                $this->writeLog("");
+
+                $this->releaseLock();
+                return [
+                    'success' => true,
+                    'processed' => 0,
+                    'skipped' => 0,
+                    'errors' => [],
+                    'duration' => $duration
+                ];
+            }
+
+            $this->writeLog("[CONFIG] DC Triggered: Today is Day {$currentDay}. Target Billing Day is {$targetBillingDay}.");
             $this->writeLog("");
 
-            // Fetch ONLY the latest invoice for each account and check if IT is overdue
-            $this->writeLog("[QUERY] Searching for latest overdue invoices...");
-            
-            // 1. Get the IDs of the absolute latest invoice for every account
+            // Find Active accounts on the target Billing Day that still owe money
+            // (latest invoice Unpaid/Partial), mirroring the auto_dc.php selection.
+            $this->writeLog("[QUERY] Searching for accounts due for disconnection...");
+
+            // 1. Active accounts whose Billing Day maps to today
+            $activeStatusId = DB::table('billing_status')->where('status_name', 'Active')->value('id');
+            $targetAccountNos = DB::table('billing_accounts')
+                ->where('billing_day', $targetBillingDay)
+                ->when($activeStatusId, fn ($query) => $query->where('billing_status_id', $activeStatusId))
+                ->pluck('account_no');
+
+            // 2. Latest invoice per matching account, kept only if Unpaid/Partial
             $latestInvoiceIds = DB::table('invoices')
                 ->select(DB::raw('MAX(id) as id'))
+                ->whereIn('account_no', $targetAccountNos)
                 ->groupBy('account_no')
                 ->pluck('id');
 
-            // 2. Fetch those specific latest invoices and filter by EXACT disconnection day
-            // Logic: Due Date + Offset == Today (calculated as Due Date == Today - Offset)
             $invoices = Invoice::with(['billingAccount.customer', 'billingAccount.technicalDetails'])
                 ->whereIn('id', $latestInvoiceIds)
                 ->whereIn('status', ['Unpaid', 'Partial'])
-                ->whereDate('due_date', $targetDate) 
                 ->get();
 
             $totalCount = $invoices->count();
-            $this->writeLog("[RESULT] Found {$totalCount} account(s) where (Due Date: {$targetDate} + Offset: {$dcActualOffset}) matches Today");
+            $this->writeLog("[RESULT] Found {$totalCount} account(s) on Billing Day {$targetBillingDay} with an unpaid/partial invoice");
             $this->writeLog("");
 
             if ($totalCount === 0) {
                 $this->writeLog("[INFO] No invoices to process for disconnection today.");
-                $this->writeLog("[INFO] Criteria: Status IN ('Unpaid', 'Partial') AND Due Date = {$targetDate}");
+                $this->writeLog("[INFO] Criteria: Status IN ('Unpaid', 'Partial') AND Billing Day = {$targetBillingDay}");
                 $endTime = Carbon::now();
                 $duration = $endTime->diffInSeconds($startTime);
                 $this->writeLog("");
@@ -131,7 +179,7 @@ class AutoDisconnectService
                 $this->writeLog("");
                 $this->writeLog("[{$counter}/{$totalCount}] ══════════════════════════════════════════════");
                 
-                $result = $this->processDisconnection($invoice, $dcActualOffset);
+                $result = $this->processDisconnection($invoice);
                 
                 if ($result['success']) {
                     $processedCount++;
@@ -203,7 +251,7 @@ class AutoDisconnectService
     /**
      * Process a single disconnection
      */
-    private function processDisconnection(Invoice $invoice, int $dcActualOffset): array
+    private function processDisconnection(Invoice $invoice): array
     {
         $accountNo = $invoice->account_no;
         $this->writeLog("[ACCOUNT] {$accountNo}");
@@ -408,6 +456,194 @@ class AutoDisconnectService
             }
             
             throw $e;
+        }
+    }
+
+    /**
+     * Apply delayed Grace Period charges (ported from auto_dc.php).
+     *
+     * For every account that was auto-disconnected EXACTLY 7 days ago and is still
+     * Inactive/Pullout, charge a pro-rated slice of the plan price to the oldest open
+     * invoice and the account balance. The algorithm mirrors auto_dc.php; only the
+     * table/column names are mapped onto this database's schema.
+     */
+    public function processGracePeriodCharge(): array
+    {
+        $this->writeLog("");
+        $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
+        $this->writeLog("║         STARTING GRACE PERIOD CHARGE PROCESS                   ║");
+        $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
+        $startTime = Carbon::now();
+        $this->writeLog("Start Time: " . $startTime->format('Y-m-d H:i:s'));
+        $this->writeLog("");
+
+        try {
+            $config = BillingConfig::first();
+
+            if (!$config) {
+                $this->writeLog("[ERROR] Billing configuration not found");
+                throw new Exception("Billing configuration not found");
+            }
+
+            // Days worth of plan to charge (mirrors auto_dc.php CONF_DC_ACTUAL_OFFSET, default 10)
+            $daysToCharge = $config->disconnection_day ?? 10;
+
+            // Look back EXACTLY 7 days to the original auto disconnection
+            $targetDate = Carbon::today()->subDays(7)->format('Y-m-d');
+
+            $this->writeLog("[CONFIG] Grace Period Days to Charge: {$daysToCharge}");
+            $this->writeLog("[CONFIG] Target DC Date (7 days ago): {$targetDate}");
+            $this->writeLog("");
+
+            $this->writeLog("[QUERY] Searching for accounts auto-disconnected on {$targetDate}...");
+            $logs = DB::table('disconnected_logs')
+                ->whereDate('created_at', $targetDate)
+                ->where('remarks', 'like', '%Auto DC%')
+                ->get();
+
+            $totalCount = $logs->count();
+            $this->writeLog("[RESULT] Found {$totalCount} disconnection log(s) eligible for Grace Period review");
+            $this->writeLog("");
+
+            $chargedCount = 0;
+            $skippedCount = 0;
+            $errors = [];
+            $counter = 0;
+
+            foreach ($logs as $log) {
+                $counter++;
+                $this->writeLog("");
+                $this->writeLog("[{$counter}/{$totalCount}] ══════════════════════════════════════════════");
+
+                $billingAccount = BillingAccount::with(['plan', 'billingStatus'])->find($log->account_id);
+                if (!$billingAccount) {
+                    $this->writeLog("  [SKIP] Billing account not found for log ID {$log->id}");
+                    $skippedCount++;
+                    continue;
+                }
+
+                $accountNo = $billingAccount->account_no;
+                $this->writeLog("[ACCOUNT] {$accountNo}");
+
+                // Only charge accounts that are still Inactive or Pullout (skip if reconnected)
+                $statusName = $billingAccount->billingStatus ? $billingAccount->billingStatus->status_name : '';
+                if (!in_array($statusName, ['Inactive', 'Pullout'])) {
+                    $this->writeLog("  [SKIP] Status is '{$statusName}' (not Inactive/Pullout) - user likely reconnected");
+                    $skippedCount++;
+                    continue;
+                }
+
+                $planPrice = floatval($billingAccount->plan->price ?? 0);
+                if ($planPrice <= 0) {
+                    $this->writeLog("  [SKIP] Plan price is zero or unavailable");
+                    $skippedCount++;
+                    continue;
+                }
+
+                $dailyRate = $planPrice / 30;
+                $chargeAmount = round($dailyRate * $daysToCharge, 2);
+                $this->writeLog("  [INFO] Plan Price: ₱" . number_format($planPrice, 2) . " | Daily Rate: ₱" . number_format($dailyRate, 2));
+                $this->writeLog("  [INFO] Grace Period Charge ({$daysToCharge} days): ₱" . number_format($chargeAmount, 2));
+
+                // Apply the charge to the oldest still-open invoice
+                $targetInvoice = Invoice::where('account_no', $accountNo)
+                    ->whereIn('status', ['Unpaid', 'Partial'])
+                    ->orderBy('due_date', 'asc')
+                    ->first();
+
+                DB::beginTransaction();
+                try {
+                    // 1. Add to the invoice (Service Charge, Total, and Balance)
+                    if ($targetInvoice) {
+                        $newServiceCharge = floatval($targetInvoice->service_charge ?? 0) + $chargeAmount;
+                        $newTotalAmount = floatval($targetInvoice->total_amount ?? 0) + $chargeAmount;
+                        $newInvoiceBalance = floatval($targetInvoice->invoice_balance ?? 0) + $chargeAmount;
+
+                        DB::table('invoices')
+                            ->where('id', $targetInvoice->id)
+                            ->update([
+                                'service_charge' => $newServiceCharge,
+                                'total_amount' => $newTotalAmount,
+                                'invoice_balance' => $newInvoiceBalance,
+                                'updated_by' => 'System_GP',
+                                'updated_at' => Carbon::now()
+                            ]);
+                        $this->writeLog("  [INVOICE] Added Grace Period charge to Invoice ID {$targetInvoice->id}");
+                    } else {
+                        $this->writeLog("  [INVOICE] Warning: No open invoice found. Adding to balance only.");
+                    }
+
+                    // 2. Add to the account balance
+                    $newBalance = floatval($billingAccount->account_balance) + $chargeAmount;
+                    DB::table('billing_accounts')
+                        ->where('id', $billingAccount->id)
+                        ->update([
+                            'account_balance' => $newBalance,
+                            'updated_by' => 'System_GP',
+                            'updated_at' => Carbon::now()
+                        ]);
+
+                    DB::commit();
+                    $chargedCount++;
+                    $this->writeLog("  [COMPLETE] Applied Grace Period charge for {$accountNo}. New Balance: ₱" . number_format($newBalance, 2));
+                } catch (Throwable $e) {
+                    DB::rollBack();
+                    $this->writeLog("  [ERROR] Failed to charge Grace Period for {$accountNo}: " . $e->getMessage());
+                    $errors[] = "Account {$accountNo}: " . $e->getMessage();
+                    $skippedCount++;
+                }
+            }
+
+            $endTime = Carbon::now();
+            $duration = $endTime->diffInSeconds($startTime);
+
+            $this->writeLog("");
+            $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
+            $this->writeLog("║         GRACE PERIOD CHARGE COMPLETE                           ║");
+            $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
+            $this->writeLog("Summary:");
+            $this->writeLog("  • Total Found: {$totalCount}");
+            $this->writeLog("  • Charged: {$chargedCount}");
+            $this->writeLog("  • Skipped: {$skippedCount}");
+            $this->writeLog("  • Errors: " . count($errors));
+            $this->writeLog("  • Duration: {$duration} second(s)");
+            $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
+            $this->writeLog("");
+
+            if (!empty($errors)) {
+                $this->writeLog("[ERROR DETAILS]");
+                foreach ($errors as $error) {
+                    $this->writeLog("  × {$error}");
+                }
+                $this->writeLog("");
+            }
+
+            return [
+                'success' => true,
+                'charged' => $chargedCount,
+                'skipped' => $skippedCount,
+                'errors' => $errors,
+                'duration' => $duration
+            ];
+
+        } catch (Throwable $e) {
+            $endTime = Carbon::now();
+            $duration = $endTime->diffInSeconds($startTime);
+
+            $this->writeLog("");
+            $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
+            $this->writeLog("║         CRITICAL ERROR                                         ║");
+            $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
+            $this->writeLog("[CRITICAL] " . $e->getMessage());
+            $this->writeLog("[TRACE] " . $e->getTraceAsString());
+            $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
+            $this->writeLog("Duration: {$duration} second(s)");
+            $this->writeLog("");
+
+            return [
+                'success' => false,
+                'error' => $e->getMessage()
+            ];
         }
     }
 

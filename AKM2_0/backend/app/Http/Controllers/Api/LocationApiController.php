@@ -311,11 +311,12 @@ class LocationApiController extends Controller
                     'name' => $barangay->barangay,
                     'barangay' => $barangay->barangay,
                     'city_id' => $barangay->city_id,
+                    'radius_config_id' => $barangay->radius_config_id,
                     'modified_by' => $barangay->modified_by,
                     'modified_at' => $barangay->modified_at
                 ];
             });
-            
+
             return response()->json([
                 'success' => true,
                 'data' => $transformedBarangays
@@ -363,11 +364,12 @@ class LocationApiController extends Controller
                     'name' => $barangay->barangay,
                     'barangay' => $barangay->barangay,
                     'city_id' => $barangay->city_id,
+                    'radius_config_id' => $barangay->radius_config_id,
                     'modified_by' => $barangay->modified_by,
                     'modified_at' => $barangay->modified_at
                 ];
             });
-            
+
             return response()->json([
                 'success' => true,
                 'data' => $transformedBarangays
@@ -622,7 +624,8 @@ class LocationApiController extends Controller
         try {
             $validator = Validator::make($request->all(), [
                 'city_id' => 'required|integer|exists:city,id',
-                'name' => 'required|string|max:255'
+                'name' => 'required|string|max:255',
+                'radius_config_id' => 'nullable|integer|exists:radius_config,id'
             ]);
 
             if ($validator->fails()) {
@@ -635,7 +638,8 @@ class LocationApiController extends Controller
 
             $cityId = $request->input('city_id');
             $name = $request->input('name');
-            
+            $radiusConfigId = $request->input('radius_config_id');
+
             $existing = Barangay::where('city_id', $cityId)
                 ->whereRaw('LOWER(barangay) = ?', [strtolower($name)])
                 ->first();
@@ -656,6 +660,7 @@ class LocationApiController extends Controller
             $barangay = Barangay::create([
                 'city_id' => $cityId,
                 'barangay' => $name,
+                'radius_config_id' => $radiusConfigId,
                 'organization_id' => $organizationId,
                 'modified_by' => $this->resolveUserEmail($request),
                 'modified_at' => now()
@@ -763,7 +768,8 @@ class LocationApiController extends Controller
     {
         try {
             $validator = Validator::make($request->all(), [
-                'name' => 'required|string|max:255'
+                'name' => 'required|string|max:255',
+                'radius_config_id' => 'nullable|integer|exists:radius_config,id'
             ]);
 
             if ($validator->fails()) {
@@ -896,11 +902,14 @@ class LocationApiController extends Controller
                     }
                     
                     $location->barangay = $name;
+                    if ($request->has('radius_config_id')) {
+                        $location->radius_config_id = $request->input('radius_config_id');
+                    }
                     $location->modified_by = $this->resolveUserEmail($request);
                     $location->modified_at = now();
                     $location->save();
                     break;
-                    
+
                 case 'location':
                     $location = LocationDetail::find($id);
                     if (!$location) {

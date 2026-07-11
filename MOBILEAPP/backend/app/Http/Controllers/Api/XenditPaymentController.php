@@ -87,17 +87,6 @@ class XenditPaymentController extends Controller
                 ], 404);
             }
 
-            // Validate the customer email before generating a payment link.
-            // Xendit sends the invoice/receipt here, so an invalid or missing
-            // address must block payment rather than fall back to a placeholder.
-            $email = trim($account->email_address ?? '');
-            if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                return response()->json([
-                    'status' => 'error',
-                    'message' => 'A valid email address is required before payment. Please update the customer\'s email and try again.'
-                ], 422);
-            }
-
             // Note: Duplicate check now handled by frontend via check-pending endpoint
             // This allows better UX with resume option
 
@@ -127,14 +116,14 @@ class XenditPaymentController extends Controller
             $payload = [
                 'external_id' => $referenceNo,
                 'amount' => $amount,
-                'payer_email' => $email,
+                'payer_email' => $account->email_address ?? 'noreply@atssfiber.ph',
                 'description' => "Bill Payment - Account $accountNo",
                 'invoice_duration' => 86400,
                 'currency' => 'PHP',
                 'customer' => [
                     'given_names' => $givenName,
                     'surname' => $surname,
-                    'email' => $email,
+                    'email' => $account->email_address ?? 'noreply@atssfiber.ph',
                     'mobile_number' => '+' . $mobile
                 ],
                 'items' => [

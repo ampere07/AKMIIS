@@ -288,8 +288,23 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
 
 
 
+    // A payment cannot be created without a valid customer email (Xendit requires it
+    // and the backend rejects invalid ones). Treat empty / 'N/A' / malformed as invalid.
+    const isValidEmail = (email?: string | null): boolean => {
+        if (!email) return false;
+        const trimmed = email.trim();
+        if (trimmed === '' || trimmed.toLowerCase() === 'n/a') return false;
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+    };
+
     const handlePayNow = async () => {
         setErrorMessage('');
+
+        // Block the payment up front if the account has no valid email on file.
+        if (!isValidEmail(emailAddress)) {
+            setShowEmailErrorModal(true);
+            return;
+        }
 
         if (pendingPayment && pendingPayment.payment_url) {
             setShowPendingPaymentModal(true);
@@ -323,6 +338,14 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     };
 
     const handleProceedToCheckout = async () => {
+        // Guard again at the point of payment in case the verify modal was reached
+        // without a valid email on file.
+        if (!isValidEmail(emailAddress)) {
+            setShowPaymentVerifyModal(false);
+            setShowEmailErrorModal(true);
+            return;
+        }
+
         if (paymentAmount < balance) {
             setErrorMessage(`Payment amount must be at least your current balance of ₱${formatCurrency(balance)}`);
             return;
@@ -921,7 +944,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                 <AlertCircle size={48} color="#dc2626" />
                             </View>
                             <Text style={styles.successDesc}>
-                                Your account does not have a valid email address on file. Please contact ATSS to update your email before making a payment.
+                                Your account does not have a valid email address on file. Please contact support to update your email before making a payment.
                             </Text>
                             <Pressable
                                 onPress={() => setShowEmailErrorModal(false)}

@@ -70,7 +70,7 @@ class JobOrder extends Model
         'installation_fee' => 'decimal:2',
         'billing_day' => 'integer',
         'timestamp' => 'datetime',
-        'date_installed' => 'date',
+        'date_installed' => 'datetime',
         'organization_id' => 'integer',
         'technicians' => 'array',
     ];

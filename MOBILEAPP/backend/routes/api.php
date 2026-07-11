@@ -3,7 +3,6 @@
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Artisan;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\OrganizationController;
 use App\Http\Controllers\GroupController;
@@ -61,19 +60,8 @@ Route::post('/commissions/history', [CommissionController::class, 'storeHistory'
 Route::get('/commissions/trend', [CommissionController::class, 'getTrend']);
 Route::get('/commissions/agent-job-orders', [CommissionController::class, 'getJobOrdersByAgent']);
 Route::get('/commissions/incentive-history', [CommissionController::class, 'getIncentiveHistory']);
-Route::get('/commissions/achievements', [CommissionController::class, 'getAchievements']);
-Route::post('/commissions/achievements', [CommissionController::class, 'storeAchievement']);
-
-// Temporary route to run migrations on the live server
-Route::get('/run-migrations-db', function () {
-    try {
-        Artisan::call('migrate', ['--force' => true]);
-        return response()->json(['success' => true, 'message' => 'Migrations run successfully', 'output' => Artisan::output()]);
-    } catch (\Exception $e) {
-        return response()->json(['success' => false, 'error' => $e->getMessage()]);
-    }
-});
-
+Route::get('/commissions/bonus-history', [CommissionController::class, 'getBonusHistory']);
+Route::post('/commissions/bonus-history', [CommissionController::class, 'storeBonusHistory']);
 Route::post('/reports', [ReportController::class , 'store']);
 Route::get('/reports-migrate-pdf', function () {
     $reports = \App\Models\Report::all();
@@ -1338,7 +1326,6 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
 
 // User Management Routes
 Route::prefix('users')->middleware('ensure.database.tables')->group(function () {
-    Route::post('/push-token', [UserController::class, 'updatePushToken'])->middleware('auth:sanctum');
     Route::get('/', [UserController::class , 'index']);
     Route::post('/', [UserController::class , 'store']);
     Route::get('/{id}', [UserController::class , 'show']);

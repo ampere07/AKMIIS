@@ -34,6 +34,7 @@ interface LocationItem {
   cityId?: number;
   regionId?: number;
   boroughId?: number;
+  radiusConfigId?: number | null;
   modifiedBy?: string;
   modifiedAt?: string;
   organization_id?: number | null;
@@ -195,6 +196,7 @@ const LocationList: React.FC = () => {
         parentName: city?.name,
         cityId: borough.city_id,
         regionId: city?.region_id,
+        radiusConfigId: borough.radius_config_id ?? null,
         modifiedBy: borough.modified_by,
         modifiedAt: borough.modified_at,
         organization_id: borough.organization_id
@@ -393,7 +395,10 @@ const LocationList: React.FC = () => {
           await updateCity(updatedLocation.id, updateData);
           break;
         case 'borough':
-          await updateBarangay(updatedLocation.id, updateData);
+          await updateBarangay(updatedLocation.id, {
+            ...updateData,
+            radius_config_id: updatedLocation.radiusConfigId ?? null
+          });
           break;
         case 'location':
           await updateLocationDetail(updatedLocation.id, updateData);

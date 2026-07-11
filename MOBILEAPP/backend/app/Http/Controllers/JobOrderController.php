@@ -27,6 +27,7 @@ use Illuminate\Support\Facades\Hash;
 
 use App\Services\GoogleDriveService;
 use App\Services\PppoeUsernameService;
+use App\Services\RadiusServerResolver;
 use App\Models\RadiusConfig;
 use App\Models\ActivityLog;
 use App\Events\JobOrderViewingUpdate;
@@ -500,6 +501,7 @@ class JobOrderController extends Controller
                         'lcp' => trim($lcpnapData->lcp ?? ''),
                         'nap' => trim($lcpnapData->nap ?? ''),
                         'port' => trim($portValue ?? ''),
+                        'date_installed' => $jobOrder->date_installed ?? now(),
                         'tech_input_username' => $request->input('pppoe_username'),
                         'custom_password' => $request->input('custom_password'),
                     ];
@@ -545,6 +547,7 @@ class JobOrderController extends Controller
                         'lcp' => trim($lcpnapData->lcp ?? ''),
                         'nap' => trim($lcpnapData->nap ?? ''),
                         'port' => trim($portValue ?? ''),
+                        'date_installed' => $jobOrder->date_installed ?? now(),
                         'tech_input_username' => $request->input('tech_input_username'),
                         'custom_password' => $request->input('custom_password'),
                     ];
@@ -589,6 +592,7 @@ class JobOrderController extends Controller
                         'lcp' => trim($lcpnapData->lcp ?? ''),
                         'nap' => trim($lcpnapData->nap ?? ''),
                         'port' => trim($portValue ?? ''),
+                        'date_installed' => $jobOrder->date_installed ?? now(),
                         'tech_input_username' => $request->input('tech_input_username'),
                         'custom_password' => $request->input('custom_password'),
                     ];
@@ -1752,18 +1756,35 @@ class JobOrderController extends Controller
             ]);
 
             $organizationId = $jobOrder->organization_id ?? auth()->user()?->organization_id ?? null;
-            $radiusConfig = $organizationId
-                ? RadiusConfig::where('organization_id', $organizationId)->first()
-                    ?? RadiusConfig::whereNull('organization_id')->first()
-                : RadiusConfig::whereNull('organization_id')->first();
-            
+
+            // Select the RADIUS server from the barangay's assigned radius_config_id.
+            // The account does not exist on any server yet, so placement is decided
+            // deliberately from the barangay configuration — with NO fallback to another
+            // server. If the barangay has no RADIUS config assigned (or it is missing),
+            // we error out instead of silently using a different server.
+            $barangay = $jobOrder->application?->barangay ?? null;
+            $city = $jobOrder->application?->city ?? null;
+            $radiusConfig = app(RadiusServerResolver::class)->resolveForBarangay($barangay, $city, $organizationId);
+
             if (!$radiusConfig) {
-                \Log::channel('radiusrelated')->error('RADIUS configuration not found in database for JobOrder: ' . $id);
+                \Log::channel('radiusrelated')->error('RADIUS configuration could not be resolved from barangay for JobOrder: ' . $id, [
+                    'job_order_id' => $id,
+                    'barangay'     => $barangay,
+                    'city'         => $city,
+                ]);
                 return [
                     'success' => false,
-                    'message' => 'RADIUS configuration not found. Please configure RADIUS settings first.',
+                    'message' => 'No RADIUS server is assigned to this barangay. Please assign a RADIUS Config to the barangay before creating the account.',
                 ];
             }
+
+            \Log::channel('radiusrelated')->info('RADIUS server selected for JobOrder account creation', [
+                'job_order_id'     => $id,
+                'barangay'         => $barangay,
+                'city'             => $city,
+                'radius_config_id' => $radiusConfig->id,
+                'radius_ip'        => $radiusConfig->ip,
+            ]);
 
             $radiusUrl = $radiusConfig->ssl_type . '://' . $radiusConfig->ip . ':' . $radiusConfig->port . '/rest/user-manage/user';
             $radiusUsername = $radiusConfig->username;
@@ -1802,8 +1823,9 @@ class JobOrderController extends Controller
                     'lcp' => $lcpValue,
                     'nap' => $napValue,
                     'port' => $portValue,
+                    'date_installed' => $jobOrder->date_installed ?? now(),
                 ];
-                
+
                 $pppoeUsername = $pppoeService->generateUniqueUsername($customerData, $id);
                 $pppoePassword = $pppoeService->generatePassword($customerData);
                 
@@ -1853,7 +1875,9 @@ class JobOrderController extends Controller
                     \Log::channel('radiusrelated')->error('RADIUS API Error for JobOrder: ' . $id, [
                         'status' => $statusCode,
                         'response' => $response->body(),
-                        'payload' => $payload
+                        'payload' => $payload,
+                        'radius_config_id' => $radiusConfig->id,
+                        'radius_ip' => $radiusConfig->ip,
                     ]);
                     if (!$credentialsExist) {
                         return [
@@ -1865,9 +1889,11 @@ class JobOrderController extends Controller
                 }
             } catch (\Exception $mikrotikException) {
                 $radiusError = $mikrotikException->getMessage();
-                \Log::channel('radiusrelated')->error('RADIUS Connection Exception for JobOrder: ' . $id, [
+                \Log::channel('radiusrelated')->error('RADIUS Connection Exception for JobOrder: ' . $id . ' (selected server unavailable)', [
                     'error' => $radiusError,
-                    'trace' => $mikrotikException->getTraceAsString()
+                    'trace' => $mikrotikException->getTraceAsString(),
+                    'radius_config_id' => $radiusConfig->id,
+                    'radius_ip' => $radiusConfig->ip,
                 ]);
                 if (!$credentialsExist) {
                     return [

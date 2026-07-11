@@ -544,41 +544,24 @@ class ManualRadiusOperationsService
             }
 
             $radiusEndpoints = $this->getRadiusEndpoints();
-            $radiusId = null;
 
-            // Step 1: Find user ID in RADIUS
-            $userPath = "/rest/user-manage/user/" . urlencode($username);
-            foreach ($radiusEndpoints as $endpoint) {
-                $fullUrl = $endpoint['url'] . $userPath;
-                $result = $this->callApiWithRetry($fullUrl, 'GET', null, $endpoint['username'], $endpoint['password']);
-                if ($result && isset($result['.id'])) {
-                    $radiusId = $result['.id'];
-                    break;
-                }
-            }
-
-            if (!$radiusId) {
+            // Step 1: Locate the user across ALL radius_config servers
+            $located = $this->findRadiusUser($radiusEndpoints, $username);
+            if (!$located) {
                 throw new Exception("User '$username' not found in RADIUS");
             }
+            $endpoint = $located['endpoint'];
 
-            // Step 2: Patch user to set disabled=yes
-            $payload = ['disabled' => 'true'];
-            $success = false;
-            foreach ($radiusEndpoints as $endpoint) {
-                $targetUrl = $endpoint['url'] . "/rest/user-manage/user/" . $radiusId;
-                $result = $this->callApiWithRetry($targetUrl, 'PATCH', $payload, $endpoint['username'], $endpoint['password']);
-                if ($result !== false) {
-                    $success = true;
-                    $this->writeLog("[DISABLE] Set disabled=yes for '$username' at {$endpoint['url']}");
-                }
-            }
-
-            if (!$success) {
+            // Step 2: Patch user to set disabled=yes on the server where it was found
+            $targetUrl = $endpoint['url'] . "/rest/user-manage/user/" . $located['id'];
+            $result = $this->callApiWithRetry($targetUrl, 'PATCH', ['disabled' => 'true'], $endpoint['username'], $endpoint['password']);
+            if ($result === false) {
                 throw new Exception("Failed to update disabled status in RADIUS");
             }
+            $this->writeLog("[DISABLE] Set disabled=yes for '$username' at {$endpoint['url']}");
 
-            // Step 3: Kill active session
-            $this->killUserSession($radiusEndpoints, $username);
+            // Step 3: Kill active session (on the same server)
+            $this->killUserSession([$endpoint], $username);
 
             $this->writeLog("[SUCCESS] User disabled successfully");
             $this->writeLog("=== DISABLE USER END ===");
@@ -617,38 +600,21 @@ class ManualRadiusOperationsService
             }
 
             $radiusEndpoints = $this->getRadiusEndpoints();
-            $radiusId = null;
 
-            // Step 1: Find user ID in RADIUS
-            $userPath = "/rest/user-manage/user/" . urlencode($username);
-            foreach ($radiusEndpoints as $endpoint) {
-                $fullUrl = $endpoint['url'] . $userPath;
-                $result = $this->callApiWithRetry($fullUrl, 'GET', null, $endpoint['username'], $endpoint['password']);
-                if ($result && isset($result['.id'])) {
-                    $radiusId = $result['.id'];
-                    break;
-                }
-            }
-
-            if (!$radiusId) {
+            // Step 1: Locate the user across ALL radius_config servers
+            $located = $this->findRadiusUser($radiusEndpoints, $username);
+            if (!$located) {
                 throw new Exception("User '$username' not found in RADIUS");
             }
+            $endpoint = $located['endpoint'];
 
-            // Step 2: Patch user to set disabled=no
-            $payload = ['disabled' => 'false'];
-            $success = false;
-            foreach ($radiusEndpoints as $endpoint) {
-                $targetUrl = $endpoint['url'] . "/rest/user-manage/user/" . $radiusId;
-                $result = $this->callApiWithRetry($targetUrl, 'PATCH', $payload, $endpoint['username'], $endpoint['password']);
-                if ($result !== false) {
-                    $success = true;
-                    $this->writeLog("[ENABLE] Set disabled=no for '$username' at {$endpoint['url']}");
-                }
-            }
-
-            if (!$success) {
+            // Step 2: Patch user to set disabled=no on the server where it was found
+            $targetUrl = $endpoint['url'] . "/rest/user-manage/user/" . $located['id'];
+            $result = $this->callApiWithRetry($targetUrl, 'PATCH', ['disabled' => 'false'], $endpoint['username'], $endpoint['password']);
+            if ($result === false) {
                 throw new Exception("Failed to update disabled status in RADIUS");
             }
+            $this->writeLog("[ENABLE] Set disabled=no for '$username' at {$endpoint['url']}");
 
             $this->writeLog("[SUCCESS] User enabled successfully");
             $this->writeLog("=== ENABLE USER END ===");
@@ -809,6 +775,58 @@ class ManualRadiusOperationsService
     }
 
     /**
+     * Locate a user across ALL configured RADIUS servers.
+     *
+     * Checks each radius_config in order (primary first, then the rest) and returns
+     * as soon as the user is found on any server. A failure/timeout on one server is
+     * logged and skipped so it never prevents the remaining servers from being checked.
+     *
+     * The RADIUS record id (`.id`) is server-specific, so the endpoint it was found on
+     * is returned alongside it — callers must target that same endpoint for any follow-up
+     * PATCH/DELETE to stay correct and avoid duplicate requests to other servers.
+     *
+     * @return array{id: string, group: string, endpoint: array}|null Null if not found on any server.
+     */
+    private function findRadiusUser(array $radiusEndpoints, string $username): ?array
+    {
+        $userPath = "/rest/user-manage/user/" . urlencode($username);
+
+        foreach ($radiusEndpoints as $index => $endpoint) {
+            $serverName = "Server #" . ($index + 1) . " ({$endpoint['url']})";
+            $this->writeLog("[LOOKUP] Searching for '$username' on $serverName");
+
+            try {
+                $result = $this->callApiWithRetry(
+                    $endpoint['url'] . $userPath,
+                    'GET',
+                    null,
+                    $endpoint['username'],
+                    $endpoint['password']
+                );
+            } catch (Throwable $e) {
+                // A failure on this server must not stop us from checking the others.
+                $this->writeLog("[LOOKUP] Error querying $serverName: " . $e->getMessage() . " — continuing to next server");
+                continue;
+            }
+
+            if ($result && isset($result['.id'])) {
+                $currentGroup = $result['group'] ?? '';
+                $this->writeLog("[LOOKUP] Found '$username' on $serverName (ID: {$result['.id']} | Group: '$currentGroup')");
+                return [
+                    'id' => $result['.id'],
+                    'group' => $currentGroup,
+                    'endpoint' => $endpoint,
+                ];
+            }
+
+            $this->writeLog("[LOOKUP] '$username' not found on $serverName — trying next");
+        }
+
+        $this->writeLog("[LOOKUP] '$username' not found on any RADIUS server");
+        return null;
+    }
+
+    /**
      * Core RADIUS operations (disconnect/reconnect)
      */
     private function radiusOps(
@@ -822,75 +840,57 @@ class ManualRadiusOperationsService
     ): bool {
         $this->writeLog("[RADIUS OPS] User: $username | Target: $targetGroup | isDC: " . ($isDisconnectAction ? 'Yes' : 'No'));
 
-        $radiusId = null;
-        $currentRadiusGroup = null;
-        $userPath = "/rest/user-manage/user/" . urlencode($username);
-
         // Whether the change was actually applied/confirmed on a live RADIUS server.
         // Stays false when the server is unreachable so the caller can queue a retry
         // instead of falsely reporting success.
         $radiusApplied = false;
 
-        // Find user in RADIUS servers
-        foreach ($radiusEndpoints as $endpoint) {
-            $fullUrl = $endpoint['url'] . $userPath;
-            $result = $this->callApiWithRetry(
-                $fullUrl,
-                'GET',
-                null,
-                $endpoint['username'],
-                $endpoint['password']
-            );
+        // Locate the user across ALL radius_config servers (primary first, then the rest),
+        // tolerating a failure on any single server.
+        $located = $this->findRadiusUser($radiusEndpoints, $username);
 
-            if ($result && isset($result['.id'])) {
-                $radiusId = $result['.id'];
-                $currentRadiusGroup = $result['group'] ?? '';
-                $this->writeLog("[FOUND] RADIUS ID: $radiusId | Current Group: '$currentRadiusGroup'");
-                break;
-            }
-        }
+        if ($located) {
+            $radiusId = $located['id'];
+            $currentRadiusGroup = $located['group'];
+            $endpoint = $located['endpoint'];
 
-        if ($radiusId) {
             $patchHappened = false;
 
-            // Check if group needs updating
+            // Check if group needs updating. Patch ONLY the server where the user was
+            // found — the RADIUS id is server-specific, so hitting other servers with it
+            // would be incorrect and would issue duplicate requests.
             $needsPatch = ($currentRadiusGroup !== $targetGroup);
             if ($needsPatch) {
-                $this->writeLog("[PATCH] Mismatch ($currentRadiusGroup != $targetGroup). Updating group...");
-                $payload = ['group' => $targetGroup];
+                $this->writeLog("[PATCH] Mismatch ('$currentRadiusGroup' != '$targetGroup'). Applying '$targetGroup' on {$endpoint['url']}...");
+                $targetUrl = $endpoint['url'] . "/rest/user-manage/user/" . $radiusId;
+                $result = $this->callApiWithRetry(
+                    $targetUrl,
+                    'PATCH',
+                    ['group' => $targetGroup],
+                    $endpoint['username'],
+                    $endpoint['password']
+                );
 
-                // FAILOVER LOGIC: Try each server in order, stop on first success
-                foreach ($radiusEndpoints as $index => $endpoint) {
-                    $this->writeLog("[PATCH] Trying RADIUS server #" . ($index + 1) . ": {$endpoint['url']}");
-                    $targetUrl = $endpoint['url'] . "/rest/user-manage/user/" . $radiusId;
-                    $result = $this->callApiWithRetry(
-                        $targetUrl,
-                        'PATCH',
-                        $payload,
-                        $endpoint['username'],
-                        $endpoint['password']
-                    );
-
-                    if ($result !== false) {
-                        $this->writeLog("[PATCH] Success at {$endpoint['url']} (Server #" . ($index + 1) . ")");
-                        $patchHappened = true;
-                        break; // Stop on first successful server
-                    } else {
-                        $this->writeLog("[PATCH] Failed at {$endpoint['url']}, trying next server...");
-                    }
+                if ($result !== false) {
+                    $this->writeLog("[PATCH] Success at {$endpoint['url']}");
+                    $patchHappened = true;
+                } else {
+                    $this->writeLog("[PATCH] Failed at {$endpoint['url']}");
                 }
+            } else {
+                $this->writeLog("[PATCH] User already in group '$targetGroup' — no patch needed");
             }
 
             // The operation is considered applied if no patch was needed (already in the
-            // desired group) or the patch succeeded on at least one server.
+            // desired group) or the patch succeeded on the server where the user lives.
             $radiusApplied = $needsPatch ? $patchHappened : true;
 
-            // Determine if session should be killed
+            // Determine if session should be killed (only on the server where the user was found).
             $shouldKill = $isDisconnectAction || $patchHappened;
 
             if ($shouldKill) {
-                $this->writeLog("[DECISION] Killing session...");
-                $this->killUserSession($radiusEndpoints, $username, $patchHappened);
+                $this->writeLog("[DECISION] Killing session on {$endpoint['url']}...");
+                $this->killUserSession([$endpoint], $username, true);
             } else {
                 $this->writeLog("[DECISION] No changes needed, keeping session");
             }

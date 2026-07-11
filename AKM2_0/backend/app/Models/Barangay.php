@@ -16,6 +16,7 @@ class Barangay extends Model
     protected $fillable = [
         'barangay',
         'city_id',
+        'radius_config_id',
         'organization_id',
         'modified_by',
         'modified_at'
@@ -23,12 +24,18 @@ class Barangay extends Model
 
     protected $casts = [
         'organization_id' => 'integer',
+        'radius_config_id' => 'integer',
         'modified_at' => 'datetime'
     ];
 
     public function city()
     {
         return $this->belongsTo(City::class, 'city_id');
+    }
+
+    public function radiusConfig()
+    {
+        return $this->belongsTo(RadiusConfig::class, 'radius_config_id');
     }
 
     public function locations()

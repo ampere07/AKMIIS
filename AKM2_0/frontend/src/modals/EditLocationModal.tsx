@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { X } from 'lucide-react';
+import { X, ChevronDown } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import { getRadiusConfigs, RadiusConfigOption } from '../services/cityService';
 
 interface LocationItem {
   id: number;
@@ -11,8 +12,17 @@ interface LocationItem {
   cityId?: number;
   regionId?: number;
   boroughId?: number;
+  radiusConfigId?: number | null;
   organization_id?: number | null;
 }
+
+const formatRadiusConfigLabel = (config: RadiusConfigOption): string => {
+  const target = [config.ip, config.port].filter(Boolean).join(':');
+  const parts = [`#${config.id}`];
+  if (target) parts.push(target);
+  if (config.username) parts.push(`(${config.username})`);
+  return parts.join(' ');
+};
 
 interface EditLocationModalProps {
   isOpen: boolean;
@@ -37,6 +47,8 @@ const EditLocationModal: React.FC<EditLocationModalProps> = ({
   const [barangayName, setBarangayName] = useState('');
   const [cityName, setCityName] = useState('');
   const [regionName, setRegionName] = useState('');
+  const [radiusConfigId, setRadiusConfigId] = useState<number | null>(null);
+  const [radiusConfigs, setRadiusConfigs] = useState<RadiusConfigOption[]>([]);
   const [isDarkMode, setIsDarkMode] = useState(localStorage.getItem('theme') === 'dark');
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
 
@@ -67,8 +79,17 @@ const EditLocationModal: React.FC<EditLocationModalProps> = ({
   useEffect(() => {
     if (location && isOpen) {
       setEditedName(location.name);
+      setRadiusConfigId(location.radiusConfigId ?? null);
     }
   }, [location?.id, isOpen]);
+
+  useEffect(() => {
+    if (isOpen && location?.type === 'borough') {
+      getRadiusConfigs()
+        .then(setRadiusConfigs)
+        .catch(err => console.error('Failed to fetch RADIUS configs:', err));
+    }
+  }, [isOpen, location?.type]);
 
   useEffect(() => {
     if (location && isOpen) {
@@ -167,7 +188,10 @@ const EditLocationModal: React.FC<EditLocationModalProps> = ({
   };
 
   const handleSave = () => {
-    const updatedLocation = { ...location, name: editedName };
+    const updatedLocation: LocationItem = { ...location, name: editedName };
+    if (location.type === 'borough') {
+      updatedLocation.radiusConfigId = radiusConfigId;
+    }
     onEdit(updatedLocation);
   };
 
@@ -313,6 +337,35 @@ const EditLocationModal: React.FC<EditLocationModalProps> = ({
                       : 'bg-gray-100 border-gray-300 text-gray-500'
                     }`}
                 />
+              </div>
+            )}
+
+            {/* RADIUS Config Field (for Barangay) */}
+            {location.type === 'borough' && (
+              <div>
+                <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                  }`}>
+                  RADIUS Config
+                </label>
+                <div className="relative">
+                  <select
+                    value={radiusConfigId ?? ''}
+                    onChange={(e) => setRadiusConfigId(e.target.value ? parseInt(e.target.value) : null)}
+                    className={`w-full px-3 py-2 border rounded focus:outline-none focus:border-orange-500 appearance-none ${isDarkMode
+                        ? 'bg-gray-800 border-gray-700 text-white'
+                        : 'bg-white border-gray-300 text-gray-900'
+                      }`}
+                  >
+                    <option value="">None</option>
+                    {radiusConfigs.map((config) => (
+                      <option key={config.id} value={config.id}>
+                        {formatRadiusConfigLabel(config)}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className={`absolute right-3 top-2.5 pointer-events-none ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+                    }`} size={20} />
+                </div>
               </div>
             )}
 

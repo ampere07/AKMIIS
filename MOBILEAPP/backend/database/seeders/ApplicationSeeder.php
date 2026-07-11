@@ -3,86 +3,68 @@
 namespace Database\Seeders;
 
 use Illuminate\Database\Seeder;
-use App\Models\Application;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Carbon;
 
 class ApplicationSeeder extends Seeder
 {
-    /**
-     * Run the database seeds.
-     *
-     * @return void
-     */
-    public function run()
+    public function run(): void
     {
-        $applications = [
-            [
-                'customer_name' => 'JUMER A REPTIN',
-                'timestamp' => '2025-09-18 18:20:09',
-                'address' => '0097 J SUMULONG ST SAUDI VILLAGE BRGY LUNSAD BINANGONAN RIZAL, Lunsad, Binangonan, Rizal',
-                'status' => 'pending',
-                'location' => 'binangonan',
-                'email' => 'jumerreptin@example.com',
-                'mobile_number' => '09853910967',
-                'secondary_number' => '09121488743',
-                'visit_date' => '2025-09-19 14:00:00',
-                'visit_by' => 'John Denver Dones',
-                'visit_with' => 'Leonardo Bayos',
-                'notes' => 'Customer requested evening installation',
-                'last_modified' => '2025-09-18 16:30:00',
-                'modified_by' => 'Admin User'
-            ],
-            [
-                'customer_name' => 'RICHARD RENZ M MEDINA',
-                'timestamp' => '2025-09-18 16:00:40',
-                'address' => '514 CEQUEÑA COMPOUND SAN VALENTIN BRGY PANTOK BINANGONAN RIZAL, Pantok, Binangonan, Rizal',
-                'status' => 'in_progress',
-                'location' => 'binangonan',
-                'email' => 'richardmedina@example.com',
-                'mobile_number' => '09876543210',
-                'secondary_number' => '09123456789',
-                'visit_date' => '2025-09-19 10:00:00',
-                'visit_by' => 'Maria Santos',
-                'visit_with' => 'Paulo Reyes',
-                'notes' => 'Follow-up on previous installation',
-                'last_modified' => '2025-09-18 14:30:00',
-                'modified_by' => 'Support Staff'
-            ],
-            [
-                'customer_name' => 'Jann Vince C Enriquez',
-                'timestamp' => '2025-09-18 15:22:58',
-                'address' => 'Sitio Hulo, Pila-pila, Binangonan, Rizal',
-                'status' => 'in_progress',
-                'location' => 'binangonan',
-                'email' => 'jannvince@example.com',
-                'mobile_number' => '09765432109',
-                'secondary_number' => '09234567890',
-                'visit_date' => '2025-09-19 16:00:00',
-                'visit_by' => 'John Denver Dones',
-                'visit_with' => 'Leonardo Bayos',
-                'notes' => 'Customer requested weekend installation',
-                'last_modified' => '2025-09-18 13:45:00',
-                'modified_by' => 'Sales Agent'
-            ],
-            [
-                'customer_name' => 'Michelle Liwanag Vergara',
-                'timestamp' => '2025-09-18 14:05:00',
-                'address' => 'Blk 26 Lot 11 phase 1B Mabuhay Homes Pantok Binangonan, Rizal, Pantok, Binangonan, Rizal',
-                'status' => 'duplicate',
-                'location' => 'binangonan',
-                'email' => 'michelle@example.com',
-                'mobile_number' => '09123456789',
-                'secondary_number' => '09987654321',
-                'visit_date' => '2025-09-20 09:00:00',
-                'visit_by' => 'Maria Santos',
-                'visit_with' => 'Paulo Reyes',
-                'notes' => 'Duplicate entry - refer to application #10',
-                'last_modified' => '2025-09-18 15:10:00',
-                'modified_by' => 'Support Staff'
-            ],
-        ];
+        $firstNames = ['Juan', 'Maria', 'Jose', 'Pedro', 'Ana', 'Manuel', 'Elizabeth', 'Robert', 'Jennie', 'Mark', 'Carlos', 'Patricia', 'Grace', 'David', 'Joseph', 'Sarah', 'Paul', 'Michelle', 'Daniel', 'Karen'];
+        $lastNames = ['Dela Cruz', 'Santos', 'Reyes', 'Diaz', 'Aquino', 'Marcos', 'Castro', 'Gonzales', 'Bautista', 'Villanueva', 'Fernandez', 'Lopez', 'Cruz', 'Santiago', 'Ramos', 'Gomez', 'Garcia', 'Torres', 'Diaz', 'Rivera'];
+        $barangays = ['San Jose', 'Poblacion', 'San Antonio', 'Bagong Pag-asa', 'Santa Cruz', 'San Roque', 'Concepcion', 'Santo Nino'];
+        $plans = ['Plan 1299 - 25 Mbps', 'Plan 1599 - 50 Mbps', 'Plan 1999 - 100 Mbps', 'Plan 2499 - 200 Mbps'];
+        $statuses = ['Pending', 'Approved', 'Rejected'];
 
-        foreach ($applications as $application) {
-            Application::create($application);
+        $records = [];
+        for ($i = 0; $i < 20; $i++) {
+            $firstName = $firstNames[$i % count($firstNames)];
+            $lastName = $lastNames[$i % count($lastNames)];
+            $email = strtolower($firstName . '.' . str_replace(' ', '', $lastName) . '@example.com');
+            $barangay = $barangays[$i % count($barangays)];
+            $plan = $plans[$i % count($plans)];
+            $status = $statuses[$i % count($statuses)];
+            $createdDaysAgo = 20 - $i;
+
+            $records[] = [
+                'timestamp' => Carbon::now()->subDays($createdDaysAgo),
+                'email_address' => $email,
+                'first_name' => $firstName,
+                'middle_initial' => chr(65 + ($i % 26)), // A-Z
+                'last_name' => $lastName,
+                'mobile_number' => '0917' . str_pad($i * 47, 7, '0', STR_PAD_LEFT),
+                'secondary_mobile_number' => null,
+                'installation_address' => 'House #' . ($i + 1) . ', Street ' . ($i + 1) . ', Barangay ' . $barangay,
+                'landmark' => 'Near Barangay Hall',
+                'region' => 'Region IV-A',
+                'city' => 'Calamba',
+                'barangay' => $barangay,
+                'location' => 'Calamba, Laguna',
+                'desired_plan' => $plan,
+                'promo' => $i % 3 === 0 ? 'Free installation' : null,
+                'referrer_account_id' => null,
+                'referred_by' => null,
+                'proof_of_billing_url' => 'https://example.com/billing.jpg',
+                'government_valid_id_url' => 'https://example.com/id.jpg',
+                'second_government_valid_id_url' => null,
+                'house_front_picture_url' => 'https://example.com/house.jpg',
+                'document_attachment_url' => null,
+                'other_isp_bill_url' => null,
+                'terms_agreed' => '1',
+                'status' => $status,
+                'created_by_user_id' => 1,
+                'updated_by' => 'superadmin@localhost.com',
+                'promo_url' => null,
+                'nearest_landmark1_url' => null,
+                'nearest_landmark2_url' => null,
+                'long_lat' => '14.21' . $i . ',121.16' . $i,
+                'remarks' => 'Seeded record #' . ($i + 1),
+                'organization_id' => null,
+                'created_at' => Carbon::now()->subDays($createdDaysAgo),
+                'updated_at' => Carbon::now()->subDays($createdDaysAgo),
+            ];
         }
+
+        DB::table('applications')->insert($records);
     }
 }

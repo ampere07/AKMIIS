@@ -171,6 +171,18 @@ return [
             'path' => storage_path('logs/smartoltrelated.log'),
             'level' => env('LOG_LEVEL', 'debug'),
         ],
+
+        'prorategeneration' => [
+            'driver' => 'single',
+            'path' => storage_path('logs/prorategeneration.log'),
+            'level' => env('LOG_LEVEL', 'debug'),
+        ],
+
+        'sofailingauto' => [
+            'driver' => 'single',
+            'path' => storage_path('logs/sofailingauto.log'),
+            'level' => env('LOG_LEVEL', 'debug'),
+        ],
     ],
 
 ];

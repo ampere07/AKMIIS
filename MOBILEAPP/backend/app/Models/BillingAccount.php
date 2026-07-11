@@ -27,7 +27,7 @@ class BillingAccount extends Model
     ];
 
     protected $casts = [
-        'date_installed' => 'date',
+        'date_installed' => 'datetime',
         'balance_update_date' => 'datetime',
         'account_balance' => 'decimal:2',
     ];

@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Image, Text, ActivityIndicator } from 'react-native';
-import logo1 from '../assets/applogo.png';
+import logo2 from '../assets/logo2.png';
 
 const SplashScreen: React.FC = () => {
   return (
@@ -16,7 +16,7 @@ const SplashScreen: React.FC = () => {
         gap: 20
       }}>
         <Image
-          source={logo1}
+          source={logo2}
           style={{
             height: 80,
             width: 80, // Added width explicitly as it's often needed in RN
