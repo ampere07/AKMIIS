@@ -147,6 +147,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
         { id: 'lcp', label: 'LCP', icon: Network, allowedRoles: ['superadmin', 'headtech'] },
         { id: 'nap', label: 'NAP', icon: Network, allowedRoles: ['superadmin', 'headtech'] },
         { id: 'usage-type', label: 'Usage Type', icon: Activity, allowedRoles: ['superadmin'] },
+        { id: 'vlan-config', label: 'VLAN Config', icon: Network, allowedRoles: ['superadmin'] },
         { id: 'payment-method', label: 'Payment Method', icon: CreditCard, allowedRoles: ['superadmin'] },
         { id: 'work-category', label: 'Work Category', icon: Wrench, allowedRoles: ['superadmin'] },
         { id: 'radius-config', label: 'Radius Config', icon: MapPin, allowedRoles: ['superadmin'] },

@@ -415,7 +415,7 @@ class BillingNotificationService
                 $totalDue = $soa ? $soa->total_amount_due : $invoice->total_amount;
                 $amountDue = $soa ? $soa->amount_due : $invoice->total_amount;
                 $dueDate = $soa ? $soa->due_date : $invoice->due_date;
-                $paymentLink = config('app.payment_link', 'https://sync.atssfiber.ph');
+                $paymentLink = config('app.payment_link', 'https://sync.akmiis.com');
                 
                 $message = $template->message_content;
                 
@@ -745,7 +745,7 @@ class BillingNotificationService
     }
     private function replaceGlobalVariables(string $message): string
     {
-        $portalUrl = 'sync.atssfiber.ph';
+        $portalUrl = 'sync.akmiis.com';
         $brandName = \DB::table('form_ui')->value('brand_name') ?? 'Your ISP';
 
         $message = str_replace('{{portal_url}}', $portalUrl, $message);

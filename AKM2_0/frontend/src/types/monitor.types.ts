@@ -87,6 +87,7 @@ export const DEFAULT_VISIBLE_WIDGETS: string[] = [
   'so_status',
   'queue_jo',
   'queue_so',
+  'tech_live_location',
 ];
 
 // IMPORTANT: keys here are widget IDs used by your UI
@@ -284,5 +285,14 @@ export const WIDGETS: Record<string, WidgetConfig> = {
     h: 8,
     hasFilters: true,
     filterType: 'toggle_today',
+  },
+  tech_live_location: {
+    title: 'Technician Live Location',
+    api: 'tech_live_location',
+    param: '',
+    w: 12, // Full width map
+    h: 12,
+    hasFilters: false,
+    filterType: 'none',
   },
 };

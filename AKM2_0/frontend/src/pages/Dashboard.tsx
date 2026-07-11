@@ -49,6 +49,7 @@ import Invoice from './Invoice';
 import InventoryCategoryList from './InventoryCategoryList';
 import SOAGeneration from './SOAGeneration';
 import UsageTypeList from './UsageTypeList';
+import VlanList from './VlanList';
 import PaymentMethodList from './PaymentMethodList';
 import WorkCategoryList from './WorkCategoryList';
 import Ports from './Ports';
@@ -378,6 +379,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <LcpNapLocation />;
             case 'usage-type':
                 return <UsageTypeList />;
+            case 'vlan-config':
+                return <VlanList />;
             case 'payment-method':
                 return <PaymentMethodList />;
             case 'work-category':

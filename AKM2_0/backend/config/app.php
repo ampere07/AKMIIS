@@ -54,7 +54,7 @@ return [
     |
     */
 
-    'url' => env('APP_URL', 'https://backend.atssfiber.ph'),
+    'url' => env('APP_URL', 'https://backend.akmiis.com'),
 
     'asset_url' => env('ASSET_URL'),
 

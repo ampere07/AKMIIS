@@ -690,6 +690,15 @@ class MonitorController extends Controller
 
 
             // 13) TECHNICIAN AVAILABILITY
+            if ($action === 'tech_live_location') {
+                if (!in_array((int) $roleId, [1, 7, 8], true)) {
+                    return response()->json(['status' => 'error', 'message' => 'Forbidden'], 403);
+                }
+                $response['data'] = \App\Http\Controllers\Api\TechnicianLocationController::fetchLocations($authUser, $request);
+                $response['status'] = 'success';
+                return response()->json($response);
+            }
+
             if ($action === 'technician_availability') {
                 $customStartTime = $request->query('custom_start_time');
                 $techs = DB::table('users')

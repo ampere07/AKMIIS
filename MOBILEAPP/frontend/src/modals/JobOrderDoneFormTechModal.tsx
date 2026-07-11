@@ -54,7 +54,7 @@ import { getAllUsageTypes, UsageType } from '../services/usageTypeService';
 import { getAllInventoryItems, InventoryItem } from '../services/inventoryItemService';
 import { createJobOrderItems, JobOrderItem } from '../services/jobOrderItemService';
 import { updateApplication } from '../services/applicationService';
-import { formatToGMT8MySQL, formatToGMT8Display, getGMT8DateOnly } from '../utils/dateUtils';
+import { formatToGMT8MySQL, formatToGMT8Display } from '../utils/dateUtils';
 import apiClient from '../config/api';
 import { getActiveImageSize } from '../services/imageSettingsService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
@@ -208,7 +208,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
   const currentUserEmail = currentUser?.email || 'unknown@unknown.com';
 
   const [formData, setFormData] = useState<JobOrderDoneFormData>({
-    dateInstalled: getGMT8DateOnly(),
+    dateInstalled: formatDateTimeForInput(new Date()),
     usageType: '',
     choosePlan: '',
     connectionType: 'Fiber',
@@ -324,6 +324,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
 
   const [mostUsedLcpnaps, setMostUsedLcpnaps] = useState<LCPNAP[]>([]);
    const [showDatePicker, setShowDatePicker] = useState(false);
+  const [datePickerMode, setDatePickerMode] = useState<'date' | 'time'>('date');
+  const [tempPickedDate, setTempPickedDate] = useState<Date | null>(null);
   const [isDoneRendering, setIsDoneRendering] = useState(false);
   const [isValidatingSN, setIsValidatingSN] = useState(false);
   const [isSNValidated, setIsSNValidated] = useState(false);
@@ -386,14 +388,51 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
   const [isDrawingSignature, setIsDrawingSignature] = useState(false);
   const [scrollEnabled, setScrollEnabled] = useState(true);
 
+  // Formats a Date into the MySQL datetime string the DB now expects (local/GMT+8 wall-clock).
+  function formatDateTimeForInput(date: Date): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+  }
+
+  // Safely turns a stored "YYYY-MM-DD HH:mm:ss" (or date-only) string into a Date for the picker.
+  function parseDateInput(value?: string): Date {
+    if (!value) return new Date();
+    const normalized = value.includes('T') ? value : value.replace(' ', 'T');
+    const parsed = new Date(normalized);
+    return isNaN(parsed.getTime()) ? new Date() : parsed;
+  }
+
   const onDateChange = (event: any, selectedDate?: Date) => {
-    setShowDatePicker(false);
-    if (selectedDate) {
-      const year = selectedDate.getFullYear();
-      const month = String(selectedDate.getMonth() + 1).padStart(2, '0');
-      const day = String(selectedDate.getDate()).padStart(2, '0');
-      handleInputChange('dateInstalled', `${year}-${month}-${day}`);
+    // Android dispatches a 'dismissed' event when the dialog is cancelled.
+    if (event?.type === 'dismissed' || !selectedDate) {
+      setShowDatePicker(false);
+      setDatePickerMode('date');
+      setTempPickedDate(null);
+      return;
     }
+
+    // Android has no combined datetime picker: pick the date first, then the time.
+    if (Platform.OS === 'android' && datePickerMode === 'date') {
+      setTempPickedDate(selectedDate);
+      setDatePickerMode('time');
+      return; // keep the picker open, now in time mode
+    }
+
+    let finalDate = selectedDate;
+    if (Platform.OS === 'android' && datePickerMode === 'time' && tempPickedDate) {
+      finalDate = new Date(tempPickedDate);
+      finalDate.setHours(selectedDate.getHours(), selectedDate.getMinutes(), 0, 0);
+    }
+
+    setShowDatePicker(false);
+    setDatePickerMode('date');
+    setTempPickedDate(null);
+    handleInputChange('dateInstalled', formatDateTimeForInput(finalDate));
   };
 
   const convertGoogleDriveUrl = (url: string | null | undefined): string | null => {
@@ -422,7 +461,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
       // Full cleanup when modal closes
       setFormData(prev => ({
         ...prev,
-        dateInstalled: getGMT8DateOnly(),
+        dateInstalled: formatDateTimeForInput(new Date()),
         usageType: '',
         choosePlan: '',
         connectionType: 'Fiber',
@@ -729,7 +768,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     const getValue = (value: any): string => isEmptyValue(value) ? '' : value;
 
     const formatDateForInput = (dateValue: any): string => {
-      const today = getGMT8DateOnly();
+      const now = formatDateTimeForInput(new Date());
       const isEmpty = (val: any) => {
         if (!val) return true;
         if (typeof val === 'string') {
@@ -739,21 +778,21 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
         return false;
       };
 
-      if (isEmpty(dateValue)) return today;
+      if (isEmpty(dateValue)) return now;
 
       try {
-        const date = new Date(dateValue);
-        if (isNaN(date.getTime())) return today;
+        // Normalize "YYYY-MM-DD HH:mm:ss" to ISO so the time survives parsing across JS engines.
+        const normalized = typeof dateValue === 'string' && !dateValue.includes('T')
+          ? dateValue.replace(' ', 'T')
+          : dateValue;
+        const date = new Date(normalized);
+        if (isNaN(date.getTime())) return now;
 
-        const year = date.getFullYear();
-        if (year < 2020) return today;
+        if (date.getFullYear() < 2020) return now;
 
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const day = String(date.getDate()).padStart(2, '0');
-
-        return `${year}-${month}-${day}`;
+        return formatDateTimeForInput(date);
       } catch (error) {
-        return today;
+        return now;
       }
     };
 
@@ -2671,7 +2710,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                             </Text>
                             <View>
                               <Pressable
-                                onPress={() => setShowDatePicker(true)}
+                                onPress={() => { setDatePickerMode('date'); setShowDatePicker(true); }}
                                 style={[styles.datePickerButton, {
                                   borderColor: errors.dateInstalled ? '#ef4444' : (isDarkMode ? '#374151' : '#d1d5db'),
                                   backgroundColor: isDarkMode ? '#1f2937' : '#ffffff'
@@ -2680,13 +2719,13 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                                 <Text style={{
                                   color: formData.dateInstalled ? (isDarkMode ? '#ffffff' : '#111827') : (isDarkMode ? '#6b7280' : '#9ca3af')
                                 }}>
-                                  {formData.dateInstalled || 'Select Date'}
+                                  {formData.dateInstalled || 'Select Date & Time'}
                                 </Text>
                               </Pressable>
                               {showDatePicker && (
                                 <DateTimePicker
-                                  value={formData.dateInstalled ? new Date(formData.dateInstalled) : new Date()}
-                                  mode="date"
+                                  value={parseDateInput(formData.dateInstalled)}
+                                  mode={Platform.OS === 'ios' ? 'datetime' : datePickerMode}
                                   display={Platform.OS === 'ios' ? 'spinner' : 'default'}
                                   onChange={onDateChange}
                                   maximumDate={new Date()}

@@ -16,10 +16,8 @@ return [
     'allowed_methods' => ['*'],
 
     'allowed_origins' => [
-        'https://sync.atssfiber.ph',
-        'https://backend.atssfiber.ph',
-        'https://test.syncnow.ph',
-        'https://syncnow.ph',
+        'https://sync.akmiis.com',
+        'https://backend.akmiis.com',
         'http://localhost:3000',
         'http://127.0.0.1:3000'
     ],

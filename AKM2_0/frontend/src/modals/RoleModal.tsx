@@ -39,6 +39,7 @@ const SYSTEM_PAGES = [
   { id: 'lcp', label: 'LCP' },
   { id: 'nap', label: 'NAP' },
   { id: 'usage-type', label: 'Usage Type' },
+  { id: 'vlan-config', label: 'VLAN Config' },
   { id: 'payment-method', label: 'Payment Method' },
   { id: 'work-category', label: 'Work Category' },
   { id: 'radius-config', label: 'Radius Config' },

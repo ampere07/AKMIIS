@@ -106,6 +106,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/monitor/handle', [MonitorController::class , 'handle']);
     Route::get('/dashboard/counts', [\App\Http\Controllers\Api\DashboardController::class , 'getCounts']);
     Route::post('/monitor/handle', [MonitorController::class , 'handle']);
+
+    // Technician live location (Life360-style monitoring)
+    // POST: authenticated technician reports own GPS. GET: admin reads all technicians.
+    Route::post('/technician-location', [\App\Http\Controllers\Api\TechnicianLocationController::class , 'update']);
+    Route::get('/technician-locations', [\App\Http\Controllers\Api\TechnicianLocationController::class , 'index']);
+    Route::get('/technician-locations/{userId}/trail', [\App\Http\Controllers\Api\TechnicianLocationController::class , 'trail']);
 });
 Route::get('/sms-blast', [SmsBlastController::class , 'index']);
 Route::post('/sms-blast', [SmsBlastController::class , 'store']);
@@ -3314,7 +3320,7 @@ Route::prefix('payments')->group(function () {
             return response()->json([
             'status' => 'success',
             'message' => 'Xendit webhook endpoint is configured',
-            'webhook_url' => 'https://backend.atssfiber.ph/api/payments/webhook',
+            'webhook_url' => 'https://backend.akmiis.com/api/payments/webhook',
             'method' => 'POST',
             'required_header' => 'X-Callback-Token',
             'callback_token_configured' => !empty(env('XENDIT_CALLBACK_TOKEN')),

@@ -1658,7 +1658,7 @@ const CustomerDetailsEditModal: React.FC<CustomerDetailsEditModalProps> = ({
                         >
                           <option value="">Select VLAN</option>
                           {vlans.map((vlan) => (
-                            <option key={vlan.vlan_id} value={vlan.value}>
+                            <option key={vlan.id} value={vlan.value}>
                               {vlan.value}
                             </option>
                           ))}

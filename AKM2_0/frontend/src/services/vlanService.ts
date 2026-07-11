@@ -15,8 +15,9 @@ interface ApiResponse<T> {
 }
 
 export interface VLAN {
-  vlan_id: string;
-  value: number;
+  id: number;
+  value: string;
+  organization_id?: number | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -40,7 +41,7 @@ export const getAllVLANs = async (search?: string, page: number = 1, limit: numb
   }
 };
 
-export const getVLANById = async (id: string): Promise<ApiResponse<VLAN>> => {
+export const getVLANById = async (id: number): Promise<ApiResponse<VLAN>> => {
   try {
     const response = await apiClient.get<ApiResponse<VLAN>>(`/vlans/${id}`);
     return response.data;
@@ -50,7 +51,7 @@ export const getVLANById = async (id: string): Promise<ApiResponse<VLAN>> => {
   }
 };
 
-export const createVLAN = async (vlanData: { value: number; vlan_id: string }): Promise<ApiResponse<VLAN>> => {
+export const createVLAN = async (vlanData: { value: string }): Promise<ApiResponse<VLAN>> => {
   try {
     const response = await apiClient.post<ApiResponse<VLAN>>('/vlans', vlanData);
     return response.data;
@@ -60,7 +61,7 @@ export const createVLAN = async (vlanData: { value: number; vlan_id: string }): 
   }
 };
 
-export const updateVLAN = async (id: string, vlanData: { value: number; vlan_id: string }): Promise<ApiResponse<VLAN>> => {
+export const updateVLAN = async (id: number, vlanData: { value: string }): Promise<ApiResponse<VLAN>> => {
   try {
     const response = await apiClient.put<ApiResponse<VLAN>>(`/vlans/${id}`, vlanData);
     return response.data;
@@ -70,7 +71,7 @@ export const updateVLAN = async (id: string, vlanData: { value: number; vlan_id:
   }
 };
 
-export const deleteVLAN = async (id: string): Promise<ApiResponse<null>> => {
+export const deleteVLAN = async (id: number): Promise<ApiResponse<null>> => {
   try {
     const response = await apiClient.delete<ApiResponse<null>>(`/vlans/${id}`);
     return response.data;

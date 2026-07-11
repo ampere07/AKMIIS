@@ -236,6 +236,14 @@ class Kernel extends ConsoleKernel
                  });
 
         // ===================================================================
+        // TECHNICIAN LIVE LOCATION
+        // ===================================================================
+        // The stale-location sweep (cron:mark-stale-locations) is invoked directly
+        // from the system crontab every minute, e.g.:
+        //   * * * * * cd /home/akmcbms/web/backend.akmiis.com/public_html && /usr/bin/php artisan cron:mark-stale-locations
+        // so it is intentionally NOT registered with the Laravel scheduler here.
+
+        // ===================================================================
         // OPTIONAL: Additional hourly billing checks during business hours
         // Uncomment if you want additional billing generation checks
         // ===================================================================

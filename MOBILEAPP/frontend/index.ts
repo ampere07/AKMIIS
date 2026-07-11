@@ -1,5 +1,9 @@
 import { registerRootComponent } from 'expo';
 
+// Registers the background location TaskManager task at startup so the OS can
+// deliver location updates even when the app is launched in the background.
+import './src/services/locationTask';
+
 import App from './App';
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);

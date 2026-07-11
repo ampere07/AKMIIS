@@ -44,6 +44,7 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import { paymentMethodService, PaymentMethod } from '../services/paymentMethodService';
 import apiClient from '../config/api';
 import { useOrganizationStore } from '../store/organizationStore';
+import TechLiveLocationMap from '../components/TechLiveLocationMap';
 
 import {
   WidgetConfig,
@@ -951,7 +952,7 @@ const LiveMonitor: React.FC = () => {
 
               {/* Name - Top Center (slightly pushed down to not overlap with status if name is long) */}
               <div className="w-full text-center mt-6">
-                <div className={`font-bold truncate px-2 ${isDarkMode ? 'text-white' : 'text-gray-900'}`} style={{ fontSize: `${fontSize * 1.25}px` }} title={row.label}>
+                <div className={`font-bold truncate px-2 ${isDarkMode ? 'text-white' : 'text-gray-900'}`} style={{ fontSize: `${fontSize * 1.9}px` }} title={row.label}>
                   {row.label}
                 </div>
               </div>
@@ -1000,7 +1001,7 @@ const LiveMonitor: React.FC = () => {
                         <div className="opacity-60 font-bold uppercase tracking-tighter mb-1" style={{ fontSize: `${fontSize * 0.7}px` }}>Technicians</div>
                         <div className="flex flex-wrap justify-center gap-1">
                           {meta.technicians.map((t: string, i: number) => (
-                            <span key={i} className={`px-2 py-0.5 rounded text-[10px] font-bold ${isDarkMode ? 'bg-white/10 text-white' : 'bg-black/5 text-black'}`}>
+                            <span key={i} className={`px-2 py-0.5 rounded font-bold ${isDarkMode ? 'bg-white/10 text-white' : 'bg-black/5 text-black'}`} style={{ fontSize: `${fontSize * 0.7}px` }}>
                               {t}
                             </span>
                           ))}
@@ -1148,7 +1149,16 @@ const LiveMonitor: React.FC = () => {
       );
     }
 
-
+    // Technician Live Location — interactive Leaflet map (renders even with zero technicians)
+    if (id === 'tech_live_location') {
+      return (
+        <TechLiveLocationMap
+          data={Array.isArray(widget.data) ? (widget.data as any) : []}
+          isDarkMode={isDarkMode}
+          colorPalette={colorPalette}
+        />
+      );
+    }
 
     // Default font size if not set
     const fontSize = state.fontSize || 12;

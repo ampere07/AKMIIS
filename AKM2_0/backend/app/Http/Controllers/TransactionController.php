@@ -1474,7 +1474,7 @@ class TransactionController extends Controller
 
     private function replaceGlobalVariables(string $message): string
     {
-        $portalUrl = 'sync.atssfiber.ph';
+        $portalUrl = 'sync.akmiis.com';
         $brandName = DB::table('form_ui')->value('brand_name') ?? 'Your ISP';
 
         $message = str_replace('{{portal_url}}', $portalUrl, $message);

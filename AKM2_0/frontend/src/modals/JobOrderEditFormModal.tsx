@@ -2013,7 +2013,7 @@ const JobOrderEditFormModal: React.FC<JobOrderEditFormModalProps> = ({
                         <option value={formData.vlan}>{formData.vlan}</option>
                       )}
                       {vlans.map((vlan) => (
-                        <option key={vlan.vlan_id} value={vlan.value}>
+                        <option key={vlan.id} value={vlan.value}>
                           {vlan.value}
                         </option>
                       ))}

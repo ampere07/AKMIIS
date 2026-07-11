@@ -3,7 +3,7 @@
  * Billing Cron Job Verification Script
  * 
  * Upload this file to: backend/public/billing-check.php
- * Access: https://backend.atssfiber.ph/billing-check.php?key=YOUR_SECRET_KEY
+ * Access: https://backend.akmiis.com/billing-check.php?key=YOUR_SECRET_KEY
  * 
  * Security: Change the SECRET_KEY below before uploading
  */

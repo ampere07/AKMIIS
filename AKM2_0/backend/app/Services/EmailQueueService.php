@@ -250,8 +250,8 @@ class EmailQueueService
                     <p style='font-size: 11px; color: #666;'>This is an automated message, please do not reply directly to this email.</p>
                 </div>
             ",
-            'email_sender' => 'billing@atssfiber.ph',
-            'reply_to' => 'billing@atssfiber.ph',
+            'email_sender' => 'billing@akmiis.com',
+            'reply_to' => 'billing@akmiis.com',
             'sender_name' => 'ATSS Fiber'
         ]);
     }

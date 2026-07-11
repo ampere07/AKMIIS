@@ -547,6 +547,7 @@ const LocationList: React.FC = () => {
     { id: 'name', label: 'Location Name', width: 'whitespace-nowrap' },
     { id: 'type', label: 'Type', width: 'whitespace-nowrap' },
     { id: 'parent', label: 'Parent Location', width: 'whitespace-nowrap' },
+    { id: 'radiusConfigId', label: 'Radius Config ID', width: 'whitespace-nowrap' },
     { id: 'modifiedBy', label: 'Modified By', width: 'whitespace-nowrap' },
     { id: 'modifiedAt', label: 'Modified At', width: 'whitespace-nowrap' }
   ];
@@ -879,6 +880,9 @@ const LocationList: React.FC = () => {
                         {location.parentName || '-'}
                       </td>
                       <td className={`px-4 py-3 whitespace-nowrap text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                        {location.radiusConfigId ?? '-'}
+                      </td>
+                      <td className={`px-4 py-3 whitespace-nowrap text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
                         {location.modifiedBy || '-'}
                       </td>
                       <td className={`px-4 py-3 whitespace-nowrap text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -896,7 +900,7 @@ const LocationList: React.FC = () => {
                   ))}
                   {filteredLocations.length === 0 && (
                     <tr>
-                      <td colSpan={3} className={`px-4 py-10 text-center ${isDarkMode ? 'text-gray-500' : 'text-gray-400'
+                      <td colSpan={6} className={`px-4 py-10 text-center ${isDarkMode ? 'text-gray-500' : 'text-gray-400'
                         }`}>
                         No locations found matching your search.
                       </td>

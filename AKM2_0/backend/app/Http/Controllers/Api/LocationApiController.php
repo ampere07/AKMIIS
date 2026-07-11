@@ -789,7 +789,15 @@ class LocationApiController extends Controller
                     'message' => 'Invalid location type'
                 ], 400);
             }
-            
+
+            // Get current user and organization for authorization
+            $user = auth()->user();
+            if (!$user && $request->has('user_email')) {
+                $user = User::where('email_address', $request->user_email)->first();
+            }
+            $isGlobalAdmin = $user && ($user->role_id == 7 && $user->organization_id === null);
+            $userOrgId = $user ? $user->organization_id : null;
+
             switch ($type) {
                 case 'region':
                     $location = Region::find($id);
