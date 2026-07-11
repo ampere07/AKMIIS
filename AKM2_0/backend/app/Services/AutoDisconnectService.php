@@ -628,6 +628,7 @@ class AutoDisconnectService
         $dcAfterDue     = (int) ($config->disconnection_day ?? self::DC_OFFSET_DAYS);
         $noticeAfterDue = (int) ($config->disconnection_notice ?? 0);
         $graceAfterDc   = self::ADDITIONAL_INVOICE_OFFSET_DAYS;
+        $pulloutAfterDc = (int) ($config->pullout_day ?? $config->pullout_offset ?? 30);
 
         return [
             'due_offset'       => $dueOffset,
@@ -638,6 +639,8 @@ class AutoDisconnectService
             'coverage'         => $dcAfterDue,
             'grace_after_dc'   => $graceAfterDc,
             'grace_offset'     => $dueOffset + $dcAfterDue + $graceAfterDc,
+            'pullout_after_dc' => $pulloutAfterDc,
+            'pullout_offset'   => $dueOffset + $dcAfterDue + $pulloutAfterDc,
             'dc_enabled'       => $dcAfterDue > 0,
         ];
     }
@@ -885,6 +888,7 @@ class AutoDisconnectService
         $this->writeLog("║         STARTING AUTO PULLOUT PROCESS                          ║");
         $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
         $startTime = Carbon::now();
+        $today = Carbon::today();
         $this->writeLog("Start Time: " . $startTime->format('Y-m-d H:i:s'));
         $this->writeLog("");
 
@@ -896,9 +900,17 @@ class AutoDisconnectService
                 throw new Exception("Billing configuration not found");
             }
 
-            $pulloutOffset = $config->pullout_day ?? $config->pullout_offset ?? 30;
+            $off = $this->getScheduleOffsets($config);
 
-            if ($pulloutOffset <= 0) {
+            if (!$off['dc_enabled']) {
+                $this->writeLog("[INFO] Auto-DC is disabled. Skipping auto pullout.");
+                $duration = Carbon::now()->diffInSeconds($startTime);
+                return ['success' => true, 'created' => 0, 'skipped' => 0, 'errors' => [], 'duration' => $duration];
+            }
+
+            $pulloutOffsetFromDC = $off['pullout_after_dc'];
+
+            if ($pulloutOffsetFromDC <= 0) {
                 $this->writeLog("[INFO] Auto Pullout is disabled (pullout_day = 0)");
                 return [
                     'success' => true,
@@ -909,27 +921,12 @@ class AutoDisconnectService
                 ];
             }
 
-            $targetDate = Carbon::today()->subDays($pulloutOffset)->format('Y-m-d');
+            $totalOffset = $off['pullout_offset'];
+            $cycleMap = $this->resolveCycleDaysForTarget($today, $totalOffset);
+            $billingDays = array_keys($cycleMap);
 
-            $this->writeLog("[CONFIG] Pullout Day Offset: {$pulloutOffset} days");
-            $this->writeLog("[CONFIG] Target Due Date: {$targetDate}");
-            $this->writeVerbose("Runtime: PHP " . PHP_VERSION . " | SAPI: " . PHP_SAPI . " | Memory: " . $this->formatBytes(memory_get_usage(true)));
-            $this->writeLog("");
-
-            // Fetch overdue invoices for pullout
-            $this->writeLog("[QUERY] Searching for pullout candidates...");
-            $invoices = Invoice::with(['billingAccount.customer', 'billingAccount.technicalDetails'])
-                ->whereIn('status', ['Unpaid', 'Partial'])
-                ->whereDate('due_date', $targetDate)
-                ->get();
-
-            $totalCount = $invoices->count();
-            $this->writeLog("[RESULT] Found {$totalCount} invoice(s) with due date = {$targetDate}");
-            $this->writeLog("");
-
-            if ($totalCount === 0) {
-                $this->writeLog("[INFO] No invoices to process for pullout today.");
-                $this->writeLog("[INFO] Criteria: Status IN ('Unpaid', 'Partial') AND Due Date = {$targetDate}");
+            if (empty($billingDays)) {
+                $this->writeLog("[INFO] No billing-cycle day resolves to a pullout date of today. Nothing to process.");
                 $endTime = Carbon::now();
                 $duration = $endTime->diffInSeconds($startTime);
                 $this->writeLog("");
@@ -948,6 +945,33 @@ class AutoDisconnectService
                     'duration' => $duration
                 ];
             }
+
+            $this->writeLog("[CONFIG] Disconnection Day Offset: {$off['dc_after_due']} days");
+            $this->writeLog("[CONFIG] Pullout Day Offset (After DC): {$pulloutOffsetFromDC} days");
+            $this->writeLog("[CONFIG] Total Pullout Day Offset (From Billing Day): {$totalOffset} days");
+            $this->writeLog("[SCHEDULE] Billing day(s) due for Pullout today (billing day + {$totalOffset} cycle days): " . implode(', ', $billingDays));
+            $this->writeVerbose("Runtime: PHP " . PHP_VERSION . " | SAPI: " . PHP_SAPI . " | Memory: " . $this->formatBytes(memory_get_usage(true)));
+            $this->writeLog("");
+
+            // Fetch overdue invoices for pullout
+            $this->writeLog("[QUERY] Searching for pullout candidates...");
+            
+            $latestInvoiceIds = DB::table('invoices')
+                ->select(DB::raw('MAX(id) as id'))
+                ->groupBy('account_no')
+                ->pluck('id');
+
+            $invoices = Invoice::with(['billingAccount.customer', 'billingAccount.technicalDetails', 'billingAccount.billingStatus'])
+                ->whereIn('id', $latestInvoiceIds)
+                ->whereIn('status', ['Unpaid', 'Partial'])
+                ->whereHas('billingAccount', function ($query) use ($billingDays) {
+                    $query->whereIn('billing_day', $billingDays);
+                })
+                ->get();
+
+            $totalCount = $invoices->count();
+            $this->writeLog("[RESULT] Found {$totalCount} invoice(s) due for pullout today");
+            $this->writeLog("");
 
             $this->writeLog("[PROCESS] Starting pullout request creation...");
             $this->writeLog("─────────────────────────────────────────────────────────────────");
@@ -1011,7 +1035,7 @@ class AutoDisconnectService
 
                     // 1. Create pullout service order
                     $this->writeLog("  [CREATE] Creating pullout service order...");
-                    $this->createPulloutRequest($billingAccount, $pulloutOffset);
+                    $this->createPulloutRequest($billingAccount, $totalOffset);
                     $this->writeLog("  [CREATE] ✓ Pullout service order created");
 
                     // 2. Restrict user via RADIUS (also creates disconnected_logs entry)
