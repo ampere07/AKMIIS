@@ -259,6 +259,7 @@ class CustomerDetailUpdateController extends Controller
             $validated = $request->validate([
                 'billing_status_id' => 'nullable',
                 'billing_day' => 'nullable|integer|min:0|max:31',
+                'date_installed' => 'nullable|date',
                 'vip_expiration' => 'nullable|date',
                 'vip_remarks' => 'nullable|string'
             ]);
@@ -271,6 +272,7 @@ class CustomerDetailUpdateController extends Controller
             $oldBillingDetails = [
                 'billing_status_id' => $billingAccount->billing_status_id,
                 'billing_day' => $billingAccount->billing_day,
+                'date_installed' => $billingAccount->date_installed,
                 'vip_expiration' => $billingAccount->vip_expiration,
                 'vip_remarks' => $billingAccount->vip_remarks,
             ];
@@ -311,6 +313,10 @@ class CustomerDetailUpdateController extends Controller
                 $updateData['billing_day'] = $validated['billing_day'];
             }
 
+            if ($request->has('date_installed')) {
+                $updateData['date_installed'] = $validated['date_installed'];
+            }
+
             if ($request->has('vip_expiration')) {
                 $updateData['vip_expiration'] = $validated['vip_expiration'];
             }
@@ -326,6 +332,7 @@ class CustomerDetailUpdateController extends Controller
             $newBillingDetails = [
                 'billing_status_id' => $billingAccount->billing_status_id,
                 'billing_day' => $billingAccount->billing_day,
+                'date_installed' => $billingAccount->date_installed,
                 'vip_expiration' => $billingAccount->vip_expiration,
                 'vip_remarks' => $billingAccount->vip_remarks,
             ];

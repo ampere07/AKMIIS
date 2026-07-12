@@ -207,6 +207,7 @@ const CustomerDetailsEditModal: React.FC<CustomerDetailsEditModalProps> = ({
         setFormData({
           billing_status_id: recordData.billing_status_id || recordData.billingStatus || recordData.billingAccount?.billingStatusName || recordData.status || recordData.billing_status || recordData.billingAccount?.billing_status || '',
           billing_day: recordData.billing_day || recordData.billingDay || recordData.Billing_Day || recordData.billingAccount?.billing_day || '',
+          date_installed: formatDateForInput(recordData.date_installed || recordData.dateInstalled || recordData.Date_Installed || recordData.billingAccount?.date_installed || ''),
           vip_expiration: formatDateForInput(recordData.vip_expiration || recordData.vipExpiration || ''),
           vip_remarks: recordData.vip_remarks || recordData.vipRemarks || recordData.billingAccount?.vip_remarks || ''
         });
@@ -1426,6 +1427,29 @@ const CustomerDetailsEditModal: React.FC<CustomerDetailsEditModalProps> = ({
                       } ${isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'}`}
                   />
                   {errors.billing_day && <p className="text-red-500 text-xs mt-1">{errors.billing_day}</p>}
+                </div>
+
+                <div>
+                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                    Date Installed
+                  </label>
+                  <input
+                    type="date"
+                    value={formData.date_installed || ''}
+                    onChange={(e) => handleInputChange('date_installed', e.target.value)}
+                    onFocus={(e) => {
+                      if (colorPalette?.primary) {
+                        e.currentTarget.style.borderColor = colorPalette.primary;
+                        e.currentTarget.style.boxShadow = `0 0 0 1px ${colorPalette.primary}`;
+                      }
+                    }}
+                    onBlur={(e) => {
+                      e.currentTarget.style.borderColor = isDarkMode ? '#374151' : '#d1d5db';
+                      e.currentTarget.style.boxShadow = 'none';
+                    }}
+                    className={`w-full px-3 py-2 border rounded focus:outline-none transition-colors ${isDarkMode ? 'border-gray-700' : 'border-gray-300'
+                      } ${isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'}`}
+                  />
                 </div>
               </>
             )}
