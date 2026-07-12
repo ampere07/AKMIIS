@@ -1,5 +1,5 @@
 // src/pages/LiveMonitor.tsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Bar, Line, Pie, Doughnut } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -100,6 +100,22 @@ const LiveMonitor: React.FC = () => {
   // React Grid Layout state
 
   const [layouts, setLayouts] = useState<any>({ lg: [] });
+
+  // Widgets are only movable/resizable in Edit Layout mode. We gate this with per-item
+  // isDraggable/isResizable flags (which override the grid-level props) rather than
+  // `static` — `static` would also disable compaction and leave newly-added widgets
+  // (placed with y: Infinity) unpositioned and hidden.
+  const displayLayouts = useMemo(() => {
+    const out: any = {};
+    Object.keys(layouts || {}).forEach((bp) => {
+      out[bp] = (layouts[bp] || []).map((item: any) => ({
+        ...item,
+        isDraggable,
+        isResizable: isDraggable,
+      }));
+    });
+    return out;
+  }, [layouts, isDraggable]);
 
   useEffect(() => {
     if (isSuperAdmin) {
@@ -1697,7 +1713,7 @@ const LiveMonitor: React.FC = () => {
       <div className={`${isFullscreen ? 'max-w-none px-2' : 'container mx-auto px-4'} py-6`}>
         <ResponsiveGridLayout
           className="layout"
-          layouts={layouts}
+          layouts={displayLayouts}
           breakpoints={{ lg: 1200, md: 996, sm: 768, xs: 480, xxs: 0 }}
           cols={{ lg: 12, md: 10, sm: 6, xs: 4, xxs: 2 }}
           rowHeight={60}

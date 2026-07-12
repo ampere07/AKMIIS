@@ -606,8 +606,8 @@ const UserDetails: React.FC<UserDetailsProps> = ({
           />
         )}
 
-        <div className="flex-1 overflow-y-auto block h-full flex flex-col">
-          <div className={`p-3 flex items-center justify-between border-b ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div className={`flex-shrink-0 p-3 flex items-center justify-between border-b ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
             <div className="flex-1 min-w-0 pr-4">
               <h2 className={`truncate text-sm font-semibold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>{getFullName(displayUser)}</h2>
             </div>
@@ -736,7 +736,7 @@ const UserDetails: React.FC<UserDetailsProps> = ({
             </div>
           </div>
 
-          <div className={`flex-1 overflow-y-auto w-full h-full relative ${activeIsMobile ? 'pb-24' : ''}`}>
+          <div className={`flex-1 min-h-0 overflow-y-auto w-full relative ${activeIsMobile ? 'pb-24' : ''}`}>
             <div className={`max-w-2xl mx-auto py-6 px-4 ${isDarkMode ? 'bg-gray-950' : 'bg-gray-50'}`}>
               <div className="space-y-4">
                 {fieldOrder.map((fieldKey) => (

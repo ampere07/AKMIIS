@@ -303,15 +303,21 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
       }
     });
 
-    // Fit to all technicians once, on first data arrival.
-    if (!didFit.current && bounds.length > 0) {
+    // Auto zoom-out to keep every technician in view. Fit on first data arrival,
+    // and again whenever a technician is outside the current viewport (new tech joined
+    // or moved off-screen). Skipped while a technician is selected so the trail/recenter
+    // view isn't overridden.
+    if (bounds.length > 0 && selectedTechId == null) {
       try {
-        if (bounds.length === 1) {
-          mapObj.current.setView(bounds[0], 15);
-        } else {
-          mapObj.current.fitBounds(bounds, { padding: [40, 40] });
+        const anyOutside = bounds.some((b) => !mapObj.current.getBounds().contains(b));
+        if (!didFit.current || anyOutside) {
+          if (bounds.length === 1) {
+            mapObj.current.setView(bounds[0], Math.min(mapObj.current.getZoom() || 15, 15));
+          } else {
+            mapObj.current.fitBounds(bounds, { padding: [40, 40] });
+          }
+          didFit.current = true;
         }
-        didFit.current = true;
       } catch (e) {
         /* ignore */
       }

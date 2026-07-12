@@ -169,7 +169,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           }
           .login-left {
             order: 2 !important;
-            background: linear-gradient(135deg, #b91c1c 0%, #000000 100%) !important;
+            background: linear-gradient(135deg, ${colorPalette?.primary || '#7c3aed'} 0%, ${colorPalette?.secondary || '#7c3aed'} 100%) !important;
             border-radius: 30px !important;
             padding: 40px 25px !important;
             margin-bottom: 40px !important;
@@ -207,7 +207,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
             font-size: 16px !important;
             text-transform: uppercase !important;
             letter-spacing: 1px !important;
-            color: #b91c1c !important;
+            color: ${colorPalette?.primary || '#7c3aed'} !important;
           }
           .login-button:disabled {
             color: #ffffff !important;
@@ -216,12 +216,12 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           .apply-button {
             border-radius: 50px !important;
             padding: 16px 60px !important;
-            background-color: #cc0000 !important;
+            background-color: ${colorPalette?.primary || '#7c3aed'} !important;
             width: 100% !important;
             max-width: 280px !important;
           }
           .new-here-text {
-            color: #cc0000 !important;
+            color: ${colorPalette?.primary || '#7c3aed'} !important;
             font-size: 32px !important;
           }
         }
@@ -459,7 +459,6 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                       type={showPassword ? "text" : "password"}
                       value={mobileNo}
                       onChange={(e) => setMobileNo(e.target.value)}
-                      inputMode="tel"
                       className="login-input"
                       style={{
                         width: '100%',
