@@ -13,7 +13,8 @@
       "android": {
         "image": "latest",
         "buildType": "app-bundle",
-        "autoIncrement": true
+        "autoIncrement": true,
+        "credentialsSource": "local"
       },
       "ios": {
         "image": "latest",

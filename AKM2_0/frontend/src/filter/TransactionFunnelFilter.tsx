@@ -121,12 +121,12 @@ const TransactionFunnelFilter: React.FC<TransactionFunnelFilterProps> = ({
                         setPaymentMethods(pmRes.data.data);
                     }
                     if (ttRes.data.success) {
-                        setTransactionTypes(ttRes.data.data);
+                        setTransactionTypes([...ttRes.data.data].sort((a, b) => String(a).localeCompare(String(b))));
                     }
                     if (locRes.data.success) {
-                        setBarangays(locRes.data.data.barangays);
-                        setCities(locRes.data.data.cities);
-                        setRegions(locRes.data.data.regions);
+                        setBarangays([...locRes.data.data.barangays].sort((a, b) => String(a).localeCompare(String(b))));
+                        setCities([...locRes.data.data.cities].sort((a, b) => String(a).localeCompare(String(b))));
+                        setRegions([...locRes.data.data.regions].sort((a, b) => String(a).localeCompare(String(b))));
                     }
                 } catch (err) {
                     console.error('Failed to fetch checklist data:', err);
@@ -519,7 +519,7 @@ const TransactionFunnelFilter: React.FC<TransactionFunnelFilterProps> = ({
                                 renderFilterInput()
                             ) : (
                                 <div className="space-y-1">
-                                    {allColumns.map((column) => {
+                                    {[...allColumns].sort((a, b) => a.label.localeCompare(b.label)).map((column) => {
                                         const isActive = !!filterValues[column.key];
                                         return (
                                             <button

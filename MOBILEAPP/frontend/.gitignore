@@ -80,4 +80,7 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
+# credentials (contains keystore passwords)
+credentials.json
+
 # @end expo-cli

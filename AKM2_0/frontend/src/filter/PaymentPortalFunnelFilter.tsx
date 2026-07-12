@@ -124,9 +124,9 @@ const PaymentPortalFunnelFilter: React.FC<PaymentPortalFunnelFilterProps> = ({
                     ]);
 
                     if (ppRes.status === 'fulfilled' && ppRes.value.data.success) {
-                        setStatuses(ppRes.value.data.data.statuses);
-                        setTransactionStatuses(ppRes.value.data.data.transaction_statuses);
-                        setPaymentChannels(ppRes.value.data.data.payment_channels);
+                        setStatuses([...ppRes.value.data.data.statuses].sort((a, b) => String(a).localeCompare(String(b))));
+                        setTransactionStatuses([...ppRes.value.data.data.transaction_statuses].sort((a, b) => String(a).localeCompare(String(b))));
+                        setPaymentChannels([...ppRes.value.data.data.payment_channels].sort((a, b) => String(a).localeCompare(String(b))));
                     }
 
                     if (planData.status === 'fulfilled' && planData.value) {
@@ -135,18 +135,18 @@ const PaymentPortalFunnelFilter: React.FC<PaymentPortalFunnelFilterProps> = ({
                             const price = Math.floor(Number((p as any).price || 0));
                             return `${name} ${price}`;
                         });
-                        setPlans(formattedPlans);
+                        setPlans([...formattedPlans].sort((a, b) => String(a).localeCompare(String(b))));
                     }
 
                     if (locRes.status === 'fulfilled' && locRes.value.data.success) {
-                        setBarangays(locRes.value.data.data.barangays);
-                        setCities(locRes.value.data.data.cities);
-                        setRegions(locRes.value.data.data.regions);
+                        setBarangays([...locRes.value.data.data.barangays].sort((a, b) => String(a).localeCompare(String(b))));
+                        setCities([...locRes.value.data.data.cities].sort((a, b) => String(a).localeCompare(String(b))));
+                        setRegions([...locRes.value.data.data.regions].sort((a, b) => String(a).localeCompare(String(b))));
                     }
 
 
                     if (pmRes.status === 'fulfilled' && pmRes.value.success) {
-                        setPaymentMethods(pmRes.value.data);
+                        setPaymentMethods([...pmRes.value.data].sort((a, b) => String(a.payment_method).localeCompare(String(b.payment_method))));
                     }
                 } catch (err) {
                     console.error('Failed to fetch checklist data:', err);
@@ -552,7 +552,7 @@ const PaymentPortalFunnelFilter: React.FC<PaymentPortalFunnelFilterProps> = ({
                                 renderFilterInput()
                             ) : (
                                 <div className="space-y-1">
-                                    {allColumns.map((column) => {
+                                    {[...allColumns].sort((a, b) => a.label.localeCompare(b.label)).map((column) => {
                                         const isActive = !!filterValues[column.key];
                                         return (
                                             <button

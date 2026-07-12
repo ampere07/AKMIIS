@@ -3,7 +3,7 @@
     "name": "AKM",
     "slug": "akm",
     "scheme": "akm-app",
-    "version": "2.5.49",
+    "version": "2.5.50",
     "orientation": "portrait",
     "icon": "./assets/applogo.png",
     "userInterfaceStyle": "light",
@@ -108,7 +108,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "3adab6a6-35b7-4ca3-b104-24624a17fc91"
+        "projectId": "e893eb60-4b54-4d45-bcd7-1b534e57f0cf"
       }
     }
   }

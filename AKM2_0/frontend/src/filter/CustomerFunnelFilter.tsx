@@ -189,29 +189,29 @@ const CustomerFunnelFilter: React.FC<CustomerFunnelFilterProps> = ({
               const price = Math.floor(Number(p.price || 0));
               return `${name} ${price}`;
             });
-            setPlans(formattedPlans);
+            setPlans([...formattedPlans].sort((a, b) => String(a).localeCompare(String(b))));
           }
 
           if (locRes.data.success) {
-            setBarangays(locRes.data.data.barangays);
-            setCities(locRes.data.data.cities);
-            setRegions(locRes.data.data.regions);
+            setBarangays([...locRes.data.data.barangays].sort((a, b) => String(a).localeCompare(String(b))));
+            setCities([...locRes.data.data.cities].sort((a, b) => String(a).localeCompare(String(b))));
+            setRegions([...locRes.data.data.regions].sort((a, b) => String(a).localeCompare(String(b))));
           }
 
           if (custRes.data.success) {
-            setLcpNames(custRes.data.data.lcp_names);
-            setNapNames(custRes.data.data.nap_names);
-            setPorts(custRes.data.data.ports);
-            setVlans(custRes.data.data.vlans);
-            setLcpnaps(custRes.data.data.lcpnaps);
-            setRouterModels(custRes.data.data.router_models);
-            setUsageTypes(custRes.data.data.usage_types);
-            setConnectionTypes(custRes.data.data.connection_types);
-            setUsernameStatuses(custRes.data.data.username_statuses);
-            setSessionStatuses(custRes.data.data.session_statuses);
-            setSessionGroups(custRes.data.data.session_groups || []);
-            setGroupNames(custRes.data.data.group_names);
-            setBillingStatuses(custRes.data.data.billing_statuses);
+            setLcpNames([...custRes.data.data.lcp_names].sort((a, b) => String(a).localeCompare(String(b))));
+            setNapNames([...custRes.data.data.nap_names].sort((a, b) => String(a).localeCompare(String(b))));
+            setPorts([...custRes.data.data.ports].sort((a, b) => String(a).localeCompare(String(b))));
+            setVlans([...custRes.data.data.vlans].sort((a, b) => String(a).localeCompare(String(b))));
+            setLcpnaps([...custRes.data.data.lcpnaps].sort((a, b) => String(a).localeCompare(String(b))));
+            setRouterModels([...custRes.data.data.router_models].sort((a, b) => String(a).localeCompare(String(b))));
+            setUsageTypes([...custRes.data.data.usage_types].sort((a, b) => String(a).localeCompare(String(b))));
+            setConnectionTypes([...custRes.data.data.connection_types].sort((a, b) => String(a).localeCompare(String(b))));
+            setUsernameStatuses([...custRes.data.data.username_statuses].sort((a, b) => String(a).localeCompare(String(b))));
+            setSessionStatuses([...custRes.data.data.session_statuses].sort((a, b) => String(a).localeCompare(String(b))));
+            setSessionGroups([...(custRes.data.data.session_groups || [])].sort((a, b) => String(a).localeCompare(String(b))));
+            setGroupNames([...custRes.data.data.group_names].sort((a, b) => String(a).localeCompare(String(b))));
+            setBillingStatuses([...custRes.data.data.billing_statuses].sort((a, b) => a.name.localeCompare(b.name)));
           }
         } catch (err) {
           console.error('Failed to fetch checklist data:', err);
@@ -599,7 +599,7 @@ const CustomerFunnelFilter: React.FC<CustomerFunnelFilterProps> = ({
                 renderFilterInput()
               ) : (
                 <div className="space-y-1">
-                  {allColumns.map((column) => {
+                  {[...allColumns].sort((a, b) => a.label.localeCompare(b.label)).map((column) => {
                     const isActive = !!filterValues[column.key];
                     return (
                       <button
