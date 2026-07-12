@@ -695,9 +695,9 @@ class AutoDisconnectService
 
         $this->writeLog("[GRACE] Billing day(s) whose additional-invoice date is today (billing day + {$totalOffset} cycle days): " . implode(', ', $billingDays));
 
-        // Only restricted/disconnected accounts (those that were auto-DC'd) qualify.
+        // Only restricted/disconnected/pulled-out accounts qualify (any status except Active and Pending).
         $disconnectedStatusIds = DB::table('billing_status')
-            ->whereIn('status_name', ['Inactive', 'Disconnected', 'Restricted', 'Offline', 'Pullout', 'Pullout Restricted'])
+            ->whereNotIn('status_name', ['Active', 'Pending'])
             ->pluck('id')
             ->toArray();
 
