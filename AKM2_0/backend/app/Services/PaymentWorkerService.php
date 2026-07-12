@@ -612,35 +612,37 @@ class PaymentWorkerService
     {
         $this->soFailLog('[RUNNING] Starting pullout service order check for account: ' . $accountNo);
         try {
-            // Balance guard: only auto-fail when the account is fully paid (balance <= 0)
+            // Balance guard: only auto-fail when the account is fully paid.
+            // Use a small epsilon so tiny rounding residuals still count as "paid".
             $balance = floatval(DB::table('billing_accounts')
                 ->where('account_no', $accountNo)
                 ->value('account_balance') ?? 0);
 
-            if ($balance > 0) {
+            if ($balance > 0.01) {
                 $this->soFailLog('[SKIP] Account balance still positive (₱' . number_format($balance, 2) . ') - skipping pullout fail for account: ' . $accountNo);
                 $this->soFailLog('[DONE] Completed pullout service order check for account: ' . $accountNo);
                 return;
             }
 
-            $order = DB::table('service_orders')
+            // Fail ALL of the customer's pullout SOs whose concern is exactly
+            // "pullout" / "for pullout" (case & spacing insensitive) and whose
+            // support_status is currently "In Progress" or "Reschedule".
+            $ids = DB::table('service_orders')
                 ->where('account_no', $accountNo)
                 ->whereIn(DB::raw('LOWER(TRIM(concern))'), ['pullout', 'for pullout'])
-                ->whereNotIn('support_status', ['Failed', 'Completed'])
-                ->whereNotIn('visit_status', ['Failed', 'Completed'])
-                ->orderBy('created_at', 'desc')
-                ->first();
+                ->whereRaw("LOWER(COALESCE(support_status, '')) IN (?, ?)", ['in progress', 'reschedule'])
+                ->pluck('id');
 
-            if (!$order) {
+            if ($ids->isEmpty()) {
                 $this->soFailLog('[SKIP] No open Pullout service orders found for account: ' . $accountNo);
                 $this->soFailLog('[DONE] Completed pullout service order check for account: ' . $accountNo);
                 return;
             }
 
-            $this->soFailLog('[FOUND] Pullout service order matched - ID: ' . $order->id . ', Account: ' . $accountNo);
+            $this->soFailLog('[FOUND] ' . $ids->count() . ' open pullout service order(s) for account: ' . $accountNo . ' (IDs: ' . $ids->implode(', ') . ')');
 
-            DB::table('service_orders')
-                ->where('id', $order->id)
+            $affected = DB::table('service_orders')
+                ->whereIn('id', $ids)
                 ->update([
                     'support_status'  => 'Failed',
                     'visit_status'    => 'Failed',
@@ -649,7 +651,7 @@ class PaymentWorkerService
                     'updated_at'      => now(),
                 ]);
 
-            $this->soFailLog('[SUCCESS] Pullout service order marked Failed - ID: ' . $order->id . ', Account: ' . $accountNo);
+            $this->soFailLog('[SUCCESS] Marked ' . $affected . ' pullout service order(s) Failed - Account: ' . $accountNo . ' (IDs: ' . $ids->implode(', ') . ')');
             $this->soFailLog('[DONE] Completed pullout service order check for account: ' . $accountNo);
         } catch (Exception $e) {
             $this->soFailLog('[FAILED] Account: ' . $accountNo . ' - Error: ' . $e->getMessage());

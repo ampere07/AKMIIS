@@ -16,7 +16,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.akmiis.app",
+      "bundleIdentifier": "com.akm.sync",
       "entitlements": {
         "aps-environment": "production"
       },
@@ -24,7 +24,9 @@
         "ITSAppUsesNonExemptEncryption": false,
         "NSLocationWhenInUseUsageDescription": "AKM uses your location to share your live position with your dispatch team while you are on duty.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "AKM shares your live location with your dispatch team while you are on duty, including when the app is in the background.",
-        "UIBackgroundModes": ["location"]
+        "UIBackgroundModes": [
+          "location"
+        ]
       }
     },
     "android": {
@@ -37,7 +39,7 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.akmiis.app",
+      "package": "com.akm.sync",
       "launchMode": "singleTask",
       "googleServicesFile": "./google-services.json",
       "config": {
