@@ -110,25 +110,39 @@ class SmsBlastController extends Controller
                 'lcpnap_id' => 'nullable|integer',
                 'lcp_id' => 'nullable|integer',
                 'billing_day' => 'nullable|integer',
+                'send_all' => 'nullable|boolean',
             ]);
 
             $recipients = collect();
 
-            if (!empty($validated['barangay_id'])) {
+            if (!empty($validated['send_all'])) {
+                // Send to every Active or VIP customer (org-scoped) that has a contact number.
+                $allQuery = DB::table('billing_accounts')
+                    ->join('customers', 'billing_accounts.customer_id', '=', 'customers.id')
+                    ->whereIn('billing_accounts.billing_status_id', [1, 7]) // Active + VIP
+                    ->whereNotNull('customers.contact_number_primary');
+
+                if ($currentUser && $currentUser->organization_id) {
+                    $allQuery->where('billing_accounts.organization_id', $currentUser->organization_id);
+                }
+
+                $recipients = $allQuery->select('customers.contact_number_primary as contact_no', 'customers.id as customer_id', 'billing_accounts.account_no as account_no')
+                    ->get();
+            } elseif (!empty($validated['barangay_id'])) {
                 // Get the barangay name from barangay table
                 $barangay = DB::table('barangay')->where('id', $validated['barangay_id'])->first();
                 if ($barangay) {
                     $customerQuery = DB::table('customers')
                         ->join('billing_accounts', 'customers.id', '=', 'billing_accounts.customer_id')
                         ->where('customers.barangay', $barangay->barangay)
-                        ->where('billing_accounts.billing_status_id', 1)
+                        ->whereIn('billing_accounts.billing_status_id', [1, 7])
                         ->whereNotNull('customers.contact_number_primary');
                     
                     if ($currentUser && $currentUser->organization_id) {
                         $customerQuery->where('customers.organization_id', $currentUser->organization_id);
                     }
                     
-                    $recipients = $customerQuery->select('customers.contact_number_primary as contact_no', 'customers.id as customer_id')
+                    $recipients = $customerQuery->select('customers.contact_number_primary as contact_no', 'customers.id as customer_id', 'billing_accounts.account_no as account_no')
                         ->get();
                 }
             } elseif (!empty($validated['lcp_id'])) {
@@ -138,14 +152,14 @@ class SmsBlastController extends Controller
                         ->join('billing_accounts', 'technical_details.account_no', '=', 'billing_accounts.account_no')
                         ->join('customers', 'billing_accounts.customer_id', '=', 'customers.id')
                         ->where('technical_details.lcp', $lcp->lcp_name)
-                        ->where('billing_accounts.billing_status_id', 1)
+                        ->whereIn('billing_accounts.billing_status_id', [1, 7])
                         ->whereNotNull('customers.contact_number_primary');
                     
                     if ($currentUser && $currentUser->organization_id) {
                         $techQuery->where('technical_details.organization_id', $currentUser->organization_id);
                     }
                     
-                    $recipients = $techQuery->select('customers.contact_number_primary as contact_no', 'customers.id as customer_id')
+                    $recipients = $techQuery->select('customers.contact_number_primary as contact_no', 'customers.id as customer_id', 'billing_accounts.account_no as account_no')
                         ->get();
                 }
             } elseif (!empty($validated['lcpnap_id'])) {
@@ -155,28 +169,28 @@ class SmsBlastController extends Controller
                         ->join('billing_accounts', 'technical_details.account_no', '=', 'billing_accounts.account_no')
                         ->join('customers', 'billing_accounts.customer_id', '=', 'customers.id')
                         ->where('technical_details.lcpnap', $lcpnap->lcpnap_name)
-                        ->where('billing_accounts.billing_status_id', 1)
+                        ->whereIn('billing_accounts.billing_status_id', [1, 7])
                         ->whereNotNull('customers.contact_number_primary');
                     
                     if ($currentUser && $currentUser->organization_id) {
                         $napQuery->where('technical_details.organization_id', $currentUser->organization_id);
                     }
                     
-                    $recipients = $napQuery->select('customers.contact_number_primary as contact_no', 'customers.id as customer_id')
+                    $recipients = $napQuery->select('customers.contact_number_primary as contact_no', 'customers.id as customer_id', 'billing_accounts.account_no as account_no')
                         ->get();
                 }
             } elseif (!empty($validated['billing_day'])) {
                 $billingQuery = DB::table('billing_accounts')
                     ->join('customers', 'billing_accounts.customer_id', '=', 'customers.id')
                     ->where('billing_accounts.billing_day', $validated['billing_day'])
-                    ->where('billing_accounts.billing_status_id', 1) // Active
+                    ->whereIn('billing_accounts.billing_status_id', [1, 7]) // Active + VIP
                     ->whereNotNull('customers.contact_number_primary');
                 
                 if ($currentUser && $currentUser->organization_id) {
                     $billingQuery->where('billing_accounts.organization_id', $currentUser->organization_id);
                 }
                 
-                $recipients = $billingQuery->select('customers.contact_number_primary as contact_no', 'customers.id as customer_id')
+                $recipients = $billingQuery->select('customers.contact_number_primary as contact_no', 'customers.id as customer_id', 'billing_accounts.account_no as account_no')
                     ->get();
             }
 
@@ -202,28 +216,62 @@ class SmsBlastController extends Controller
                     'resource_id' => $smsLog->id,
                     'additional_data' => [
                         'message_count' => $recipientCount,
-                        'target_type' => !empty($validated['barangay_id']) ? 'Barangay' : (!empty($validated['lcp_id']) ? 'LCP' : (!empty($validated['lcpnap_id']) ? 'LCPNAP' : (!empty($validated['billing_day']) ? 'Billing Day' : 'Unknown'))),
+                        'target_type' => !empty($validated['send_all']) ? 'All Customers' : (!empty($validated['barangay_id']) ? 'Barangay' : (!empty($validated['lcp_id']) ? 'LCP' : (!empty($validated['lcpnap_id']) ? 'LCPNAP' : (!empty($validated['billing_day']) ? 'Billing Day' : 'Unknown')))),
                         'target_id' => $validated['barangay_id'] ?? $validated['lcp_id'] ?? $validated['lcpnap_id'] ?? $validated['billing_day'] ?? null,
                         'organization_id' => $smsLog->organization_id
                     ]
                 ]
             );
 
-            // Send actual SMS via Itexmo
+            // Send actual SMS via Itexmo — track real outcomes instead of assuming success.
+            $sentCount = 0;
+            $failedCount = 0;
+            $firstError = null;
+
             if ($recipientCount > 0) {
                 $smsService = new \App\Services\ItexmoSmsService();
                 foreach ($recipients as $recipient) {
-                    $smsService->send([
+                    // Substitute supported variables per recipient (e.g. {{account_no}}).
+                    $personalizedMessage = str_replace(
+                        '{{account_no}}',
+                        $recipient->account_no ?? '',
+                        $validated['message']
+                    );
+                    $result = $smsService->send([
                         'contact_no' => $recipient->contact_no,
-                        'message' => $validated['message']
+                        'message' => $personalizedMessage
                     ]);
+
+                    if (is_array($result) && ($result['success'] ?? false)) {
+                        $sentCount++;
+                    } else {
+                        $failedCount++;
+                        if ($firstError === null) {
+                            $firstError = is_array($result) ? ($result['error'] ?? 'Unknown SMS error') : 'Unknown SMS error';
+                        }
+                    }
+                }
+
+                if ($failedCount > 0) {
+                    \Log::warning("SMS Blast partial/failed delivery: sent {$sentCount}, failed {$failedCount}. First error: {$firstError}");
                 }
             }
 
+            $message = $recipientCount === 0
+                ? 'SMS Blast saved, but no recipients matched the selected target (check that customers are Active/VIP and have a contact number).'
+                : "SMS Blast: {$sentCount} sent, {$failedCount} failed out of {$recipientCount} recipient(s)."
+                    . ($failedCount > 0 && $firstError ? " First error: {$firstError}" : '');
+
             return response()->json([
-                'status' => 'success',
-                'message' => "SMS Blast log created and SMS sent to {$recipientCount} recipients successfully",
-                'data' => $smsLog
+                'status' => ($recipientCount > 0 && $sentCount === 0) ? 'error' : 'success',
+                'message' => $message,
+                'data' => $smsLog,
+                'summary' => [
+                    'recipients' => $recipientCount,
+                    'sent' => $sentCount,
+                    'failed' => $failedCount,
+                    'first_error' => $firstError,
+                ],
             ], 201);
         } catch (\Exception $e) {
             return response()->json([

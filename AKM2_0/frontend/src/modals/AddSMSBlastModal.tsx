@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Minus, Plus, ChevronDown, Search, Loader2 } from 'lucide-react';
 import * as lcpnapService from '../services/lcpnapService';
 import * as lcpService from '../services/lcpService';
@@ -21,7 +21,7 @@ interface AddSMSBlastModalProps {
     onSave: () => void;
 }
 
-type TargetType = 'lcpnap' | 'lcp' | 'barangay' | 'billing_day' | null;
+type TargetType = 'all' | 'lcpnap' | 'lcp' | 'barangay' | 'billing_day' | null;
 
 const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
     isOpen,
@@ -30,6 +30,7 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
 }) => {
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
+    const messageRef = useRef<HTMLTextAreaElement>(null);
 
     const [formData, setFormData] = useState({
         message: '',
@@ -127,6 +128,26 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
         }
     };
 
+    // Insert a message variable (e.g. {{account_no}}) at the caret position.
+    // The backend replaces it with each recipient's real value when sending.
+    const insertVariable = (token: string) => {
+        const el = messageRef.current;
+        const current = formData.message || '';
+        if (el && typeof el.selectionStart === 'number') {
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            const next = current.slice(0, start) + token + current.slice(end);
+            handleInputChange('message', next);
+            requestAnimationFrame(() => {
+                el.focus();
+                const pos = start + token.length;
+                el.setSelectionRange(pos, pos);
+            });
+        } else {
+            handleInputChange('message', current + token);
+        }
+    };
+
 
 
     const handleTargetTypeChange = (type: TargetType) => {
@@ -150,7 +171,7 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
             newErrors.targetType = 'Please select a target type';
         }
 
-        if (formData.targetType && formData.targetType !== 'billing_day' && !formData.selectedId) {
+        if (formData.targetType && formData.targetType !== 'billing_day' && formData.targetType !== 'all' && !formData.selectedId) {
             newErrors.selectedId = 'Please select an item from the dropdown';
         }
 
@@ -202,20 +223,29 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
                 payload.barangay_id = formData.selectedId;
             } else if (formData.targetType === 'billing_day') {
                 payload.billing_day = formData.billingDay;
+            } else if (formData.targetType === 'all') {
+                payload.send_all = true;
             }
 
-            await apiClient.post('/sms-blast', payload);
+            const response = await apiClient.post('/sms-blast', payload);
 
             clearInterval(progressInterval);
             setLoadingPercentage(100);
 
             await new Promise(resolve => setTimeout(resolve, 500));
 
+            const resp: any = response?.data || {};
+            const summary = resp.summary;
+            // Treat "saved but nothing actually sent" as a warning, not a success.
+            const nothingSent = summary && summary.recipients > 0 && summary.sent === 0;
+            const noRecipients = summary && summary.recipients === 0;
+            const isProblem = resp.status === 'error' || nothingSent || noRecipients;
+
             setModal({
                 isOpen: true,
-                type: 'success',
-                title: 'Success',
-                message: 'SMS Blast created successfully!',
+                type: isProblem ? 'warning' : 'success',
+                title: isProblem ? 'SMS Blast Saved (Not Sent)' : 'Success',
+                message: resp.message || 'SMS Blast created successfully!',
                 onConfirm: () => {
                     onSave();
                     onClose();
@@ -341,10 +371,27 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
                                 }`}>
                                 Message<span className="text-red-500">*</span>
                             </label>
+
+                            {/* Insertable message variables */}
+                            <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                <span className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>Insert variable:</span>
+                                <button
+                                    type="button"
+                                    onClick={() => insertVariable('{{account_no}}')}
+                                    className={`text-xs font-medium px-2 py-1 rounded border transition-colors ${isDarkMode
+                                        ? 'border-gray-700 text-gray-200 hover:bg-gray-800'
+                                        : 'border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+                                    style={{ borderColor: colorPalette?.primary || undefined, color: colorPalette?.primary || undefined }}
+                                >
+                                    + Account No
+                                </button>
+                            </div>
+
                             <textarea
+                                ref={messageRef}
                                 value={formData.message}
                                 onChange={(e) => handleInputChange('message', e.target.value)}
-                                placeholder="Type your message here..."
+                                placeholder="Type your message here... Use {{account_no}} to insert each recipient's account number."
                                 rows={4}
                                 className={`w-full px-3 py-2 border rounded focus:outline-none ${isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'
                                     } ${errors.message ? 'border-red-500' : isDarkMode ? 'border-gray-700' : 'border-gray-300'}`}
@@ -352,6 +399,12 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
                                     borderColor: errors.message ? '#ef4444' : (colorPalette && formData.message ? colorPalette.primary : '')
                                 }}
                             />
+                            <p className={`text-xs mt-1 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                                <code
+                                    className={`px-1 py-0.5 rounded font-mono text-[11px] ${isDarkMode ? 'bg-gray-800 text-gray-200' : 'bg-gray-100 text-gray-700'}`}
+                                    style={{ color: colorPalette?.primary || undefined }}
+                                >{'{{account_no}}'}</code> is replaced with each recipient's account number when the blast is sent.
+                            </p>
                             {errors.message && <p className="text-red-500 text-xs mt-1">{errors.message}</p>}
                         </div>
 
@@ -360,11 +413,27 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
                                 }`}>
                                 Target Type<span className="text-red-500">*</span>
                             </label>
-                            <div className="flex gap-3">
+                            <div className="flex flex-wrap gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => handleTargetTypeChange('all')}
+                                    className={`flex-1 min-w-[100px] px-4 py-2 rounded border transition-colors ${formData.targetType === 'all'
+                                        ? 'text-white'
+                                        : isDarkMode
+                                            ? 'bg-gray-800 border-gray-700 text-gray-300 hover:border-gray-600'
+                                            : 'bg-white border-gray-300 text-gray-700 hover:border-gray-400'
+                                        }`}
+                                    style={formData.targetType === 'all' ? {
+                                        backgroundColor: colorPalette?.primary || '#7c3aed',
+                                        borderColor: colorPalette?.primary || '#7c3aed'
+                                    } : {}}
+                                >
+                                    All Customers
+                                </button>
                                 <button
                                     type="button"
                                     onClick={() => handleTargetTypeChange('lcpnap')}
-                                    className={`flex-1 px-4 py-2 rounded border transition-colors ${formData.targetType === 'lcpnap'
+                                    className={`flex-1 min-w-[100px] px-4 py-2 rounded border transition-colors ${formData.targetType === 'lcpnap'
                                         ? 'text-white'
                                         : isDarkMode
                                             ? 'bg-gray-800 border-gray-700 text-gray-300 hover:border-gray-600'
