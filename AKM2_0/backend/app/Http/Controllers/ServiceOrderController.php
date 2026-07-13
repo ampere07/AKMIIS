@@ -1014,6 +1014,26 @@ class ServiceOrderController extends Controller
 
 
 
+            // Trigger Reactivation if concern is 'Reactivate' — set the account back to Active
+            // and re-apply the customer's plan in RADIUS (reuses the reconnection routine).
+            $reactivateStatus = null;
+            $isAlreadyResolvedReactivate = ($originalConcern === 'Reactivate' && $originalSupportStatus === 'resolved');
+            if ($normalizedConcern === 'reactivate' && $supportStatus === 'resolved' && !$isAlreadyResolvedReactivate) {
+                $billingAccount = BillingAccount::where('account_no', $order->account_no)->first();
+                if ($billingAccount && (int) $billingAccount->billing_status_id !== 1) {
+                    \Log::info('Triggering reactivation for Service Order with Reactivate concern', [
+                        'account_no' => $order->account_no,
+                        'current_billing_status_id' => $billingAccount->billing_status_id
+                    ]);
+                    // attemptReconnection sets billing_status_id to 1 (Active) and re-applies the plan in RADIUS
+                    $reactivateStatus = $this->attemptReconnection($billingAccount, $id, $updatedByUser, $organizationId);
+                } else {
+                    \Log::info('Reactivate concern skipped — billing account already Active or not found', [
+                        'account_no' => $order->account_no
+                    ]);
+                }
+            }
+
             // Trigger Restriction/Disconnection based on concern and support status
             $restrictedStatus = null;
             $pulloutStatus = null;
@@ -1109,6 +1129,7 @@ class ServiceOrderController extends Controller
                     'visit_status' => $request->input('visit_status'),
                     'assigned_email' => $request->input('assigned_email'),
                     'reconnect_status' => $reconnectStatus,
+                    'reactivate_status' => $reactivateStatus,
                     'restricted_status' => $restrictedStatus,
                     'pullout_status' => $pulloutStatus,
                     'migration_status' => $migrationStatus
