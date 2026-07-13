@@ -107,7 +107,7 @@ const ApplicationVisitFunnelFilter: React.FC<ApplicationVisitFunnelFilterProps> 
               const price = Math.floor(Number(p.price || 0));
               return `${name} ${price}`;
             });
-            setPlans(formattedPlans);
+            setPlans([...formattedPlans].sort((a, b) => String(a).localeCompare(String(b))));
           }
         } catch (err) {
           console.error('Failed to fetch checklist data:', err);
@@ -475,7 +475,7 @@ const ApplicationVisitFunnelFilter: React.FC<ApplicationVisitFunnelFilterProps> 
                         Application Visit Details
                       </h3>
                       <div className="flex flex-col gap-2 w-full">
-                        {groupedColumns.application_visits.map(column => {
+                        {[...groupedColumns.application_visits].sort((a, b) => a.label.localeCompare(b.label)).map(column => {
                           const hasFilter = filterValues[column.key] && (
                             filterValues[column.key].value ||
                             filterValues[column.key].from !== undefined ||

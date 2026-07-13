@@ -7,9 +7,9 @@
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:57928392906:android:99fc593128e1a607c19433",
+        "mobilesdk_app_id": "1:57928392906:android:80b2e658de8972dec19433",
         "android_client_info": {
-          "package_name": "com.akmiis.app"
+          "package_name": "com.akm.sync"
         }
       },
       "oauth_client": [],

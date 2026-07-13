@@ -68,7 +68,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
       items: [
         { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['agent'] },
         { id: 'customer-dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['customer'] },
-        { id: 'application-management', label: 'Application', icon: FileCheck, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
+        { id: 'applicationManagement', label: 'Application', icon: FileCheck, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
         { id: 'job-order', label: 'Job Order', icon: Wrench, allowedRoles: ['administrator', 'technician', 'agent', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 4, '4', 7, '7', 8, '8'] },
         { id: 'service-order', label: 'Service Order', icon: Settings, allowedRoles: ['administrator', 'technician', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 7, '7', 8, '8'] },
         { id: 'work-order', label: 'Work Order', icon: ClipboardCheck, allowedRoles: ['administrator', 'technician', 'agent', 'osp', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 4, '4', 6, '6', 7, '7', 8, '8'] },

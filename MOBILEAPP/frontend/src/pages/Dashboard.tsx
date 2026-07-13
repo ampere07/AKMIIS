@@ -165,6 +165,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                         setActiveSection('job-order');
                     } else if (user.role?.toLowerCase() === 'inventorystaff' || String(user.role_id) === '5') {
                         setActiveSection('inventory');
+                    } else if (user.role?.toLowerCase() === 'headtech' || String(user.role_id) === '7' || String(user.role_id) === '8') {
+                        setActiveSection('applicationManagement');
                     }
 
 

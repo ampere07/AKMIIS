@@ -1085,8 +1085,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
 
     if (isValidatingSN || validateCooldown > 0) return;
 
-    if (formData.connectionType !== 'Fiber') {
-      Alert.alert('Validation Info', 'SN validation is only available for Fiber connections.');
+    if (formData.connectionType !== 'Fiber' && formData.connectionType !== 'Antenna') {
+      Alert.alert('Validation Info', 'SN validation is only available for Fiber and Antenna connections.');
       return;
     }
 
@@ -2570,8 +2570,9 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
 
                 {/* Submit Button Logic */}
                 {(() => {
-                  const isFiberDone = formData.onsiteStatus === 'Done' && formData.connectionType === 'Fiber';
-                  const needsValidation = isFiberDone && !isSNValidated;
+                  const requiresSNValidation = formData.onsiteStatus === 'Done' &&
+                    (formData.connectionType === 'Fiber' || formData.connectionType === 'Antenna');
+                  const needsValidation = requiresSNValidation && !isSNValidated;
                   const isSubmitDisabled = loading || needsValidation;
                   const submitButtonBgColor = isSubmitDisabled
                     ? (isDarkMode ? '#4b5563' : '#9ca3af')

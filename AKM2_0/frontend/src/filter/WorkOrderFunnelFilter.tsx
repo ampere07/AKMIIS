@@ -377,7 +377,7 @@ const WorkOrderFunnelFilter: React.FC<WorkOrderFunnelFilterProps> = ({
                         Work Order Details
                       </h3>
                       <div className="flex flex-col gap-2 w-full">
-                        {groupedColumns.work_orders.map(column => {
+                        {[...groupedColumns.work_orders].sort((a, b) => a.label.localeCompare(b.label)).map(column => {
                           const hasFilter = filterValues[column.key] && (
                             filterValues[column.key].value ||
                             filterValues[column.key].from !== undefined ||

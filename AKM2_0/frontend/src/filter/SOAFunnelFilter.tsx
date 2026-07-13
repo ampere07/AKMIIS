@@ -127,19 +127,19 @@ const SOAFunnelFilter: React.FC<SOAFunnelFilterProps> = ({
                             const price = Math.floor(Number(p.price || 0));
                             return `${name} ${price}`;
                         });
-                        setPlans(formattedPlans);
+                        setPlans([...formattedPlans].sort((a, b) => String(a).localeCompare(String(b))));
                     }
 
                     if (locRes.data.success) {
-                        setBarangays(locRes.data.data.barangays);
-                        setCities(locRes.data.data.cities);
-                        setRegions(locRes.data.data.regions);
+                        setBarangays([...locRes.data.data.barangays].sort((a, b) => String(a).localeCompare(String(b))));
+                        setCities([...locRes.data.data.cities].sort((a, b) => String(a).localeCompare(String(b))));
+                        setRegions([...locRes.data.data.regions].sort((a, b) => String(a).localeCompare(String(b))));
                     }
 
                     if (soaLookup.data.success && soaLookup.data.data) {
-                        setModifiedByOptions(soaLookup.data.data.modified_by || []);
-                        setRemarksOptions(soaLookup.data.data.remarks || []);
-                        setStatusOptions(soaLookup.data.data.statuses || []);
+                        setModifiedByOptions([...(soaLookup.data.data.modified_by || [])].sort((a, b) => String(a).localeCompare(String(b))));
+                        setRemarksOptions([...(soaLookup.data.data.remarks || [])].sort((a, b) => String(a).localeCompare(String(b))));
+                        setStatusOptions([...(soaLookup.data.data.statuses || [])].sort((a, b) => String(a).localeCompare(String(b))));
                     }
                 } catch (err) {
                     console.error('Failed to fetch checklist data:', err);
@@ -566,7 +566,7 @@ const SOAFunnelFilter: React.FC<SOAFunnelFilterProps> = ({
                                 renderFilterInput()
                             ) : (
                                 <div className="space-y-1">
-                                    {allColumns.map((column) => {
+                                    {[...allColumns].sort((a, b) => a.label.localeCompare(b.label)).map((column) => {
                                         const isActive = !!filterValues[column.key];
                                         return (
                                             <button

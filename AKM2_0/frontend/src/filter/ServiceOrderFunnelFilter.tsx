@@ -34,6 +34,7 @@ interface Column {
 const STORAGE_KEY = 'serviceOrderFunnelFilters';
 
 export const allColumns: Column[] = [
+  { key: 'timestamp', label: 'Timestamp', dataType: 'datetime' },
   { key: 'ticketId', label: 'Ticket ID', dataType: 'varchar' },
   { key: 'emailAddress', label: 'Email Address', dataType: 'varchar' },
   { key: 'referredBy', label: 'Referred By', dataType: 'varchar' },
@@ -175,27 +176,27 @@ const ServiceOrderFunnelFilter: React.FC<ServiceOrderFunnelFilterProps> = ({
               const price = Math.floor(Number(p.price || 0));
               return `${name} ${price}`;
             });
-            setPlans(formattedPlans);
+            setPlans([...formattedPlans].sort((a, b) => String(a).localeCompare(String(b))));
           }
 
           if (locRes.data.success) {
-            setBarangays(locRes.data.data.barangays);
-            setCities(locRes.data.data.cities);
-            setRegions(locRes.data.data.regions);
+            setBarangays([...locRes.data.data.barangays].sort((a, b) => String(a).localeCompare(String(b))));
+            setCities([...locRes.data.data.cities].sort((a, b) => String(a).localeCompare(String(b))));
+            setRegions([...locRes.data.data.regions].sort((a, b) => String(a).localeCompare(String(b))));
           }
 
           if (soRes.data.success) {
-            setLcpNames(soRes.data.data.lcp_names);
-            setNapNames(soRes.data.data.nap_names);
-            setPorts(soRes.data.data.ports);
-            setVlans(soRes.data.data.vlans);
-            setLcpnaps(soRes.data.data.lcpnaps);
-            setNewPorts(soRes.data.data.new_ports);
-            setNewVlans(soRes.data.data.new_vlans);
-            setNewLcpnaps(soRes.data.data.new_lcpnaps);
-            setRouterModels(soRes.data.data.router_models);
-            setUsageTypes(soRes.data.data.usage_types);
-            setConcerns(soRes.data.data.concerns || []);
+            setLcpNames([...soRes.data.data.lcp_names].sort((a, b) => String(a).localeCompare(String(b))));
+            setNapNames([...soRes.data.data.nap_names].sort((a, b) => String(a).localeCompare(String(b))));
+            setPorts([...soRes.data.data.ports].sort((a, b) => String(a).localeCompare(String(b))));
+            setVlans([...soRes.data.data.vlans].sort((a, b) => String(a).localeCompare(String(b))));
+            setLcpnaps([...soRes.data.data.lcpnaps].sort((a, b) => String(a).localeCompare(String(b))));
+            setNewPorts([...soRes.data.data.new_ports].sort((a, b) => String(a).localeCompare(String(b))));
+            setNewVlans([...soRes.data.data.new_vlans].sort((a, b) => String(a).localeCompare(String(b))));
+            setNewLcpnaps([...soRes.data.data.new_lcpnaps].sort((a, b) => String(a).localeCompare(String(b))));
+            setRouterModels([...soRes.data.data.router_models].sort((a, b) => String(a).localeCompare(String(b))));
+            setUsageTypes([...soRes.data.data.usage_types].sort((a, b) => String(a).localeCompare(String(b))));
+            setConcerns([...(soRes.data.data.concerns || [])].sort((a, b) => String(a).localeCompare(String(b))));
           }
         } catch (err) {
           console.error('Failed to fetch checklist data:', err);
@@ -640,7 +641,7 @@ const ServiceOrderFunnelFilter: React.FC<ServiceOrderFunnelFilterProps> = ({
                 renderFilterInput()
               ) : (
                 <div className="space-y-1">
-                  {allColumns.map((column) => {
+                  {[...allColumns].sort((a, b) => a.label.localeCompare(b.label)).map((column) => {
                     const isActive = !!filterValues[column.key];
                     return (
                       <button

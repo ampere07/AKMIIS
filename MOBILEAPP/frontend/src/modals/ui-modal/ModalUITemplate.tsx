@@ -8,6 +8,7 @@ import {
     ActivityIndicator,
     useWindowDimensions,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { settingsColorPaletteService, ColorPalette } from '../../services/settingsColorPaletteService';
 
 export const ModalThemeContext = createContext<{ isDarkMode: boolean; colorPalette: ColorPalette | null }>({
@@ -63,6 +64,7 @@ const ModalUITemplate: React.FC<ModalUITemplateProps> = ({
     const [isDarkMode, setIsDarkMode] = useState<boolean>(forceDarkMode ?? false);
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(forcePalette ?? null);
     const { width } = useWindowDimensions();
+    const insets = useSafeAreaInsets();
 
     useEffect(() => {
         if (forceDarkMode !== undefined) {
@@ -115,7 +117,8 @@ const ModalUITemplate: React.FC<ModalUITemplateProps> = ({
                         {/* Header */}
                         <View style={{
                             paddingHorizontal: 24,
-                            paddingVertical: 16,
+                            paddingTop: insets.top + 16,
+                            paddingBottom: 16,
                             flexDirection: 'row',
                             alignItems: 'center',
                             justifyContent: 'space-between',

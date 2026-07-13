@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,8 +8,11 @@ import {
   Modal,
   StyleSheet,
   ActivityIndicator,
+  Animated,
+  Dimensions,
 } from 'react-native';
 import { X, ChevronLeft, ChevronRight, Search, Check } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import apiClient from '../config/api';
@@ -77,6 +80,11 @@ const SOAFunnelFilter: React.FC<SOAFunnelFilterProps> = ({
   currentFilters,
   records = [],
 }) => {
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth } = Dimensions.get('window');
+  const [rendered, setRendered] = useState(isOpen);
+  const slideX = useRef(new Animated.Value(screenWidth)).current;
+  const backdropOpacity = useRef(new Animated.Value(0)).current;
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
   const [selectedColumn, setSelectedColumn] = useState<Column | null>(null);
   const [filterValues, setFilterValues] = useState<FilterValues>({});
@@ -98,6 +106,24 @@ const SOAFunnelFilter: React.FC<SOAFunnelFilterProps> = ({
   useEffect(() => {
     settingsColorPaletteService.getActive().then(setColorPalette).catch(() => {});
   }, []);
+
+  // Slide the drawer in from the right on open, out to the right on close.
+  useEffect(() => {
+    if (isOpen) {
+      setRendered(true);
+      Animated.parallel([
+        Animated.timing(slideX, { toValue: 0, duration: 260, useNativeDriver: true }),
+        Animated.timing(backdropOpacity, { toValue: 0.4, duration: 260, useNativeDriver: true }),
+      ]).start();
+    } else {
+      Animated.parallel([
+        Animated.timing(slideX, { toValue: screenWidth, duration: 220, useNativeDriver: true }),
+        Animated.timing(backdropOpacity, { toValue: 0, duration: 220, useNativeDriver: true }),
+      ]).start(({ finished }) => {
+        if (finished) setRendered(false);
+      });
+    }
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load saved filters when opened
   useEffect(() => {
@@ -426,22 +452,23 @@ const SOAFunnelFilter: React.FC<SOAFunnelFilterProps> = ({
 
   return (
     <Modal
-      visible={isOpen}
-      animationType="slide"
+      visible={rendered}
+      animationType="none"
       transparent
       onRequestClose={onClose}
     >
-      {/* Backdrop */}
-      <TouchableOpacity
-        style={styles.backdrop}
-        activeOpacity={1}
-        onPress={onClose}
-      />
+      <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'flex-end' }}>
+        {/* Backdrop */}
+        <Animated.View
+          pointerEvents="none"
+          style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#000', opacity: backdropOpacity }}
+        />
+        <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={onClose} />
 
-      {/* Drawer */}
-      <View style={styles.drawer}>
+        {/* Drawer */}
+        <Animated.View style={[styles.drawer, { transform: [{ translateX: slideX }] }]}>
         {/* Header */}
-        <View style={styles.header}>
+        <View style={[styles.header, { paddingTop: insets.top }]}>
           <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
             {selectedColumn && (
               <TouchableOpacity onPress={handleBack} style={{ marginRight: 8 }}>
@@ -468,7 +495,7 @@ const SOAFunnelFilter: React.FC<SOAFunnelFilterProps> = ({
         </View>
 
         {/* Footer */}
-        <View style={styles.footer}>
+        <View style={[styles.footer, { paddingBottom: insets.bottom + 16 }]}>
           <TouchableOpacity style={styles.resetBtn} onPress={handleReset}>
             <Text style={styles.resetBtnText}>Clear All</Text>
           </TouchableOpacity>
@@ -479,6 +506,7 @@ const SOAFunnelFilter: React.FC<SOAFunnelFilterProps> = ({
             <Text style={styles.applyBtnText}>Apply Filters</Text>
           </TouchableOpacity>
         </View>
+        </Animated.View>
       </View>
     </Modal>
   );
@@ -492,15 +520,14 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.4)',
   },
   drawer: {
-    position: 'absolute',
-    right: 0, top: 0, bottom: 0,
-    width: 340,
+    width: '92%',
+    maxWidth: 560,
+    height: '100%',
     backgroundColor: CARD,
     shadowColor: '#000',
     shadowOpacity: 0.2,
     shadowRadius: 12,
     elevation: 10,
-    paddingTop: 60,
     flexDirection: 'column',
   },
   header: {

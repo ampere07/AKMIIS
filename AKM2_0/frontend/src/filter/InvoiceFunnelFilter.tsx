@@ -125,9 +125,9 @@ const InvoiceFunnelFilter: React.FC<InvoiceFunnelFilterProps> = ({
                     ]);
 
                     if (locRes.data.success) {
-                        setBarangays(locRes.data.data.barangays);
-                        setCities(locRes.data.data.cities);
-                        setRegions(locRes.data.data.regions);
+                        setBarangays([...locRes.data.data.barangays].sort((a, b) => String(a).localeCompare(String(b))));
+                        setCities([...locRes.data.data.cities].sort((a, b) => String(a).localeCompare(String(b))));
+                        setRegions([...locRes.data.data.regions].sort((a, b) => String(a).localeCompare(String(b))));
                     }
 
                     if (planData) {
@@ -136,16 +136,16 @@ const InvoiceFunnelFilter: React.FC<InvoiceFunnelFilterProps> = ({
                             const price = Math.floor(Number((p as any).price || 0));
                             return `${name} ${price}`;
                         });
-                        setPlans(formattedPlans);
+                        setPlans([...formattedPlans].sort((a, b) => String(a).localeCompare(String(b))));
                     }
 
                     if (portalLookup.data.success) {
-                        setProviders(portalLookup.data.data.payment_channels || []);
+                        setProviders([...(portalLookup.data.data.payment_channels || [])].sort((a, b) => String(a).localeCompare(String(b))));
                     }
 
                     if (invoiceLookup.data.success) {
-                        setRemarksOptions(invoiceLookup.data.data.remarks || []);
-                        setModifiedByOptions(invoiceLookup.data.data.modified_by || []);
+                        setRemarksOptions([...(invoiceLookup.data.data.remarks || [])].sort((a, b) => String(a).localeCompare(String(b))));
+                        setModifiedByOptions([...(invoiceLookup.data.data.modified_by || [])].sort((a, b) => String(a).localeCompare(String(b))));
                     }
                 } catch (err) {
                     console.error('Failed to fetch checklist data:', err);
@@ -511,7 +511,7 @@ const InvoiceFunnelFilter: React.FC<InvoiceFunnelFilterProps> = ({
                                             Invoice Details
                                         </h3>
                                         <div className="space-y-1">
-                                            {allColumns.map(column => {
+                                            {[...allColumns].sort((a, b) => a.label.localeCompare(b.label)).map(column => {
                                                 const isActive = !!filterValues[column.key];
                                                 return (
                                                     <button

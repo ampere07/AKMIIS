@@ -290,6 +290,11 @@ const ApplicationFunnelFilter: React.FC<ApplicationFunnelFilterProps> = ({
         options = [{ label: 'Agreed', value: 'true' }];
       }
 
+      // Sort dynamic option lists alphabetically; keep 'status' in its workflow order.
+      if (selectedColumn.key !== 'status') {
+        options = [...options].sort((a, b) => a.label.localeCompare(b.label));
+      }
+
       const filteredOptions = options.filter(opt =>
         opt.label.toLowerCase().includes(searchTerm.toLowerCase())
       );
@@ -500,7 +505,9 @@ const ApplicationFunnelFilter: React.FC<ApplicationFunnelFilterProps> = ({
                 renderFilterInput()
               ) : (
                 <div className="space-y-1">
-                  {allColumns.map((column) => {
+                  {[...allColumns]
+                    .sort((a, b) => a.label.localeCompare(b.label))
+                    .map((column) => {
                     const isActive = !!filterValues[column.key];
                     return (
                       <button
