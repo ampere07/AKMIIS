@@ -68,6 +68,8 @@ interface JOFormData {
   modifiedBy: string;
   modifiedDate: string;
   installationLandmark: string;
+  modemSN: string;
+  routerModel: string;
 }
 
 const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
@@ -115,10 +117,28 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
     assignedEmail: '',
     modifiedBy: currentUserEmail,
     modifiedDate: new Date().toLocaleString('sv-SE').replace(' ', ' '),
-    installationLandmark: ''
+    installationLandmark: '',
+    modemSN: '',
+    routerModel: ''
   });
 
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [isValidatingSN, setIsValidatingSN] = useState(false);
+  const [isSNValidated, setIsSNValidated] = useState(false);
+  const [validateCooldown, setValidateCooldown] = useState(0);
+
+  // Cooldown timer for the SN validate button
+  useEffect(() => {
+    let timer: any;
+    if (validateCooldown > 0) {
+      timer = setInterval(() => {
+        setValidateCooldown(prev => prev - 1);
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [validateCooldown]);
   const [loading, setLoading] = useState(false);
   const [loadingPercentage, setLoadingPercentage] = useState(0);
   // Original assigned technician captured when the modal loads, used to detect reassignment
@@ -317,8 +337,12 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
         isLastDayOfMonth: jobOrderData.billing_day === 0 || jobOrderData.Billing_Day === 0,
         onsiteStatus: jobOrderData.Onsite_Status || jobOrderData.onsite_status || 'In Progress',
         assignedEmail: jobOrderData.Assigned_Email || jobOrderData.assigned_email || '',
-        installationLandmark: jobOrderData.installation_landmark || jobOrderData.Installation_Landmark || ''
+        installationLandmark: jobOrderData.installation_landmark || jobOrderData.Installation_Landmark || '',
+        modemSN: jobOrderData.Modem_Router_SN || jobOrderData.modem_router_sn || jobOrderData.Modem_SN || jobOrderData.modem_sn || '',
+        routerModel: jobOrderData.Router_Model || jobOrderData.router_model || ''
       }));
+      // Existing saved SN is treated as already validated so edits don't force re-validation
+      setIsSNValidated(!!(jobOrderData.Modem_Router_SN || jobOrderData.modem_router_sn || jobOrderData.Modem_SN || jobOrderData.modem_sn));
     }
   }, [jobOrderData, isOpen]);
 
@@ -347,10 +371,15 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
         assignedEmail: '',
         modifiedBy: currentUserEmail,
         modifiedDate: new Date().toLocaleString('sv-SE').replace(' ', ' '),
-        installationLandmark: ''
+        installationLandmark: '',
+        modemSN: '',
+        routerModel: ''
       });
       setErrors({});
       setOriginalAssignedEmail('');
+      setIsSNValidated(false);
+      setIsValidatingSN(false);
+      setValidateCooldown(0);
     }
   }, [isOpen, currentUserEmail]);
 
@@ -392,6 +421,11 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
       else if (field === 'city') { newData.barangay = ''; }
       return newData;
     });
+
+    // Any change to the Modem SN invalidates a prior validation
+    if (field === 'modemSN') {
+      setIsSNValidated(false);
+    }
 
     if (errors[field]) {
       setErrors(prev => ({ ...prev, [field]: '' }));
@@ -468,10 +502,78 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
           newErrors.remarks = 'Remarks is required when onsite status is Failed or Reschedule';
         }
       }
+
+      if (formData.onsiteStatus === 'Done') {
+        if (!formData.modemSN.trim()) {
+          newErrors.modemSN = 'Modem SN is required';
+        } else if (!isSNValidated && !formData.routerModel.trim()) {
+          // Only force validation for a brand-new SN. If a Router Model is already
+          // present (existing saved data or a prior validation), no need to re-validate.
+          newErrors.modemSN = 'Please validate the Modem SN first';
+        }
+        if (!formData.routerModel.trim()) {
+          newErrors.routerModel = 'Router Model is required';
+        }
+      }
     }
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
+  };
+
+  const handleValidateSN = async () => {
+    const sn = formData.modemSN?.trim();
+    if (!sn) {
+      setModal({ isOpen: true, type: 'warning', title: 'Validation Error', message: 'Please enter a Modem Serial Number first.' });
+      return;
+    }
+
+    if (isValidatingSN || validateCooldown > 0) return;
+
+    setIsValidatingSN(true);
+    setValidateCooldown(30);
+    try {
+      const response = await apiClient.get('/smart-olt/validate-sn', {
+        params: {
+          sn,
+          jo_id: jobOrderData?.id || jobOrderData?.JobOrder_ID,
+          user_email: currentUserEmail
+        },
+        timeout: 15000
+      });
+
+      const result: any = response?.data;
+
+      if (!result || !result.success) {
+        const msg = result?.message || 'Serial Number not found in SmartOLT system.';
+        setModal({ isOpen: true, type: 'error', title: 'Validation Error', message: msg });
+        setErrors(prev => ({ ...prev, modemSN: msg }));
+        setIsSNValidated(false);
+        return;
+      }
+
+      // Success — mark validated and auto-populate the Router Model
+      setIsSNValidated(true);
+      setErrors(prev => {
+        const newErrors = { ...prev };
+        delete newErrors.modemSN;
+        return newErrors;
+      });
+
+      const onuType = result.data?.onu_type_name || result.onus?.[0]?.onu_type_name;
+      if (onuType) {
+        setFormData(prev => ({ ...prev, routerModel: onuType }));
+      }
+
+      setModal({ isOpen: true, type: 'success', title: 'Success', message: 'Modem Serial Number is valid and verified in SmartOLT.' });
+    } catch (error: any) {
+      const errorMsg = error.response?.data?.message || error.message || 'System communication error. Please check your internet.';
+      setModal({ isOpen: true, type: 'error', title: 'Validation Error', message: errorMsg });
+      setErrors(prev => ({ ...prev, modemSN: errorMsg }));
+      setIsSNValidated(false);
+    } finally {
+      setIsValidatingSN(false);
+    }
   };
 
   const handleSave = async () => {
@@ -563,6 +665,8 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
         billing_day: updatedFormData.isLastDayOfMonth ? 0 : (parseInt(updatedFormData.billingDay) || 30),
         installation_landmark: updatedFormData.installationLandmark || null,
         referred_by: updatedFormData.referredBy || null,
+        modem_router_sn: updatedFormData.modemSN || null,
+        router_model: updatedFormData.routerModel || null,
         updated_by_user_email: currentUserEmail
       };
 
@@ -1247,6 +1351,54 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
                   required
                   placeholder="Select Technician"
                 />
+              )}
+
+              {formData.status === 'Confirmed' && formData.onsiteStatus === 'Done' && (
+                <>
+                  <div>
+                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Modem SN<span className="text-red-500">*</span>
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleValidateSN}
+                        disabled={isValidatingSN || validateCooldown > 0}
+                        className={`px-4 py-2 rounded text-white text-sm font-bold whitespace-nowrap flex items-center justify-center min-w-[90px] ${(isValidatingSN || validateCooldown > 0) ? 'bg-gray-400 cursor-not-allowed' : 'bg-orange-500 hover:bg-orange-600'}`}
+                      >
+                        {isValidatingSN ? (
+                          <Loader2 className="animate-spin" size={16} />
+                        ) : validateCooldown > 0 ? (
+                          `${validateCooldown}s`
+                        ) : (
+                          'VALIDATE'
+                        )}
+                      </button>
+                      <input
+                        type="text"
+                        value={formData.modemSN}
+                        onChange={(e) => handleInputChange('modemSN', e.target.value)}
+                        placeholder="Enter Modem Serial Number"
+                        className={`flex-1 px-3 py-2 border rounded focus:outline-none focus:border-orange-500 ${isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'} ${errors.modemSN ? 'border-red-500' : (isDarkMode ? 'border-gray-700' : 'border-gray-300')}`}
+                      />
+                    </div>
+                    {errors.modemSN && <p className="text-red-500 text-xs mt-1">{errors.modemSN}</p>}
+                  </div>
+
+                  <div>
+                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Router Model<span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.routerModel}
+                      readOnly
+                      placeholder="Validate Modem SN to get Router Model..."
+                      className={`w-full px-3 py-2 border rounded cursor-not-allowed ${isDarkMode ? 'bg-gray-700 border-gray-700 text-gray-400' : 'bg-gray-100 border-gray-300 text-gray-600'} ${errors.routerModel ? 'border-red-500' : ''}`}
+                    />
+                    {errors.routerModel && <p className="text-red-500 text-xs mt-1">{errors.routerModel}</p>}
+                  </div>
+                </>
               )}
 
               <div>
