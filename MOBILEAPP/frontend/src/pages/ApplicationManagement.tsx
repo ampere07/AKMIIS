@@ -145,6 +145,9 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
   const [isRefreshingManual, setIsRefreshingManual] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 15;
+
   const selectedApplicationRef = useRef<Application | null>(null);
 
   const {
@@ -154,7 +157,6 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
     fetchApplications,
     refreshApplications,
     silentRefresh,
-    totalCount,
   } = useApplicationStore();
 
   const primary = colorPalette?.primary || '#7c3aed';
@@ -379,6 +381,27 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
     [filteredApplications, selectedApplication]
   );
 
+  // ── pagination ──────────────────────────────────────────────────────────────
+
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredApplications.length / itemsPerPage)),
+    [filteredApplications.length]
+  );
+
+  const paginatedApplications = useMemo(() => {
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    return filteredApplications.slice(startIndex, startIndex + itemsPerPage);
+  }, [filteredApplications, currentPage]);
+
+  const handlePageChange = (newPage: number) => {
+    if (newPage >= 1 && newPage <= totalPages) setCurrentPage(newPage);
+  };
+
+  // Reset to first page whenever the result set changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, selectedLocation, funnelFilters]);
+
   // ── actions ───────────────────────────────────────────────────────────────
 
   const handleApplicationUpdate = () => { silentRefresh().catch(() => { }); };
@@ -554,28 +577,22 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
         onPress={() => setSelectedApplication(item)}
         style={{
           paddingHorizontal: 16,
-          paddingVertical: 14,
+          paddingVertical: 12,
           borderBottomWidth: 1,
           borderBottomColor: '#e5e7eb',
-          backgroundColor: isSelected ? '#f5f3ff' : '#fff',
+          backgroundColor: isSelected ? '#f3f4f6' : 'transparent',
         }}
         activeOpacity={0.7}
       >
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <View style={{ flex: 1, marginRight: 12 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+          <View style={{ flex: 1, minWidth: 0 }}>
             <Text
-              style={{
-                fontSize: 14,
-                fontWeight: '600',
-                color: '#111827',
-                marginBottom: 4,
-                textTransform: 'capitalize',
-              }}
+              style={{ fontSize: 14, fontWeight: '500', color: '#111827', marginBottom: 4, textTransform: 'capitalize' }}
               numberOfLines={1}
             >
               {(item.customer_name || '').toLowerCase()}
             </Text>
-            <Text style={{ fontSize: 12, color: '#6b7280' }} numberOfLines={2}>
+            <Text style={{ fontSize: 12, color: '#4b5563' }} numberOfLines={2}>
               {(item as any).create_date && (item as any).create_time
                 ? `${(item as any).create_date} ${(item as any).create_time}`
                 : (item as any).timestamp || 'Not specified'}
@@ -590,11 +607,11 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
                 .join(', ')}
             </Text>
           </View>
-          <Text
-            style={{ fontSize: 11, fontWeight: '700', color: statusColor, textTransform: 'uppercase' }}
-          >
-            {statusDisplay}
-          </Text>
+          <View style={{ flexDirection: 'column', alignItems: 'flex-end', gap: 4, marginLeft: 16, flexShrink: 0 }}>
+            <Text style={{ fontWeight: 'bold', textTransform: 'uppercase', color: statusColor }}>
+              {statusDisplay}
+            </Text>
+          </View>
         </View>
       </TouchableOpacity>
     );
@@ -792,30 +809,90 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
           </TouchableOpacity>
         </View>
       ) : (
-        <FlatList
-          data={filteredApplications}
-          keyExtractor={(item) => String(item.id)}
-          renderItem={renderCard}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={primary} />}
-          ListEmptyComponent={
-            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 80 }}>
-              <Text style={{ color: '#6b7280', fontSize: 14 }}>
-                No applications found matching your filters
-              </Text>
-            </View>
-          }
-          ListFooterComponent={
-            isLoading && applications.length > 0 ? (
-              <View style={{ paddingVertical: 20, alignItems: 'center' }}>
-                <ActivityIndicator size="small" color={primary} />
-                <Text style={{ color: '#9ca3af', fontSize: 12, marginTop: 4 }}>
-                  Loading... ({applications.length}/{totalCount})
+        <>
+          <FlatList
+            style={{ flex: 1 }}
+            data={paginatedApplications}
+            keyExtractor={(item) => String(item.id)}
+            renderItem={renderCard}
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={primary} />}
+            ListEmptyComponent={
+              <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 80 }}>
+                <Text style={{ color: '#6b7280', fontSize: 14 }}>
+                  No applications found matching your filters
                 </Text>
               </View>
-            ) : null
-          }
-          contentContainerStyle={{ flexGrow: 1 }}
-        />
+            }
+            contentContainerStyle={{ flexGrow: 1 }}
+          />
+
+          {/* Pagination */}
+          {filteredApplications.length > 0 && (
+            <View
+              style={{
+                borderTopWidth: 1,
+                borderTopColor: '#e5e7eb',
+                backgroundColor: '#fff',
+                paddingHorizontal: 16,
+                paddingTop: 12,
+                paddingBottom: isTablet ? 12 : 110,
+                flexDirection: isTablet ? 'row' : 'column',
+                alignItems: 'center',
+                justifyContent: isTablet ? 'space-between' : 'center',
+                gap: isTablet ? 0 : 12,
+              }}
+            >
+              <Text style={{ fontSize: 12, color: '#4b5563' }}>
+                Showing <Text style={{ fontWeight: '500' }}>{(currentPage - 1) * itemsPerPage + 1}</Text> to{' '}
+                <Text style={{ fontWeight: '500' }}>{Math.min(currentPage * itemsPerPage, filteredApplications.length)}</Text> of{' '}
+                <Text style={{ fontWeight: '500' }}>{filteredApplications.length}</Text> results
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <TouchableOpacity
+                  onPress={() => handlePageChange(currentPage - 1)}
+                  disabled={currentPage === 1}
+                  style={{
+                    paddingHorizontal: 8,
+                    paddingVertical: 4,
+                    borderRadius: 4,
+                    minWidth: 40,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: currentPage === 1 ? '#f3f4f6' : '#fff',
+                    borderWidth: currentPage === 1 ? 0 : 1,
+                    borderColor: '#d1d5db',
+                  }}
+                >
+                  <Text style={{ fontSize: 18, fontWeight: 'bold', color: currentPage === 1 ? '#9ca3af' : '#374151' }}>{'<'}</Text>
+                </TouchableOpacity>
+
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <Text style={{ paddingHorizontal: 8, fontSize: 14, color: '#111827' }}>
+                    Page {currentPage} of {totalPages}
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  onPress={() => handlePageChange(currentPage + 1)}
+                  disabled={currentPage === totalPages}
+                  style={{
+                    paddingHorizontal: 8,
+                    paddingVertical: 4,
+                    borderRadius: 4,
+                    minWidth: 40,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: currentPage === totalPages ? '#f3f4f6' : '#fff',
+                    borderWidth: currentPage === totalPages ? 0 : 1,
+                    borderColor: '#d1d5db',
+                  }}
+                >
+                  <Text style={{ fontSize: 18, fontWeight: 'bold', color: currentPage === totalPages ? '#9ca3af' : '#374151' }}>{'>'}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+        </>
       )}
 
       {/* Sidebar Modal */}

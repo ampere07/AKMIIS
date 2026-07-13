@@ -1001,7 +1001,7 @@ class MonitorController extends Controller
                         'job_orders.onsite_status as status',
                         'job_orders.technicians'
                     )
-                    ->whereRaw("(job_orders.onsite_status != 'Done' OR job_orders.end_time >= ?)", [$twentyMinsAgo])
+                    ->whereRaw("(job_orders.onsite_status NOT IN ('Done', 'Failed') OR job_orders.end_time >= ?)", [$twentyMinsAgo])
                     ->whereNotNull('job_orders.assigned_email')
                     ->where('job_orders.assigned_email', '!=', '');
 
@@ -1029,7 +1029,7 @@ class MonitorController extends Controller
                         'service_orders.visit_status as status',
                         'service_orders.technicians'
                     )
-                    ->whereRaw("(service_orders.visit_status NOT IN ('Resolved', 'Done') OR service_orders.end_time >= ?)", [$twentyMinsAgo])
+                    ->whereRaw("(service_orders.visit_status NOT IN ('Resolved', 'Done', 'Failed') OR service_orders.end_time >= ?)", [$twentyMinsAgo])
                     ->whereNotNull('service_orders.assigned_email')
                     ->where('service_orders.assigned_email', '!=', '');
 

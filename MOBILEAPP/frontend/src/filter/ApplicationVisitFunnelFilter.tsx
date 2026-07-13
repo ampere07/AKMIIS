@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,8 +7,11 @@ import {
   Modal,
   ScrollView,
   ActivityIndicator,
+  Animated,
+  Dimensions,
 } from 'react-native';
 import { X, ChevronLeft, ChevronRight, Search, Check } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { planService } from '../services/planService';
@@ -75,6 +78,11 @@ const ApplicationVisitFunnelFilter: React.FC<ApplicationVisitFunnelFilterProps> 
   onApplyFilters,
   currentFilters,
 }) => {
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth } = Dimensions.get('window');
+  const [rendered, setRendered] = useState(isOpen);
+  const slideX = useRef(new Animated.Value(screenWidth)).current;
+  const backdropOpacity = useRef(new Animated.Value(0)).current;
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
   const [selectedColumn, setSelectedColumn] = useState<Column | null>(null);
   const [filterValues, setFilterValues] = useState<FilterValues>({});
@@ -86,6 +94,24 @@ const ApplicationVisitFunnelFilter: React.FC<ApplicationVisitFunnelFilterProps> 
   useEffect(() => {
     settingsColorPaletteService.getActive().then(setColorPalette).catch(() => {});
   }, []);
+
+  // Slide the drawer in from the right on open, out to the right on close.
+  useEffect(() => {
+    if (isOpen) {
+      setRendered(true);
+      Animated.parallel([
+        Animated.timing(slideX, { toValue: 0, duration: 260, useNativeDriver: true }),
+        Animated.timing(backdropOpacity, { toValue: 0.4, duration: 260, useNativeDriver: true }),
+      ]).start();
+    } else {
+      Animated.parallel([
+        Animated.timing(slideX, { toValue: screenWidth, duration: 220, useNativeDriver: true }),
+        Animated.timing(backdropOpacity, { toValue: 0, duration: 220, useNativeDriver: true }),
+      ]).start(({ finished }) => {
+        if (finished) setRendered(false);
+      });
+    }
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (isOpen) {
@@ -368,16 +394,22 @@ const ApplicationVisitFunnelFilter: React.FC<ApplicationVisitFunnelFilterProps> 
   const activeFilterCount = getActiveFilterCount();
 
   return (
-    <Modal visible={isOpen} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', flexDirection: 'row', justifyContent: 'flex-end' }}>
-        <View style={{ width: '90%', maxWidth: 420, backgroundColor: '#ffffff', flex: 1 }}>
+    <Modal visible={rendered} animationType="none" transparent onRequestClose={onClose}>
+      <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'flex-end' }}>
+        <Animated.View
+          pointerEvents="none"
+          style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#000', opacity: backdropOpacity }}
+        />
+        <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={onClose} />
+        <Animated.View style={{ width: '92%', maxWidth: 560, backgroundColor: '#ffffff', height: '100%', transform: [{ translateX: slideX }] }}>
           {/* Header */}
           <View style={{
             flexDirection: 'row',
             alignItems: 'center',
             justifyContent: 'space-between',
             paddingHorizontal: 20,
-            paddingVertical: 16,
+            paddingTop: insets.top,
+            paddingBottom: 16,
             borderBottomWidth: 1,
             borderBottomColor: '#e5e7eb',
           }}>
@@ -452,7 +484,8 @@ const ApplicationVisitFunnelFilter: React.FC<ApplicationVisitFunnelFilterProps> 
             flexDirection: 'row',
             gap: 12,
             paddingHorizontal: 20,
-            paddingVertical: 16,
+            paddingTop: 16,
+            paddingBottom: insets.bottom + 16,
             borderTopWidth: 1,
             borderTopColor: '#e5e7eb',
           }}>
@@ -481,7 +514,7 @@ const ApplicationVisitFunnelFilter: React.FC<ApplicationVisitFunnelFilterProps> 
               <Text style={{ fontSize: 14, fontWeight: '600', color: '#ffffff' }}>Apply Filters</Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </Animated.View>
       </View>
     </Modal>
   );
