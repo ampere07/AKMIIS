@@ -54,23 +54,37 @@ class EnhancedBillingGenerationServiceWithNotifications
         $results = [
             'success' => 0,
             'failed' => 0,
+            'skipped' => 0,
             'errors' => [],
             'statements' => [],
             'notifications' => []
         ];
+
+        $generatedAccounts = [];
 
         try {
             $accounts = $this->getActiveAccountsForBillingDay($billingDay, $generationDate);
 
             foreach ($accounts as $account) {
                 try {
+                    // Idempotency guard: skip if a statement was already generated for this
+                    // account in the current billing month. Prevents duplicate SOAs when a
+                    // crashed generation is re-run and processes the same customer again.
+                    if ($this->hasBillingForMonth('statement', $account, $generationDate)) {
+                        $results['skipped']++;
+                        $this->log('info', "Skipping SOA for account {$account->account_no}: already generated this billing month");
+                        continue;
+                    }
+
                     $statement = $this->createEnhancedStatement($account, $generationDate, $userId);
                     $results['statements'][] = $statement;
                     $results['success']++;
-                    
+                    $generatedAccounts[] = $account->account_no;
+                    $this->log('info', "Generated SOA for account {$account->account_no}");
+
                     $notificationResult = $this->queueNotification($account, null, $statement);
                     $results['notifications'][] = $notificationResult;
-                    
+
                 } catch (\Exception $e) {
                     $results['failed']++;
                     $results['errors'][] = [
@@ -81,6 +95,14 @@ class EnhancedBillingGenerationServiceWithNotifications
                     $this->log('error', "Failed to generate SOA for account {$account->account_no}: " . $e->getMessage());
                 }
             }
+
+            $this->log('info', "SOA generation complete for billing day {$billingDay}. Generated " . count($generatedAccounts) . " account(s): " . (empty($generatedAccounts) ? '(none)' : implode(', ', $generatedAccounts)), [
+                'billing_day' => $billingDay,
+                'generated_count' => $results['success'],
+                'skipped_count' => $results['skipped'],
+                'failed_count' => $results['failed'],
+                'generated_account_nos' => $generatedAccounts,
+            ]);
 
             return $results;
         } catch (\Exception $e) {
@@ -94,23 +116,37 @@ class EnhancedBillingGenerationServiceWithNotifications
         $results = [
             'success' => 0,
             'failed' => 0,
+            'skipped' => 0,
             'errors' => [],
             'invoices' => [],
             'notifications' => []
         ];
+
+        $generatedAccounts = [];
 
         try {
             $accounts = $this->getActiveAccountsForBillingDay($billingDay, $generationDate);
 
             foreach ($accounts as $account) {
                 try {
+                    // Idempotency guard: skip if an invoice was already generated for this
+                    // account in the current billing month. Prevents duplicate invoices when a
+                    // crashed generation is re-run and processes the same customer again.
+                    if ($this->hasBillingForMonth('invoice', $account, $generationDate)) {
+                        $results['skipped']++;
+                        $this->log('info', "Skipping invoice for account {$account->account_no}: already generated this billing month");
+                        continue;
+                    }
+
                     $invoice = $this->createEnhancedInvoice($account, $generationDate, $userId);
                     $results['invoices'][] = $invoice;
                     $results['success']++;
-                    
+                    $generatedAccounts[] = $account->account_no;
+                    $this->log('info', "Generated invoice for account {$account->account_no}");
+
                     $notificationResult = $this->queueNotification($account, $invoice, null);
                     $results['notifications'][] = $notificationResult;
-                    
+
                 } catch (\Exception $e) {
                     $results['failed']++;
                     $results['errors'][] = [
@@ -121,6 +157,14 @@ class EnhancedBillingGenerationServiceWithNotifications
                     $this->log('error', "Failed to generate invoice for account {$account->account_no}: " . $e->getMessage());
                 }
             }
+
+            $this->log('info', "Invoice generation complete for billing day {$billingDay}. Generated " . count($generatedAccounts) . " account(s): " . (empty($generatedAccounts) ? '(none)' : implode(', ', $generatedAccounts)), [
+                'billing_day' => $billingDay,
+                'generated_count' => $results['success'],
+                'skipped_count' => $results['skipped'],
+                'failed_count' => $results['failed'],
+                'generated_account_nos' => $generatedAccounts,
+            ]);
 
             return $results;
         } catch (\Exception $e) {
@@ -179,6 +223,30 @@ class EnhancedBillingGenerationServiceWithNotifications
                 'error' => $e->getMessage()
             ];
         }
+    }
+
+    /**
+     * Returns true when a billing record already exists for the given account within the
+     * same calendar month (Asia/Manila) as the generation date. Makes generation idempotent
+     * so a crashed-and-restarted run does not bill the same customer twice.
+     *
+     * @param string $type 'invoice' or 'statement'
+     */
+    protected function hasBillingForMonth(string $type, BillingAccount $account, Carbon $generationDate): bool
+    {
+        $gen = $generationDate->copy()->setTimezone('Asia/Manila');
+
+        if ($type === 'statement') {
+            return StatementOfAccount::where('account_no', $account->account_no)
+                ->whereYear('statement_date', $gen->year)
+                ->whereMonth('statement_date', $gen->month)
+                ->exists();
+        }
+
+        return Invoice::where('account_no', $account->account_no)
+            ->whereYear('invoice_date', $gen->year)
+            ->whereMonth('invoice_date', $gen->month)
+            ->exists();
     }
 
     protected function getActiveAccountsForBillingDay(int $billingDay, Carbon $generationDate)
