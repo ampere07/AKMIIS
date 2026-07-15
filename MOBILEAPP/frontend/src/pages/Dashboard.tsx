@@ -115,7 +115,8 @@ import ReleaseNotes from './ReleaseNotes';
 import { CustomerDataProvider } from '../contexts/CustomerDataContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { usePushNotifications } from '../hooks/usePushNotifications';
-import { useLocationTracking } from '../hooks/useLocationTracking';
+// Temporarily disabled for Play Store review (location permissions removed from build).
+// import { useLocationTracking } from '../hooks/useLocationTracking';
 import ErrorBoundary from '../components/ErrorBoundary';
 
 interface DashboardProps {
@@ -124,7 +125,8 @@ interface DashboardProps {
 
 const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     usePushNotifications();
-    useLocationTracking();
+    // Temporarily disabled for Play Store review (technician live-location tracking off).
+    // useLocationTracking();
     const [userData, setUserData] = useState<any>(null);
     const [activeSection, setActiveSection] = useState('dashboard');
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);

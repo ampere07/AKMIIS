@@ -104,7 +104,7 @@ class QueueScheduledReports extends Command
                         'recipient_email' => $email,
                         'email_sender' => 'billing@akmiis.com',
                         'reply_to' => 'billing@akmiis.com',
-                        'sender_name' => 'ATSS FIBER',
+                        'sender_name' => 'AKM IIS',
                         'subject' => 'Scheduled Report: ' . $report->report_name,
                         'body_html' => 'Report ' . htmlspecialchars($report->report_type),
                         'attachment_path' => $tempPath,

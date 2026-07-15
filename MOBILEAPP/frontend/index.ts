@@ -1,8 +1,8 @@
 import { registerRootComponent } from 'expo';
 
-// Registers the background location TaskManager task at startup so the OS can
-// deliver location updates even when the app is launched in the background.
-import './src/services/locationTask';
+// Temporarily disabled for Play Store review — do not register the location task
+// (technician live-location tracking is off until location permissions are re-added).
+// import './src/services/locationTask';
 
 import App from './App';
 
