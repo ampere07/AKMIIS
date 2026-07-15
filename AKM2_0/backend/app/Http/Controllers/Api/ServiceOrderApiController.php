@@ -958,6 +958,14 @@ class ServiceOrderApiController extends Controller
                     ]);
                     // attemptReconnection sets billing_status_id to 1 (Active) and re-applies the plan in RADIUS
                     $reactivateStatus = $this->attemptReconnection($billingAccount, $id, $updatedByUser, $organizationId);
+
+                    // Re-activate the customer's user account (counterpart to pullout, which sets active = 0)
+                    try {
+                        \App\Models\User::where('username', $serviceOrder->account_no)->update(['active' => 1]);
+                        \Log::info('[API SERVICE ORDER REACTIVATE DB] Updated user active status to 1 for Account: ' . $serviceOrder->account_no);
+                    } catch (\Exception $e) {
+                        \Log::error('[API SERVICE ORDER REACTIVATE DB USER EXCEPTION] ' . $e->getMessage());
+                    }
                 } else {
                     \Log::info('Reactivate concern skipped — billing account already Active or not found', [
                         'account_no' => $serviceOrder->account_no
