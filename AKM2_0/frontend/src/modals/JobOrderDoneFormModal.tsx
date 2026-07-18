@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Calendar, ChevronDown, Minus, Plus, Loader2 } from 'lucide-react';
 import { UserData } from '../types/api';
-import { updateJobOrder, logBlockedTechnicianTransfer } from '../services/jobOrderService';
+import { updateJobOrder } from '../services/jobOrderService';
 import { updateApplication } from '../services/applicationService';
 import { userService } from '../services/userService';
 
@@ -577,38 +577,11 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
   };
 
   const handleSave = async () => {
-    // ── Block technician reassignment once the job has already been started ──
-    const startTime = jobOrderData?.start_time || jobOrderData?.Start_Time || null;
+    // Technician can be reassigned even after the job has started. Detect the change
+    // here so we can reset the visit start/end time on save (done below in the payload).
     const currentAssigned = (formData.assignedEmail || '').trim();
     const originalAssigned = (originalAssignedEmail || '').trim();
     const technicianChanged = !!originalAssigned && currentAssigned !== originalAssigned;
-
-    if (startTime && technicianChanged) {
-      const originalTechName = technicians.find(t => t.email === originalAssigned)?.name || originalAssigned;
-      const newTechName = technicians.find(t => t.email === currentAssigned)?.name || currentAssigned;
-      const jobOrderId = jobOrderData?.id || jobOrderData?.JobOrder_ID;
-
-      // Record the blocked attempt in the audit trail (fire-and-forget; never blocks the UI)
-      if (jobOrderId) {
-        logBlockedTechnicianTransfer(jobOrderId, {
-          performed_by: currentUserEmail,
-          original_technician_name: originalTechName,
-          original_technician_email: originalAssigned,
-          new_technician_name: newTechName,
-          new_technician_email: currentAssigned,
-          start_time: startTime
-        });
-      }
-
-      setModal({
-        isOpen: true,
-        type: 'error',
-        title: 'Transfer Not Allowed',
-        message: `This ticket has already been started by ${originalTechName}. Technician reassignment is no longer allowed because the assigned technician is already dispatched and working on-site.`
-      });
-      return;
-    }
-    // ── End reassignment block ──────────────────────────────────────────────
 
     const updatedFormData = {
       ...formData,
@@ -669,6 +642,13 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
         router_model: updatedFormData.routerModel || null,
         updated_by_user_email: currentUserEmail
       };
+
+      // If the assigned technician changed, reset the visit start/end time so the
+      // newly-assigned technician starts their session fresh.
+      if (technicianChanged) {
+        jobOrderUpdateData.start_time = null;
+        jobOrderUpdateData.end_time = null;
+      }
 
       // Handle re-edit: If status changed from Done back to In Progress
       const oldOnsiteStatus = String(jobOrderData.onsite_status || jobOrderData.Onsite_Status || '').trim().toLowerCase();
