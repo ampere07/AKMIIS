@@ -96,8 +96,32 @@ class XenditPaymentController extends Controller
 
 
 
-            // Parse customer name
-            $fullNameParts = explode(' ', trim($account->full_name ?? 'Customer'));
+            // Resolve payer email. Xendit rejects the whole invoice if this is not a
+            // well-formed address, so '??' is not enough here: it only catches NULL and
+            // lets through empty strings, placeholders like 'N/A', and values with
+            // stray whitespace/newlines that look fine in the database.
+            $rawEmail = (string) ($account->email_address ?? '');
+            // Strip non-breaking spaces and zero-width characters that survive trim()
+            $rawEmail = preg_replace('/[\x{00A0}\x{200B}-\x{200D}\x{FEFF}]/u', '', $rawEmail);
+            $rawEmail = trim($rawEmail);
+            $payerEmail = filter_var($rawEmail, FILTER_VALIDATE_EMAIL) ? $rawEmail : null;
+
+            if (!$payerEmail) {
+                Log::warning('Payment: unusable customer email, falling back', [
+                    'account_no' => $accountNo,
+                    'raw_email' => $account->email_address,
+                    'reason' => $rawEmail === '' ? 'empty' : 'malformed'
+                ]);
+                $payerEmail = 'noreply@akmiis.com';
+            }
+
+            // Parse customer name. The SQL CONCAT leaves a double space when the
+            // middle initial is blank, which yields empty name parts.
+            $fullName = trim(preg_replace('/\s+/', ' ', (string) ($account->full_name ?? '')));
+            if ($fullName === '') {
+                $fullName = 'Customer';
+            }
+            $fullNameParts = explode(' ', $fullName);
             $surname = (count($fullNameParts) > 1) ? array_pop($fullNameParts) : $fullNameParts[0];
             $givenName = implode(' ', $fullNameParts);
             if (empty($givenName)) {
@@ -112,20 +136,31 @@ class XenditPaymentController extends Controller
                 $mobile = '63' . substr($mobile, 1);
             }
 
+            // Only send a mobile number when it is plausible E.164. Sending a bare '+'
+            // for a customer with no contact number fails Xendit validation too.
+            $customer = [
+                'given_names' => $givenName,
+                'surname' => $surname,
+                'email' => $payerEmail
+            ];
+            if (strlen($mobile) >= 10 && strlen($mobile) <= 15) {
+                $customer['mobile_number'] = '+' . $mobile;
+            } else {
+                Log::warning('Payment: unusable customer mobile, omitting', [
+                    'account_no' => $accountNo,
+                    'raw_mobile' => $account->contact_number_primary
+                ]);
+            }
+
             // Prepare Xendit payload
             $payload = [
                 'external_id' => $referenceNo,
                 'amount' => $amount,
-                'payer_email' => $account->email_address ?? 'noreply@akmiis.com',
+                'payer_email' => $payerEmail,
                 'description' => "Bill Payment - Account $accountNo",
                 'invoice_duration' => 86400,
                 'currency' => 'PHP',
-                'customer' => [
-                    'given_names' => $givenName,
-                    'surname' => $surname,
-                    'email' => $account->email_address ?? 'noreply@akmiis.com',
-                    'mobile_number' => '+' . $mobile
-                ],
+                'customer' => $customer,
                 'items' => [
                     [
                         'name' => "Account $accountNo - " . ($account->desired_plan ?? 'Internet Service'),
@@ -142,11 +177,27 @@ class XenditPaymentController extends Controller
                 ->post('https://api.xendit.co/v2/invoices', $payload);
 
             if (!$response->successful()) {
+                $error = $response->json();
+                $errorCode = $error['error_code'] ?? '';
+
                 Log::error('Xendit API Error', [
                     'status' => $response->status(),
                     'body' => $response->body(),
-                    'account_no' => $accountNo
+                    'account_no' => $accountNo,
+                    // Log what we actually sent so validation failures are diagnosable
+                    'sent_payer_email' => $payerEmail,
+                    'sent_customer' => $customer
                 ]);
+
+                // A 400 here is our payload's fault, not an outage. Say so rather than
+                // blaming the gateway and telling the customer to retry a call that
+                // will fail identically every time.
+                if ($response->status() === 400 || $errorCode === 'API_VALIDATION_ERROR') {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'We could not create your payment because your account details are incomplete or invalid. Please contact support to update your contact information.'
+                    ], 422);
+                }
 
                 return response()->json([
                     'status' => 'error',

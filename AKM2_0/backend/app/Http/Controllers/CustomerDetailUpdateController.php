@@ -128,20 +128,22 @@ class CustomerDetailUpdateController extends Controller
             if ($user) {
                 $userUpdate = [];
                 
-                // If contact number changed, update contact_number and password_hash
+                // If contact number changed, update contact_number and password_hash.
+                // The portal password convention is the primary contact number, so it
+                // follows the number. contactNumberPrimary is required, so never null.
                 if ($oldContact !== $validated['contactNumberPrimary']) {
                     $userUpdate['contact_number'] = $validated['contactNumberPrimary'];
                     $userUpdate['password_hash'] = $validated['contactNumberPrimary'];
                 }
-                
-                // If email address changed, update email_address and password_hash 
-                if ($oldEmail !== $validated['emailAddress']) {
-                    $userUpdate['email_address'] = $validated['emailAddress'];
-                    $userUpdate['password_hash'] = $validated['emailAddress'];
+
+                // If email address changed, update email_address only. The email is never
+                // the password - assigning it here locked customers out of the portal.
+                if ($oldEmail !== ($validated['emailAddress'] ?? null)) {
+                    $userUpdate['email_address'] = $validated['emailAddress'] ?? null;
                 }
-                
+
                 if (!empty($userUpdate)) {
-                    // This update on Eloquent model will trigger the setPasswordHashAttribute mutator
+                    // A password_hash value here triggers the setPasswordHashAttribute mutator
                     $user->update($userUpdate);
                     
                     Log::info('User account synced with updated customer details', [
