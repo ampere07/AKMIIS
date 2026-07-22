@@ -1,30 +1,9 @@
-import axios from 'axios';
-
-const getApiBaseUrl = (): string => {
-  const baseUrl = process.env.REACT_APP_API_BASE_URL;
-  if (!baseUrl) {
-    throw new Error("REACT_APP_API_BASE_URL is not defined");
-  }
-  return baseUrl;
-};
-
-const API_BASE_URL = getApiBaseUrl();
-
-const axiosInstance = axios.create({
-  baseURL: API_BASE_URL,
-  headers: {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-  },
-});
-
-axiosInstance.interceptors.request.use((config) => {
-  const token = localStorage.getItem('auth_token');
-  if (token && config.headers) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-  return config;
-});
+// Use the shared apiClient so discount requests carry the Sanctum SPA session
+// cookie (withCredentials) and CSRF token, exactly like every other service.
+// The previous standalone axios instance sent neither, so requests reached the
+// API unauthenticated and Auth::id() was null on the backend — which is why
+// created_by_user_id / updated_by_user_id were never saved.
+import apiClient from '../config/api';
 
 export interface DiscountData {
   account_no: string;
@@ -49,7 +28,7 @@ export interface DiscountResponse {
 
 export const create = async (data: DiscountData): Promise<DiscountResponse> => {
   try {
-    const response = await axiosInstance.post<any>('/discounts', data);
+    const response = await apiClient.post<any>('/discounts', data);
     return {
       success: true,
       message: response.data.message,
@@ -63,7 +42,7 @@ export const create = async (data: DiscountData): Promise<DiscountResponse> => {
 
 export const getAll = async (): Promise<DiscountResponse> => {
   try {
-    const response = await axiosInstance.get<any>('/discounts');
+    const response = await apiClient.get<any>('/discounts');
     return {
       success: true,
       data: response.data.data
@@ -76,7 +55,7 @@ export const getAll = async (): Promise<DiscountResponse> => {
 
 export const getById = async (id: number): Promise<DiscountResponse> => {
   try {
-    const response = await axiosInstance.get<any>(`/discounts/${id}`);
+    const response = await apiClient.get<any>(`/discounts/${id}`);
     return {
       success: true,
       data: response.data.data
@@ -89,7 +68,7 @@ export const getById = async (id: number): Promise<DiscountResponse> => {
 
 export const update = async (id: number, data: Partial<DiscountData>): Promise<DiscountResponse> => {
   try {
-    const response = await axiosInstance.put<any>(`/discounts/${id}`, data);
+    const response = await apiClient.put<any>(`/discounts/${id}`, data);
     return {
       success: true,
       message: response.data.message,
@@ -103,7 +82,7 @@ export const update = async (id: number, data: Partial<DiscountData>): Promise<D
 
 export const remove = async (id: number): Promise<DiscountResponse> => {
   try {
-    const response = await axiosInstance.delete<any>(`/discounts/${id}`);
+    const response = await apiClient.delete<any>(`/discounts/${id}`);
     return {
       success: true,
       message: response.data.message

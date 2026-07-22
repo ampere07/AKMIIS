@@ -217,6 +217,8 @@ class JobOrderController extends Controller
                     'router_reading_image_url' => $jobOrder->router_reading_image_url,
                     'port_label_image_url' => $jobOrder->port_label_image_url,
                     'house_front_picture_url' => $jobOrder->house_front_picture_url,
+                    'client_tagging_url' => $jobOrder->client_tagging_url,
+                    'proof_image_url' => $jobOrder->proof_image_url,
                     'installation_landmark' => $jobOrder->installation_landmark,
                     
                     'created_at' => $jobOrder->created_at ? $jobOrder->created_at->format('Y-m-d H:i:s') : null,

@@ -115,8 +115,8 @@ import ReleaseNotes from './ReleaseNotes';
 import { CustomerDataProvider } from '../contexts/CustomerDataContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { usePushNotifications } from '../hooks/usePushNotifications';
-// Temporarily disabled for Play Store review (location permissions removed from build).
-// import { useLocationTracking } from '../hooks/useLocationTracking';
+// Technician live-location tracking (feeds the LiveMonitor widget). Only starts for logged-in technicians.
+import { useLocationTracking } from '../hooks/useLocationTracking';
 import ErrorBoundary from '../components/ErrorBoundary';
 
 interface DashboardProps {
@@ -125,8 +125,8 @@ interface DashboardProps {
 
 const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     usePushNotifications();
-    // Temporarily disabled for Play Store review (technician live-location tracking off).
-    // useLocationTracking();
+    // Technician live-location tracking (feeds the LiveMonitor widget). Only starts for logged-in technicians.
+    useLocationTracking();
     const [userData, setUserData] = useState<any>(null);
     const [activeSection, setActiveSection] = useState('dashboard');
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -408,7 +408,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     };
 
     const handleOpenChat = async () => {
-        const webUrl = 'https://m.me/akmiis';
+        const webUrl = 'https://m.me/atssfiber';
         const messengerAppUrl = 'fb-messenger://user-thread/';
         try {
             const canOpenMessenger = await Linking.canOpenURL(messengerAppUrl);

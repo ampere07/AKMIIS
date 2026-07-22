@@ -309,7 +309,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
 
   const [isOnsiteStatusPickerOpen, setIsOnsiteStatusPickerOpen] = useState(false);
   const [onsiteStatusSearch, setOnsiteStatusSearch] = useState('');
-  
+
   const [isLcpnapMiniModalVisible, setIsLcpnapMiniModalVisible] = useState(false);
   const [isUsageTypeMiniModalVisible, setIsUsageTypeMiniModalVisible] = useState(false);
   const [isPortMiniModalVisible, setIsPortMiniModalVisible] = useState(false);
@@ -323,7 +323,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
   const [activeTechField, setActiveTechField] = useState<'visit_by' | 'visit_with' | 'visit_with_other' | null>(null);
 
   const [mostUsedLcpnaps, setMostUsedLcpnaps] = useState<LCPNAP[]>([]);
-   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const [datePickerMode, setDatePickerMode] = useState<'date' | 'time'>('date');
   const [tempPickedDate, setTempPickedDate] = useState<Date | null>(null);
   const [isDoneRendering, setIsDoneRendering] = useState(false);
@@ -1094,7 +1094,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     setValidateCooldown(30);
     try {
       const response = await apiClient.get('/smart-olt/validate-sn', {
-        params: { 
+        params: {
           sn,
           jo_id: jobOrderData?.id || jobOrderData?.JobOrder_ID,
           user_email: currentUserEmail

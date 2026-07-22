@@ -24,6 +24,8 @@ interface InvoiceRecord {
     id: number;
     invoice_date?: string;
     invoice_balance?: number;
+    due_date?: string;
+    status?: string;
     print_link?: string;
 }
 

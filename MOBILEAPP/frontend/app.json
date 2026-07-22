@@ -3,7 +3,7 @@
     "name": "AKM",
     "slug": "akm",
     "scheme": "akm-app",
-    "version": "2.5.51",
+    "version": "2.5.53",
     "orientation": "portrait",
     "icon": "./assets/applogo.png",
     "userInterfaceStyle": "light",
@@ -44,9 +44,7 @@
       },
       "blockedPermissions": [
         "android.permission.READ_MEDIA_IMAGES",
-        "android.permission.READ_MEDIA_VIDEO",
-        "android.permission.ACCESS_BACKGROUND_LOCATION",
-        "android.permission.FOREGROUND_SERVICE_LOCATION"
+        "android.permission.READ_MEDIA_VIDEO"
       ],
       "permissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
@@ -55,9 +53,7 @@
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.READ_MEDIA_VIDEO",
         "android.permission.READ_MEDIA_AUDIO",
-        "android.permission.RECORD_AUDIO",
-        "android.permission.ACCESS_FINE_LOCATION",
-        "android.permission.ACCESS_COARSE_LOCATION"
+        "android.permission.RECORD_AUDIO"
       ]
     },
     "web": {

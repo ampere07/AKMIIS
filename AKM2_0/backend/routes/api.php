@@ -241,7 +241,7 @@ Route::prefix('debug')->group(function () {
         );    });
 
 // Discount Management Routes
-Route::prefix('discounts')->group(function () {
+Route::prefix('discounts')->middleware('auth:sanctum')->group(function () {
     Route::get('/', [\App\Http\Controllers\DiscountController::class , 'index']);
     Route::post('/', [\App\Http\Controllers\DiscountController::class , 'store']);
     Route::get('/{id}', [\App\Http\Controllers\DiscountController::class , 'show']);

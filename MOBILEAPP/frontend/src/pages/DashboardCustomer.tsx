@@ -26,7 +26,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     const { width, height } = useWindowDimensions();
     const isMobile = width < 768;
     const isShort = height < 700;
-    const { customerDetail, payments, isLoading: contextLoading, silentRefresh } = useCustomerDataContext();
+    const { customerDetail, payments, invoiceRecords, isLoading: contextLoading, silentRefresh } = useCustomerDataContext();
     const [user, setUser] = useState<any>(null);
 
     const [isPaymentProcessing, setIsPaymentProcessing] = useState<boolean>(false);
@@ -148,8 +148,25 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     const usageType = customerDetail?.technicalDetails?.usageType || 'N/A';
     const emailAddress = customerDetail?.emailAddress || user?.email || 'N/A';
 
+    // Format a stored date string ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or ISO) to
+    // MM/DD/YYYY by reading the parts directly — avoids the timezone shift that
+    // `new Date(...)` can introduce (which turned 07/17 into 08/17, etc.).
+    const formatDbDate = (raw?: string | null): string | null => {
+        if (!raw) return null;
+        const datePart = String(raw).split('T')[0].split(' ')[0];
+        const [y, m, d] = datePart.split('-');
+        if (!y || !m || !d) return null;
+        return `${m.padStart(2, '0')}/${d.padStart(2, '0')}/${y}`;
+    };
+
     let dueDateString = 'Upon Receipt';
-    if (customerDetail?.billingAccount?.billingDay) {
+    // Prefer the real due date stored on the latest invoice (invoiceRecords are
+    // ordered by invoice_date desc by the backend). Only fall back to deriving it
+    // from the billing day when the account has no invoice yet.
+    const latestInvoiceDueDate = formatDbDate(invoiceRecords?.[0]?.due_date);
+    if (latestInvoiceDueDate) {
+        dueDateString = latestInvoiceDueDate;
+    } else if (customerDetail?.billingAccount?.billingDay) {
         const today = new Date();
         const billingDay = customerDetail.billingAccount.billingDay;
 
@@ -441,7 +458,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
 
     const handleDeletePendingPayment = async () => {
         if (!pendingPayment?.reference_no) return;
-        
+
         setIsPaymentProcessing(true);
         try {
             await paymentService.cancelPayment(pendingPayment.reference_no);
@@ -485,9 +502,9 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                     <Text style={[styles.initialsText, { fontSize: isShort ? 18 : 20 }]}>{initials}</Text>
                                 </View>
                                 <View style={{ flex: 1, marginHorizontal: 12 }}>
-                                    <Text 
-                                        allowFontScaling={false} 
-                                        numberOfLines={1} 
+                                    <Text
+                                        allowFontScaling={false}
+                                        numberOfLines={1}
                                         adjustsFontSizeToFit
                                         style={[styles.customerNameText, { fontSize: isShort ? 16 : 18 }]}
                                     >
@@ -496,7 +513,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                     <Text allowFontScaling={false} style={styles.customerAccountText}>Account No: {accountNo}</Text>
                                     {isCardFlipped && <Text allowFontScaling={false} numberOfLines={1} style={styles.customerAccountText}>{emailAddress}</Text>}
                                 </View>
-                                <Pressable 
+                                <Pressable
                                     onPress={handleFlipCard}
                                     style={({ pressed }) => ({
                                         opacity: pressed ? 0.6 : 1,
@@ -509,38 +526,38 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
 
                             {!isCardFlipped ? (
                                 <View style={{ minHeight: isShort ? 80 : 90 }}>
-                                <View style={styles.billingRow}>
-                                    <View style={styles.billingLeft}>
-                                        <Text allowFontScaling={false} style={styles.balanceLabel}>Total Amount</Text>
-                                        <Text 
-                                            numberOfLines={1} 
-                                            adjustsFontSizeToFit
-                                            minimumFontScale={0.5}
-                                            allowFontScaling={false}
-                                            style={[styles.balanceAmountText, { fontSize: balance >= 1000 ? (isMobile ? (isShort ? 28 : 32) : 44) : (isMobile ? (isShort ? 36 : 40) : 56) }]}
-                                        >
-                                            {formatCurrency(balance)}
-                                        </Text>
-                                    </View>
-
-                                    <View style={styles.billingRightCol}>
-                                        <View style={styles.dueDateContainer}>
-                                            <Text allowFontScaling={false} style={styles.infoText}>Due Date: <Text allowFontScaling={false} style={styles.infoValue}>{dueDateString}</Text></Text>
+                                    <View style={styles.billingRow}>
+                                        <View style={styles.billingLeft}>
+                                            <Text allowFontScaling={false} style={styles.balanceLabel}>Total Amount</Text>
+                                            <Text
+                                                numberOfLines={1}
+                                                adjustsFontSizeToFit
+                                                minimumFontScale={0.5}
+                                                allowFontScaling={false}
+                                                style={[styles.balanceAmountText, { fontSize: balance >= 1000 ? (isMobile ? (isShort ? 28 : 32) : 44) : (isMobile ? (isShort ? 36 : 40) : 56) }]}
+                                            >
+                                                {formatCurrency(balance)}
+                                            </Text>
                                         </View>
 
-                                        <Pressable
-                                            onPress={handlePayNow}
-                                            disabled={isPaymentProcessing}
-                                            style={[styles.payBtn, { opacity: isPaymentProcessing ? 0.5 : 1 }]}
-                                        >
-                                            <View style={styles.payBtnInner}>
-                                                <Text style={styles.payBtnText}>
-                                                    {isPaymentProcessing ? '...' : (pendingPayment ? 'Proceed' : 'Pay Now')}
-                                                </Text>
+                                        <View style={styles.billingRightCol}>
+                                            <View style={styles.dueDateContainer}>
+                                                <Text allowFontScaling={false} style={styles.infoText}>Due Date: <Text allowFontScaling={false} style={styles.infoValue}>{dueDateString}</Text></Text>
                                             </View>
-                                        </Pressable>
+
+                                            <Pressable
+                                                onPress={handlePayNow}
+                                                disabled={isPaymentProcessing}
+                                                style={[styles.payBtn, { opacity: isPaymentProcessing ? 0.5 : 1 }]}
+                                            >
+                                                <View style={styles.payBtnInner}>
+                                                    <Text style={styles.payBtnText}>
+                                                        {isPaymentProcessing ? '...' : (pendingPayment ? 'Proceed' : 'Pay Now')}
+                                                    </Text>
+                                                </View>
+                                            </Pressable>
+                                        </View>
                                     </View>
-                                </View>
                                 </View>
                             ) : (
                                 <View style={{ gap: 16, minHeight: isShort ? 80 : 90, justifyContent: 'center' }}>
@@ -580,7 +597,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                             <Text style={styles.paymentAmountValue}>{formatCurrency(payment.amount)}</Text>
                                             <View style={[styles.statusBadgeSmall, { backgroundColor: 'transparent' }]}>
                                                 <Text style={[
-                                                    styles.statusTextSmall, 
+                                                    styles.statusTextSmall,
                                                     { color: (payment.status === 'Completed' || payment.status === 'PAID' || payment.status === 'Success' || payment.status === 'Done') ? '#16a34a' : (payment.status === 'Failed' ? '#ef4444' : '#374151') }
                                                 ]}>
                                                     {(payment.status || 'Posted').toUpperCase()}
@@ -605,11 +622,11 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                         const adIdx = (actualActiveIndex + stackIdx) % ads.length;
                                         const ad = ads[adIdx];
                                         const adWidth = width - (isMobile ? 32 : 48);
-                                        
-                                        const translateX = stackIdx === 0 
+
+                                        const translateX = stackIdx === 0
                                             ? stackAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -width] })
                                             : 0;
-                                        
+
                                         const scale = stackAnim.interpolate({
                                             inputRange: [0, 1],
                                             outputRange: [1 - (stackIdx * 0.05), 1 - (Math.max(0, stackIdx - 1) * 0.05)]
@@ -624,7 +641,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                             inputRange: [0, 1],
                                             outputRange: [1 - (stackIdx * 0.3), 1 - (Math.max(0, stackIdx - 1) * 0.3)]
                                         });
-                                        
+
                                         return (
                                             <Animated.View
                                                 key={ad.id}
@@ -652,7 +669,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                                 {/* Design Elements */}
                                                 <View style={[styles.adCircle, { top: -20, right: -20, width: 100, height: 100, opacity: 0.2 }]} />
                                                 <View style={[styles.adCircle, { bottom: -50, left: -30, width: 150, height: 150, opacity: 0.1 }]} />
-                                                
+
                                                 <View style={styles.adContent}>
                                                     <Text style={styles.adTitle}>{ad.title}</Text>
                                                     <Text style={styles.adDesc}>{ad.desc}</Text>
@@ -709,8 +726,8 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                 <View style={styles.verifyRowMb}>
                                     <Text style={styles.verifyLabel}>Account Name</Text>
                                     <View style={{ flex: 1, alignItems: 'flex-end', marginLeft: 16 }}>
-                                        <Text 
-                                            numberOfLines={1} 
+                                        <Text
+                                            numberOfLines={1}
                                             adjustsFontSizeToFit
                                             style={styles.verifyValue}
                                         >
@@ -868,15 +885,15 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                 >
                                     <Text style={styles.primaryBtnText}>{isPaymentProcessing ? 'Processing...' : 'Resume Payment'}</Text>
                                 </Pressable>
-                                <Pressable 
-                                    onPress={handleDeletePendingPayment} 
+                                <Pressable
+                                    onPress={handleDeletePendingPayment}
                                     style={[styles.cancelBtn, { backgroundColor: '#fee2e2' }]}
                                     disabled={isPaymentProcessing}
                                 >
                                     <Text style={[styles.cancelBtnText, { color: '#dc2626' }]}>Cancel Payment</Text>
                                 </Pressable>
-                                <Pressable 
-                                    onPress={handleCancelPendingPayment} 
+                                <Pressable
+                                    onPress={handleCancelPendingPayment}
                                     style={styles.cancelBtn}
                                     disabled={isPaymentProcessing}
                                 >
@@ -988,12 +1005,12 @@ const styles = StyleSheet.create({
     sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#111827' },
     referralScroll: { maxHeight: 270 },
     referralContent: { gap: 12, paddingBottom: 8 },
-    paymentItem: { 
-        flexDirection: 'row', 
-        justifyContent: 'space-between', 
-        alignItems: 'center', 
-        paddingVertical: 14, 
-        backgroundColor: 'transparent', 
+    paymentItem: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        paddingVertical: 14,
+        backgroundColor: 'transparent',
         borderBottomWidth: 1,
         borderBottomColor: '#f1f5f9'
     },
