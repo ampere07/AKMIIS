@@ -65,12 +65,15 @@ class EnhancedBillingGenerationServiceWithNotifications
         try {
             $accounts = $this->getActiveAccountsForBillingDay($billingDay, $generationDate);
 
+            // Resolved in bulk (one query) instead of one existence check per account.
+            $alreadyBilled = $this->getAccountsAlreadyBilledForMonth('statement', $accounts->pluck('account_no')->all(), $generationDate);
+
             foreach ($accounts as $account) {
                 try {
                     // Idempotency guard: skip if a statement was already generated for this
                     // account in the current billing month. Prevents duplicate SOAs when a
                     // crashed generation is re-run and processes the same customer again.
-                    if ($this->hasBillingForMonth('statement', $account, $generationDate)) {
+                    if (isset($alreadyBilled[$account->account_no])) {
                         $results['skipped']++;
                         $this->log('info', "Skipping SOA for account {$account->account_no}: already generated this billing month");
                         continue;
@@ -127,12 +130,15 @@ class EnhancedBillingGenerationServiceWithNotifications
         try {
             $accounts = $this->getActiveAccountsForBillingDay($billingDay, $generationDate);
 
+            // Resolved in bulk (one query) instead of one existence check per account.
+            $alreadyBilled = $this->getAccountsAlreadyBilledForMonth('invoice', $accounts->pluck('account_no')->all(), $generationDate);
+
             foreach ($accounts as $account) {
                 try {
                     // Idempotency guard: skip if an invoice was already generated for this
                     // account in the current billing month. Prevents duplicate invoices when a
                     // crashed generation is re-run and processes the same customer again.
-                    if ($this->hasBillingForMonth('invoice', $account, $generationDate)) {
+                    if (isset($alreadyBilled[$account->account_no])) {
                         $results['skipped']++;
                         $this->log('info', "Skipping invoice for account {$account->account_no}: already generated this billing month");
                         continue;
@@ -230,23 +236,55 @@ class EnhancedBillingGenerationServiceWithNotifications
      * same calendar month (Asia/Manila) as the generation date. Makes generation idempotent
      * so a crashed-and-restarted run does not bill the same customer twice.
      *
+     * Single-account convenience wrapper over getAccountsAlreadyBilledForMonth() so the
+     * definition of "billing cycle" lives in exactly one place.
+     *
      * @param string $type 'invoice' or 'statement'
      */
     protected function hasBillingForMonth(string $type, BillingAccount $account, Carbon $generationDate): bool
     {
+        $billed = $this->getAccountsAlreadyBilledForMonth($type, [$account->account_no], $generationDate);
+
+        return isset($billed[$account->account_no]);
+    }
+
+    /**
+     * Resolve, for a whole batch of accounts at once, which ones already have a billing
+     * record of $type inside the billing cycle that $generationDate falls in.
+     *
+     * The billing cycle is keyed on account_no + calendar month/year (Asia/Manila) of the
+     * document date, which is what identifies one billing run for a customer: an account is
+     * picked up by getActiveAccountsForBillingDay() exactly once per month, so a second
+     * record in the same month can only be a duplicate.
+     *
+     * Uses ONE query for the entire batch (instead of one per account) so the idempotency
+     * guard costs two queries per run rather than two per customer.
+     *
+     * @param string $type 'invoice' or 'statement'
+     * @param array<int, string> $accountNos
+     * @return array<string, bool> Keyed by account_no for O(1) lookups.
+     */
+    protected function getAccountsAlreadyBilledForMonth(string $type, array $accountNos, Carbon $generationDate): array
+    {
+        $accountNos = array_values(array_unique(array_filter($accountNos)));
+
+        if (empty($accountNos)) {
+            return [];
+        }
+
         $gen = $generationDate->copy()->setTimezone('Asia/Manila');
 
         if ($type === 'statement') {
-            return StatementOfAccount::where('account_no', $account->account_no)
+            $query = StatementOfAccount::whereIn('account_no', $accountNos)
                 ->whereYear('statement_date', $gen->year)
-                ->whereMonth('statement_date', $gen->month)
-                ->exists();
+                ->whereMonth('statement_date', $gen->month);
+        } else {
+            $query = Invoice::whereIn('account_no', $accountNos)
+                ->whereYear('invoice_date', $gen->year)
+                ->whereMonth('invoice_date', $gen->month);
         }
 
-        return Invoice::where('account_no', $account->account_no)
-            ->whereYear('invoice_date', $gen->year)
-            ->whereMonth('invoice_date', $gen->month)
-            ->exists();
+        return array_fill_keys($query->distinct()->pluck('account_no')->all(), true);
     }
 
     protected function getActiveAccountsForBillingDay(int $billingDay, Carbon $generationDate)
@@ -1073,8 +1111,8 @@ class EnhancedBillingGenerationServiceWithNotifications
             'date' => $today->format('Y-m-d'),
             'advance_generation_day' => $advanceGenerationDay,
             'billing_days_processed' => [],
-            'invoices' => ['success' => 0, 'failed' => 0, 'errors' => [], 'notifications' => []],
-            'statements' => ['success' => 0, 'failed' => 0, 'errors' => [], 'notifications' => []]
+            'invoices' => ['success' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => [], 'notifications' => []],
+            'statements' => ['success' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => [], 'notifications' => []]
         ];
 
         foreach ($targetBillingDays as $billingDay) {
@@ -1090,11 +1128,13 @@ class EnhancedBillingGenerationServiceWithNotifications
             // Merge Invoice Results
             $results['invoices']['success'] += $unifiedResults['invoices']['success'];
             $results['invoices']['failed'] += $unifiedResults['invoices']['failed'];
+            $results['invoices']['skipped'] += $unifiedResults['invoices']['skipped'] ?? 0;
             $results['invoices']['errors'] = array_merge($results['invoices']['errors'], $unifiedResults['invoices']['errors']);
-            
+
             // Merge Statement Results
             $results['statements']['success'] += $unifiedResults['statements']['success'];
             $results['statements']['failed'] += $unifiedResults['statements']['failed'];
+            $results['statements']['skipped'] += $unifiedResults['statements']['skipped'] ?? 0;
             $results['statements']['errors'] = array_merge($results['statements']['errors'], $unifiedResults['statements']['errors']);
             
             // Merge Notifications (Unified) - adding to statements for tracking, though it covers both
@@ -1107,58 +1147,102 @@ class EnhancedBillingGenerationServiceWithNotifications
     public function generateUnifiedBilling(int $billingDay, Carbon $generationDate, int $userId): array
     {
         $results = [
-            'invoices' => ['success' => 0, 'failed' => 0, 'errors' => []],
-            'statements' => ['success' => 0, 'failed' => 0, 'errors' => []],
+            'invoices' => ['success' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => []],
+            'statements' => ['success' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => []],
             'notifications' => []
         ];
 
         try {
             $accounts = $this->getActiveAccountsForBillingDay($billingDay, $generationDate);
 
+            // Idempotency guard, resolved in bulk (two queries) BEFORE the loop: any account
+            // that already has a record for this billing cycle is skipped entirely, so a cron
+            // that fires twice — or is re-run manually after a crash — never double-bills a
+            // customer, double-charges their balance, or re-sends a notification.
+            $accountNos = $accounts->pluck('account_no')->all();
+            $alreadyHasStatement = $this->getAccountsAlreadyBilledForMonth('statement', $accountNos, $generationDate);
+            $alreadyHasInvoice = $this->getAccountsAlreadyBilledForMonth('invoice', $accountNos, $generationDate);
+
+            $skippedInvoiceAccounts = [];
+
             foreach ($accounts as $account) {
                 $soa = null;
                 $invoice = null;
 
                 // 1. Generate SOA
-                try {
-                    $soa = $this->createEnhancedStatement($account, $generationDate, $userId);
-                    $results['statements']['success']++;
-                } catch (\Exception $e) {
-                    $results['statements']['failed']++;
-                    $results['statements']['errors'][] = [
-                        'account_id' => $account->id,
+                if (isset($alreadyHasStatement[$account->account_no])) {
+                    $results['statements']['skipped']++;
+                    $this->log('info', "Skipping SOA for account {$account->account_no}: billing already generated for this billing cycle", [
                         'account_no' => $account->account_no,
-                        'error' => "SOA Error: " . $e->getMessage()
-                    ];
-                    $this->log('error', "Failed to generate SOA for account {$account->account_no}: " . $e->getMessage());
+                        'billing_day' => $billingDay,
+                        'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
+                    ]);
+                } else {
+                    try {
+                        $soa = $this->createEnhancedStatement($account, $generationDate, $userId);
+                        $results['statements']['success']++;
+                    } catch (\Exception $e) {
+                        $results['statements']['failed']++;
+                        $results['statements']['errors'][] = [
+                            'account_id' => $account->id,
+                            'account_no' => $account->account_no,
+                            'error' => "SOA Error: " . $e->getMessage()
+                        ];
+                        $this->log('error', "Failed to generate SOA for account {$account->account_no}: " . $e->getMessage());
+                    }
                 }
 
                 // 2. Generate Invoice
-                try {
-                    $invoice = $this->createEnhancedInvoice($account, $generationDate, $userId);
-                    $results['invoices']['success']++;
-                } catch (\Exception $e) {
-                    $results['invoices']['failed']++;
-                    $results['invoices']['errors'][] = [
-                        'account_id' => $account->id,
+                if (isset($alreadyHasInvoice[$account->account_no])) {
+                    $results['invoices']['skipped']++;
+                    $skippedInvoiceAccounts[] = $account->account_no;
+                    $this->log('info', "Skipping invoice for account {$account->account_no}: billing already generated for this billing cycle", [
                         'account_no' => $account->account_no,
-                        'error' => "Invoice Error: " . $e->getMessage()
-                    ];
-                    $this->log('error', "Failed to generate Invoice for account {$account->account_no}: " . $e->getMessage());
+                        'billing_day' => $billingDay,
+                        'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
+                    ]);
+                } else {
+                    try {
+                        $invoice = $this->createEnhancedInvoice($account, $generationDate, $userId);
+                        $results['invoices']['success']++;
+                    } catch (\Exception $e) {
+                        $results['invoices']['failed']++;
+                        $results['invoices']['errors'][] = [
+                            'account_id' => $account->id,
+                            'account_no' => $account->account_no,
+                            'error' => "Invoice Error: " . $e->getMessage()
+                        ];
+                        $this->log('error', "Failed to generate Invoice for account {$account->account_no}: " . $e->getMessage());
+                    }
                 }
 
-                // 3. Notify ONCE (if either exists)
+                // 3. Notify ONCE (only when something was actually generated). Both $soa and
+                //    $invoice stay null for a skipped account, so no duplicate notification
+                //    is ever sent on a repeat run.
                 if ($soa || $invoice) {
                      $notificationResult = $this->queueNotification($account, $invoice, $soa);
                      $results['notifications'][] = $notificationResult;
                 }
             }
+
+            $this->log('info', "Unified billing complete for billing day {$billingDay}", [
+                'billing_day' => $billingDay,
+                'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m'),
+                'accounts_considered' => $accounts->count(),
+                'invoices_generated' => $results['invoices']['success'],
+                'invoices_skipped' => $results['invoices']['skipped'],
+                'invoices_failed' => $results['invoices']['failed'],
+                'statements_generated' => $results['statements']['success'],
+                'statements_skipped' => $results['statements']['skipped'],
+                'statements_failed' => $results['statements']['failed'],
+                'skipped_invoice_account_nos' => $skippedInvoiceAccounts,
+            ]);
         } catch (\Exception $e) {
             $this->log('error', "Error in generateUnifiedBilling: " . $e->getMessage());
             // In case of catastrophic failure, we just return partial results with the error logged
             // You might want to bubble this up depending on desire
         }
-        
+
         return $results;
     }
 

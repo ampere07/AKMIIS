@@ -85,6 +85,7 @@ class ProcessAutoDisconnectPullout extends Command
                         ['Metric', 'Count'],
                         [
                             ['Processed', $dcResult['processed']],
+                            ['Queued for RADIUS Retry', $dcResult['queued'] ?? 0],
                             ['Skipped', $dcResult['skipped']],
                             ['Duration', $dcResult['duration'] . 's']
                         ]

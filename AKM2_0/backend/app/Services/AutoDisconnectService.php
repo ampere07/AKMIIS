@@ -9,7 +9,10 @@ use App\Models\BillingConfig;
 use App\Models\SMSTemplate;
 use App\Models\EmailTemplate;
 use App\Services\EmailQueueService;
+use App\Services\RadiusQueueService;
+use App\Services\RadiusServerResolver;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 use Throwable;
@@ -21,6 +24,7 @@ class AutoDisconnectService
     private $radiusService;
     private $smsService;
     private $emailQueueService;
+    private $radiusResolver;
     private $lockName = 'auto_disconnect_worker';
     private $lockTimeout = 300; // 5 minutes max execution time
     private $hasLock = false;
@@ -54,14 +58,26 @@ class AutoDisconnectService
     // Marker used in service_charge_logs to identify (and dedupe) auto-generated additional invoices.
     private const ADDITIONAL_INVOICE_CHARGE_TYPE = 'Prorated Additional Invoice';
 
+    // radius_operation_queue coordinates for operations deferred by an unreachable RADIUS server.
+    private const QUEUE_SOURCE_AUTO_DC = 'auto_disconnect';
+    private const QUEUE_SOURCE_AUTO_PULLOUT = 'auto_pullout';
+    private const QUEUE_OPERATION_RESTRICT = 'restricted_user';
+
+    // Connectivity probe budget per RADIUS endpoint (seconds). Mirrors the timeouts used by
+    // RadiusServerResolver so a dead server is detected in ~2s instead of hanging the run.
+    private const RADIUS_PROBE_CONNECT_TIMEOUT = 2;
+    private const RADIUS_PROBE_TIMEOUT = 4;
+
     public function __construct(
         ManualRadiusOperationsService $radiusService,
         ?ItexmoSmsService $smsService = null,
-        ?EmailQueueService $emailQueueService = null
+        ?EmailQueueService $emailQueueService = null,
+        ?RadiusServerResolver $radiusResolver = null
     ) {
         $this->radiusService = $radiusService;
         $this->smsService = $smsService;
         $this->emailQueueService = $emailQueueService;
+        $this->radiusResolver = $radiusResolver ?? app(RadiusServerResolver::class);
         $this->isCli = (PHP_SAPI === 'cli');
     }
 
@@ -133,6 +149,7 @@ class AutoDisconnectService
                 return [
                     'success' => true,
                     'processed' => 0,
+                    'queued' => 0,
                     'skipped' => 0,
                     'errors' => [],
                     'duration' => $duration
@@ -189,6 +206,7 @@ class AutoDisconnectService
 
             $processedCount = 0;
             $skippedCount = 0;
+            $queuedCount = 0;
             $errors = [];
             $counter = 0;
 
@@ -216,7 +234,12 @@ class AutoDisconnectService
 
                     if ($result['success']) {
                         $processedCount++;
-                        $this->writeLog("[{$counter}/{$totalCount}] ✓ SUCCESS - Transaction Committed");
+                        if (!empty($result['queued'])) {
+                            $queuedCount++;
+                            $this->writeLog("[{$counter}/{$totalCount}] ✓ SUCCESS - Transaction Committed (RADIUS restriction queued for retry)");
+                        } else {
+                            $this->writeLog("[{$counter}/{$totalCount}] ✓ SUCCESS - Transaction Committed");
+                        }
                     } else {
                         $skippedCount++;
                         $this->writeLog("[{$counter}/{$totalCount}] ⊘ SKIPPED: {$result['reason']}");
@@ -244,6 +267,7 @@ class AutoDisconnectService
             $this->writeLog("Summary:");
             $this->writeLog("  • Total Found: {$totalCount}");
             $this->writeLog("  • Successfully Processed: {$processedCount}");
+            $this->writeLog("  • Queued for RADIUS Retry: {$queuedCount}");
             $this->writeLog("  • Skipped: {$skippedCount}");
             $this->writeLog("  • Errors: " . count($errors));
             $this->writeLog("  • Duration: {$duration} second(s)");
@@ -263,6 +287,7 @@ class AutoDisconnectService
             return [
                 'success' => true,
                 'processed' => $processedCount,
+                'queued' => $queuedCount,
                 'skipped' => $skippedCount,
                 'errors' => $errors,
                 'duration' => $duration
@@ -377,27 +402,59 @@ class AutoDisconnectService
         $username = $technicalDetail->username;
         $this->writeLog("  [INFO] Username: {$username}");
 
+        $organizationId = $billingAccount->customer->organization_id ?? null;
+        $radiusParams = [
+            'username' => $username,
+            'accountNumber' => $accountNo,
+            'remarks' => 'Auto DC',
+            'updatedBy' => 'System'
+        ];
+
+        // 1. Pre-flight connectivity check, deliberately BEFORE the transaction so no
+        //    network I/O happens while row locks are held. An unreachable server must
+        //    never abort the run: the operation is queued and the next account proceeds.
+        $this->writeLog("  [RADIUS] Probing RADIUS server connectivity...");
+        $connection = $this->checkRadiusConnection($username, $organizationId);
+        $queuedForRetry = false;
+        $queueReason = null;
+
+        if ($connection['reachable']) {
+            $this->writeLog("  [RADIUS] ✓ Server reachable at {$connection['base_url']} (Config #{$connection['config_id']})");
+            $this->writeLog("  [RADIUS] Initiating restriction...");
+
+            $restrictResult = $this->radiusService->restrictedUser($radiusParams);
+
+            if (($restrictResult['status'] ?? '') === 'success') {
+                $this->writeLog("  [RADIUS] ✓ Successfully restricted");
+            } else {
+                $reason = $restrictResult['message'] ?? 'Unknown RADIUS error';
+
+                // The server answered the probe but the operation still failed. A
+                // connection-shaped failure (server dropped between probe and call) is
+                // retryable; anything else remains a critical, run-stopping error.
+                if (!$this->isConnectionFailure($reason)) {
+                    $this->writeLog("  [CRITICAL] RADIUS failure: {$reason}. STOPPING ENTIRE PROCESS.");
+                    \Log::channel('radiusrelated')->error('[AUTO DC RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $reason);
+                    throw new Exception("CRITICAL RADIUS FAILURE: {$reason}");
+                }
+
+                $queuedForRetry = true;
+                $queueReason = $reason;
+                $this->writeLog("  [RADIUS] ✗ Connection lost during restriction: {$reason}");
+            }
+        } else {
+            $queuedForRetry = true;
+            $queueReason = $connection['error'] ?? 'RADIUS server unreachable';
+            $this->writeLog("  [RADIUS] ✗ Server unreachable: {$queueReason}");
+        }
+
+        if ($queuedForRetry) {
+            $this->writeLog("  [RADIUS] Deferring restriction to radius_operation_queue for retry.");
+        }
+
         // Create transaction to ensure atomicity
         DB::beginTransaction();
         try {
-            // 1. Restrict via RADIUS first
-            $this->writeLog("  [RADIUS] Initiating restriction...");
-            $restrictResult = $this->radiusService->restrictedUser([
-                'username' => $username,
-                'accountNumber' => $accountNo,
-                'remarks' => 'Auto DC',
-                'updatedBy' => 'System'
-            ]);
-
-            if ($restrictResult['status'] !== 'success') {
-                $reason = $restrictResult['message'] ?? 'Unknown RADIUS error';
-                $this->writeLog("  [CRITICAL] RADIUS failure: {$reason}. STOPPING ENTIRE PROCESS.");
-                \Log::channel('radiusrelated')->error('[AUTO DC RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $reason);
-                DB::rollBack();
-                throw new Exception("CRITICAL RADIUS FAILURE: {$reason}");
-            }
-            $this->writeLog("  [RADIUS] ✓ Successfully restricted");
-
             // 2. Apply disconnection fee if configured
             $config = BillingConfig::first();
             $dcFee = floatval($config->disconnection_fee ?? 0);
@@ -474,6 +531,20 @@ class AutoDisconnectService
             DB::commit();
             $this->writeLog("  [DB] ✓ COMMIT SUCCESSFUL");
 
+            // Queue the deferred RADIUS restriction AFTER the commit so a rolled-back
+            // billing update can never leave an orphan queue entry behind.
+            if ($queuedForRetry) {
+                $this->queueRadiusOperation(
+                    self::QUEUE_SOURCE_AUTO_DC,
+                    $billingAccount,
+                    $accountNo,
+                    $radiusParams,
+                    $connection,
+                    $queueReason,
+                    $organizationId
+                );
+            }
+
             // Send SMS notification - AFTER commit to prevent duplicates on rollback
             if ($this->smsService && $billingAccount->customer && $billingAccount->customer->contact_number_primary) {
                 $this->writeLog("  [SMS] Attempting to trigger triggerSMS function...");
@@ -492,9 +563,13 @@ class AutoDisconnectService
                 $this->writeLog("  [EMAIL] Skipping Email (Service null or no email address)");
             }
 
-            $this->writeLog("  [COMPLETE] Account {$accountNo} successfully restricted and set to Inactive");
+            if ($queuedForRetry) {
+                $this->writeLog("  [COMPLETE] Account {$accountNo} set to Inactive; RADIUS restriction queued for retry");
+            } else {
+                $this->writeLog("  [COMPLETE] Account {$accountNo} successfully restricted and set to Inactive");
+            }
 
-            return ['success' => true];
+            return ['success' => true, 'queued' => $queuedForRetry];
 
         } catch (Throwable $e) {
             DB::rollBack();
@@ -507,6 +582,231 @@ class AutoDisconnectService
 
             throw $e;
         }
+    }
+
+    /**
+     * Probe the RADIUS server(s) that could own this account and report whether one is
+     * actually reachable, BEFORE any mutating RADIUS call is attempted.
+     *
+     * Walks radius_config #1, #2, ... (organization-specific first, shared as fallback)
+     * and, for each, tries the configured protocol then the alternate — the same strategy
+     * the rest of the app uses. A read-only GET is issued, so probing never mutates state
+     * and never duplicates the operation it is guarding.
+     *
+     * Reachability rules:
+     *   - HTTP 200 carrying the account  => reachable, account located on that config.
+     *   - HTTP 404 / 200 without the account => reachable, account simply lives elsewhere.
+     *   - HTTP 401 / 403 => treated as UNREACHABLE (bad credentials are a connection-level
+     *     failure the operator must fix; the operation is queued rather than lost).
+     *   - Timeout / DNS / TLS / refused connection => unreachable, try the next endpoint.
+     *
+     * @return array{reachable: bool, account_found: bool, config_id: int|null, config_ip: string|null,
+     *               base_url: string|null, error: string|null, attempts: array}
+     */
+    private function checkRadiusConnection(string $username, ?int $organizationId = null): array
+    {
+        $result = [
+            'reachable'     => false,
+            'account_found' => false,
+            'config_id'     => null,
+            'config_ip'     => null,
+            'base_url'      => null,
+            'error'         => null,
+            'attempts'      => [],
+        ];
+
+        try {
+            $configs = $this->radiusResolver->orderedConfigs($organizationId);
+        } catch (Throwable $e) {
+            $result['error'] = 'Failed to load radius_config: ' . $e->getMessage();
+            $this->writeVerbose("RADIUS probe could not load configs: " . $e->getMessage());
+            return $result;
+        }
+
+        if ($configs->isEmpty()) {
+            $result['error'] = 'No radius_config records available';
+            $this->writeVerbose("RADIUS probe found no radius_config records (organization_id=" . ($organizationId ?? 'null') . ")");
+            return $result;
+        }
+
+        $path = '/rest/user-manage/user/' . urlencode($username);
+        $errors = [];
+
+        foreach ($configs as $config) {
+            foreach ($this->radiusResolver->baseUrlsFor($config) as $baseUrl) {
+                try {
+                    $response = Http::withOptions(['verify' => false])
+                        ->withBasicAuth($config->username, $config->password)
+                        ->connectTimeout(self::RADIUS_PROBE_CONNECT_TIMEOUT)
+                        ->timeout(self::RADIUS_PROBE_TIMEOUT)
+                        ->get($baseUrl . $path);
+
+                    $status = $response->status();
+                    $result['attempts'][] = ['base_url' => $baseUrl, 'status' => $status];
+                    $this->writeVerbose("RADIUS probe {$baseUrl} => HTTP {$status}");
+
+                    // Authentication failure: the socket opened but we cannot operate.
+                    if ($status === 401 || $status === 403) {
+                        $errors[] = "{$baseUrl}: authentication failed (HTTP {$status})";
+                        continue;
+                    }
+
+                    // Anything else means the server answered — it is reachable.
+                    if (!$result['reachable']) {
+                        $result['reachable'] = true;
+                        $result['config_id'] = $config->id;
+                        $result['config_ip'] = $config->ip;
+                        $result['base_url'] = $baseUrl;
+                    }
+
+                    if ($response->successful()) {
+                        $data = $response->json();
+                        if (is_array($data) && isset($data['.id'])) {
+                            // Account located: pin the probe result to THIS server.
+                            $result['account_found'] = true;
+                            $result['config_id'] = $config->id;
+                            $result['config_ip'] = $config->ip;
+                            $result['base_url'] = $baseUrl;
+                            return $result;
+                        }
+                    }
+
+                    // Reachable but the account is not on this config — no point retrying
+                    // the alternate protocol for the same server.
+                    break;
+
+                } catch (Throwable $e) {
+                    $errors[] = "{$baseUrl}: " . $e->getMessage();
+                    $result['attempts'][] = ['base_url' => $baseUrl, 'error' => $e->getMessage()];
+                    $this->writeVerbose("RADIUS probe {$baseUrl} => EXCEPTION: " . $e->getMessage());
+                }
+            }
+        }
+
+        if (!$result['reachable']) {
+            $result['error'] = empty($errors)
+                ? 'No RADIUS endpoint responded'
+                : implode(' | ', $errors);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Persist a RADIUS operation that could not be applied into radius_operation_queue so
+     * ProcessRadiusQueue can retry it later.
+     *
+     * Stores everything needed to replay the call: the customer, the operation type, the
+     * RADIUS configuration that was targeted, the original payload, the failure reason and
+     * timestamps. Duplicate pending entries for the same account + operation are suppressed
+     * so a multi-day outage cannot flood the queue.
+     *
+     * Never throws: a queue failure is logged and the caller continues with the next customer.
+     */
+    private function queueRadiusOperation(
+        string $sourceType,
+        BillingAccount $billingAccount,
+        string $accountNo,
+        array $radiusParams,
+        array $connection,
+        ?string $reason,
+        ?int $organizationId
+    ): bool {
+        try {
+            $params = $radiusParams + [
+                'radius_config_id' => $connection['config_id'] ?? null,
+                'radius_config_ip' => $connection['config_ip'] ?? null,
+                'radius_base_url'  => $connection['base_url'] ?? null,
+                'organization_id'  => $organizationId,
+                'account_id'       => $billingAccount->id,
+                'billing_day'      => $billingAccount->billing_day ?? null,
+                'queued_reason'    => $reason,
+                'queued_at'        => Carbon::now()->toDateTimeString(),
+                'queued_by'        => $sourceType,
+            ];
+
+            $outcome = RadiusQueueService::queueUnique([
+                'organization_id' => $organizationId,
+                'source_type'     => $sourceType,
+                'source_id'       => $billingAccount->id,
+                'account_no'      => $accountNo,
+                'operation'       => self::QUEUE_OPERATION_RESTRICT,
+                'params'          => $params,
+                'last_error'      => $reason,
+                'created_by'      => 'System',
+            ]);
+
+            if ($outcome['duplicate']) {
+                $this->writeLog("  [QUEUE] ⊙ Skipped: a pending '" . self::QUEUE_OPERATION_RESTRICT . "' entry already exists for {$accountNo}");
+                return true;
+            }
+
+            if ($outcome['queued']) {
+                $this->writeLog("  [QUEUE] ✓ Queued '" . self::QUEUE_OPERATION_RESTRICT . "' for {$accountNo} (source: {$sourceType})");
+                \Log::channel('radiusrelated')->warning('[AUTO DC RADIUS QUEUED] RADIUS unreachable, operation deferred', [
+                    'account_no'       => $accountNo,
+                    'account_id'       => $billingAccount->id,
+                    'username'         => $radiusParams['username'] ?? null,
+                    'operation'        => self::QUEUE_OPERATION_RESTRICT,
+                    'source_type'      => $sourceType,
+                    'radius_config_id' => $connection['config_id'] ?? null,
+                    'radius_config_ip' => $connection['config_ip'] ?? null,
+                    'probe_attempts'   => $connection['attempts'] ?? [],
+                    'reason'           => $reason,
+                ]);
+                return true;
+            }
+
+            $this->writeLog("  [QUEUE] ✗ Failed to queue operation for {$accountNo}: " . ($outcome['error'] ?? 'unknown error'));
+            \Log::channel('radiusrelated')->error('[AUTO DC RADIUS QUEUE FAILURE] Account: ' . $accountNo . ' - ' . ($outcome['error'] ?? 'unknown error'));
+            return false;
+
+        } catch (Throwable $e) {
+            // Queueing must never break the run — log and move on to the next customer.
+            $this->writeLog("  [QUEUE] ✗ Exception while queuing operation for {$accountNo}: " . $e->getMessage());
+            \Log::channel('radiusrelated')->error('[AUTO DC RADIUS QUEUE EXCEPTION] Account: ' . $accountNo . ' - ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Heuristic: does this failure message describe a connection-level problem
+     * (timeout, refused socket, DNS/TLS failure, auth rejection) rather than a genuine
+     * operational error? Connection-level failures are retryable and get queued; anything
+     * else keeps the pre-existing run-stopping behaviour.
+     */
+    private function isConnectionFailure(string $message): bool
+    {
+        $needles = [
+            'failed to connect',
+            'could not connect',
+            'connection refused',
+            'connection reset',
+            'connection timed out',
+            'connection error',
+            'timed out',
+            'timeout',
+            'curl error',
+            'could not resolve host',
+            'name or service not known',
+            'network is unreachable',
+            'no route to host',
+            'ssl',
+            'unauthorized',
+            'authentication failed',
+            'no radius configurations found',
+            'failed to connect to radius server',
+        ];
+
+        $haystack = strtolower($message);
+
+        foreach ($needles as $needle) {
+            if (str_contains($haystack, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1038,21 +1338,49 @@ class AutoDisconnectService
                     $this->createPulloutRequest($billingAccount, $totalOffset);
                     $this->writeLog("  [CREATE] ✓ Pullout service order created");
 
-                    // 2. Restrict user via RADIUS (also creates disconnected_logs entry)
-                    $this->writeLog("  [RADIUS] Restricting user via RADIUS...");
-                    $restrictResult = $this->radiusService->restrictedUser([
+                    // 2. Restrict user via RADIUS (also creates disconnected_logs entry).
+                    //    Probe first so an unreachable server queues a retry instead of
+                    //    silently losing the restriction.
+                    $organizationId = $billingAccount->customer->organization_id ?? null;
+                    $radiusParams = [
                         'username' => $username,
                         'accountNumber' => $accountNo,
                         'remarks' => 'Pullout',
                         'updatedBy' => 'System'
-                    ]);
+                    ];
 
-                    if ($restrictResult['status'] === 'success') {
+                    $this->writeLog("  [RADIUS] Probing RADIUS server connectivity...");
+                    $connection = $this->checkRadiusConnection($username, $organizationId);
+
+                    if ($connection['reachable']) {
+                        $this->writeLog("  [RADIUS] ✓ Server reachable at {$connection['base_url']} (Config #{$connection['config_id']})");
+                        $this->writeLog("  [RADIUS] Restricting user via RADIUS...");
+                        $restrictResult = $this->radiusService->restrictedUser($radiusParams);
+                    } else {
+                        $this->writeLog("  [RADIUS] ✗ Server unreachable: " . ($connection['error'] ?? 'unknown'));
+                        $restrictResult = [
+                            'status' => 'error',
+                            'message' => $connection['error'] ?? 'RADIUS server unreachable'
+                        ];
+                    }
+
+                    if (($restrictResult['status'] ?? '') === 'success') {
                         $this->writeLog("  [RADIUS] ✓ Successfully restricted");
                     } else {
                         $reason = $restrictResult['message'] ?? 'Unknown';
                         $this->writeLog("  [RADIUS] ✗ Restrict failed: " . $reason);
                         \Log::channel('radiusrelated')->error('[AUTO PULLOUT RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $reason);
+
+                        // Defer to the retry queue so the pullout restriction is not lost.
+                        $this->queueRadiusOperation(
+                            self::QUEUE_SOURCE_AUTO_PULLOUT,
+                            $billingAccount,
+                            $accountNo,
+                            $radiusParams,
+                            $connection,
+                            $reason,
+                            $organizationId
+                        );
                     }
 
                     // 3. Update billing status to Inactive

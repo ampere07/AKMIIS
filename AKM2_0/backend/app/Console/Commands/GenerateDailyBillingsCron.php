@@ -127,12 +127,14 @@ class GenerateDailyBillingsCron extends Command
             $logger->info('SOA generation completed', [
                 'success' => $unifiedResults['statements']['success'],
                 'failed' => $unifiedResults['statements']['failed'],
+                'skipped_already_generated' => $unifiedResults['statements']['skipped'] ?? 0,
                 'total_accounts' => $accountsCount
             ]);
 
             $logger->info('Invoice generation completed', [
                 'success' => $unifiedResults['invoices']['success'],
                 'failed' => $unifiedResults['invoices']['failed'],
+                'skipped_already_generated' => $unifiedResults['invoices']['skipped'] ?? 0,
                 'total_accounts' => $accountsCount
             ]);
 

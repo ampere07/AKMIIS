@@ -67,6 +67,62 @@ class RadiusQueueService
     }
 
     /**
+     * True when an unfinished (pending or processing) queue entry already exists for the
+     * same account + operation.
+     *
+     * Used by callers that may retry the same customer on a later run (cron jobs) so a
+     * RADIUS outage produces exactly one queue entry per pending operation instead of one
+     * per run. Optionally narrowed to a single source_type.
+     */
+    public static function hasPendingOperation(?string $accountNo, string $operation, ?string $sourceType = null): bool
+    {
+        if (empty($accountNo)) {
+            return false;
+        }
+
+        $query = DB::table('radius_operation_queue')
+            ->where('account_no', $accountNo)
+            ->where('operation', $operation)
+            ->whereIn('status', ['pending', 'processing']);
+
+        if ($sourceType !== null) {
+            $query->where('source_type', $sourceType);
+        }
+
+        return $query->exists();
+    }
+
+    /**
+     * Queue a failed RADIUS operation only when no unfinished entry for the same
+     * account + operation exists yet.
+     *
+     * @return array{queued: bool, duplicate: bool, error: string|null}
+     */
+    public static function queueUnique(array $data): array
+    {
+        try {
+            if (self::hasPendingOperation($data['account_no'] ?? null, $data['operation'], $data['source_type'] ?? null)) {
+                return ['queued' => false, 'duplicate' => true, 'error' => null];
+            }
+
+            $queued = self::queue($data) !== null;
+
+            return [
+                'queued'    => $queued,
+                'duplicate' => false,
+                'error'     => $queued ? null : 'Queue insert returned no result',
+            ];
+        } catch (\Throwable $e) {
+            Log::channel('radiusrelated')->error('[RADIUS QUEUE] queueUnique failed: ' . $e->getMessage(), [
+                'account_no' => $data['account_no'] ?? null,
+                'operation'  => $data['operation'] ?? null,
+            ]);
+
+            return ['queued' => false, 'duplicate' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
      * Process all pending items in the queue
      * Called by the cron command
      */
