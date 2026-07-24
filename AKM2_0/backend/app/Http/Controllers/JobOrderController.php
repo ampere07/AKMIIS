@@ -695,7 +695,44 @@ class JobOrderController extends Controller
             ]);
 
             $oldStatus = $jobOrder->onsite_status;
-            
+
+            // ── Technician availability guard (mirrors Api\ServiceOrderApiController) ──
+            // onsite_status is the Job Order equivalent of the Service Order
+            // visit_status.
+            //   • Reassigning the order (assigned_email changed) resets both timers
+            //     so the new technician starts fresh.
+            //   • Once a STARTED job leaves the "In Progress" state (any onsite_status
+            //     other than In Progress — Failed, Done, Reschedule, …) it must carry
+            //     an end_time, so the technician is not left flagged as busy.
+            // start_time/end_time are stored as Asia/Manila wall-clock to match the
+            // mobile timer, so we stamp Manila time here — bare now() is UTC here.
+            $assignedEmailChanged = array_key_exists('assigned_email', $data)
+                && (string) $data['assigned_email'] !== (string) ($jobOrder->assigned_email ?? '');
+
+            if ($assignedEmailChanged) {
+                $data['start_time'] = null;
+                $data['end_time']   = null;
+            } else {
+                $effectiveOnsite = strtolower(trim((string) (array_key_exists('onsite_status', $data)
+                    ? $data['onsite_status']
+                    : ($jobOrder->onsite_status ?? ''))));
+
+                $onsiteInProgress = in_array($effectiveOnsite, ['in progress', 'in-progress', 'inprogress'], true);
+                $leftInProgress   = ($effectiveOnsite !== '' && !$onsiteInProgress);
+
+                $startTimePresent = array_key_exists('start_time', $data)
+                    ? !empty($data['start_time'])
+                    : !empty($jobOrder->start_time);
+                // A payload that mentions end_time (a real timestamp OR an explicit
+                // null to (re)open the timer) is authoritative — never override it.
+                $callerManagesEndTime = array_key_exists('end_time', $data);
+
+                if ($leftInProgress && $startTimePresent && !$callerManagesEndTime && empty($jobOrder->end_time)) {
+                    $data['end_time'] = \Carbon\Carbon::now('Asia/Manila')->format('Y-m-d H:i:s');
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────────
+
             $jobOrder->fill($data);
             $dirtyAttributes = $jobOrder->getDirty();
             
@@ -1307,8 +1344,8 @@ class JobOrderController extends Controller
                         $customerName = preg_replace('/\s+/', ' ', trim($customer->full_name));
                         $emailBody = str_replace('{{customer_name}}', $customerName, $emailBody);
                         $emailBody = str_replace('{{customer_tag}}', $customerName, $emailBody);
-                        $emailBody = str_replace('{{company_name}}', 'AKM IIS', $emailBody);
-                        $emailBody = str_replace('{{fb_username}}', 'https://www.facebook.com/akmiis', $emailBody);
+                        $emailBody = str_replace('{{company_name}}', 'ATSS Fiber', $emailBody);
+                        $emailBody = str_replace('{{fb_username}}', 'https://www.facebook.com/atssfiber', $emailBody);
                         $emailBody = str_replace('{{account_no}}', $accountNumber, $emailBody);
                         $emailBody = str_replace('{{username}}', $generatedUsername, $emailBody);
                         $emailBody = str_replace('{{password}}', $generatedPassword, $emailBody);
@@ -1759,38 +1796,21 @@ class JobOrderController extends Controller
 
             $organizationId = $jobOrder->organization_id ?? auth()->user()?->organization_id ?? null;
 
-            // Select the RADIUS server from the barangay's assigned radius_config_id.
-            // The account does not exist on any server yet, so placement is decided
-            // deliberately from the barangay configuration — with NO fallback to another
-            // server. If the barangay has no RADIUS config assigned (or it is missing),
-            // we error out instead of silently using a different server.
-            $barangay = $jobOrder->application?->barangay ?? null;
-            $city = $jobOrder->application?->city ?? null;
-            $radiusConfig = app(RadiusServerResolver::class)->resolveForBarangay($barangay, $city, $organizationId);
+            // Server placement no longer depends on the barangay. We use the first
+            // radius_config (#1) and, only if it fails 3 times, fall back to the
+            // second radius_config (#2). The account is created on whichever succeeds.
+            $configs = app(RadiusServerResolver::class)->orderedConfigs($organizationId);
 
-            if (!$radiusConfig) {
-                \Log::channel('radiusrelated')->error('RADIUS configuration could not be resolved from barangay for JobOrder: ' . $id, [
-                    'job_order_id' => $id,
-                    'barangay'     => $barangay,
-                    'city'         => $city,
+            if ($configs->isEmpty()) {
+                \Log::channel('radiusrelated')->error('No RADIUS configuration available for JobOrder: ' . $id, [
+                    'job_order_id'    => $id,
+                    'organization_id' => $organizationId,
                 ]);
                 return [
                     'success' => false,
-                    'message' => 'No RADIUS server is assigned to this barangay. Please assign a RADIUS Config to the barangay before creating the account.',
+                    'message' => 'No RADIUS server is configured. Please add a RADIUS Config before creating the account.',
                 ];
             }
-
-            \Log::channel('radiusrelated')->info('RADIUS server selected for JobOrder account creation', [
-                'job_order_id'     => $id,
-                'barangay'         => $barangay,
-                'city'             => $city,
-                'radius_config_id' => $radiusConfig->id,
-                'radius_ip'        => $radiusConfig->ip,
-            ]);
-
-            $radiusUrl = $radiusConfig->ssl_type . '://' . $radiusConfig->ip . ':' . $radiusConfig->port . '/rest/user-manage/user';
-            $radiusUsername = $radiusConfig->username;
-            $radiusPassword = $radiusConfig->password;
 
             if (!$jobOrder->application) {
                 throw new \Exception('Job order must have an associated application');
@@ -1855,55 +1875,92 @@ class JobOrderController extends Controller
                 $plan = trim($plan);
             }
             
-            try {
-                $payload = [
-                    'name' => $pppoeUsername,
-                    'group' => $plan,
-                    'password' => $pppoePassword
-                ];
+            $payload = [
+                'name' => $pppoeUsername,
+                'group' => $plan,
+                'password' => $pppoePassword
+            ];
 
-                $response = Http::withOptions([
-                    'verify' => false
-                ])
-                ->withBasicAuth($radiusUsername, $radiusPassword)
-                ->put($radiusUrl, $payload);
+            // Try radius_config #1 up to 3 times; if it never succeeds, fall back to #2.
+            $maxAttemptsPerConfig = 3;
+            $positionsToTry = [1];
+            if ($configs->count() >= 2) {
+                $positionsToTry[] = 2;
+            }
 
-                $statusCode = $response->status();
+            $lastFailureWasConnection = false;
 
-                if ($statusCode === 204 || $response->successful()) {
-                    $radiusSubmitted = true;
-                } else {
-                    $radiusError = 'HTTP ' . $statusCode . ': ' . $response->body();
-                    \Log::channel('radiusrelated')->error('RADIUS API Error for JobOrder: ' . $id, [
-                        'status' => $statusCode,
-                        'response' => $response->body(),
-                        'payload' => $payload,
-                        'radius_config_id' => $radiusConfig->id,
-                        'radius_ip' => $radiusConfig->ip,
-                    ]);
-                    if (!$credentialsExist) {
-                        return [
-                            'success' => false,
-                            'message' => 'Failed to create RADIUS account',
+            foreach ($positionsToTry as $position) {
+                $radiusConfig = $configs->get($position - 1);
+                if (!$radiusConfig) {
+                    continue;
+                }
+
+                $radiusUrl = $radiusConfig->ssl_type . '://' . $radiusConfig->ip . ':' . $radiusConfig->port . '/rest/user-manage/user';
+                $radiusUsername = $radiusConfig->username;
+                $radiusPassword = $radiusConfig->password;
+
+                \Log::channel('radiusrelated')->info('RADIUS server selected for JobOrder account creation', [
+                    'job_order_id'     => $id,
+                    'position'         => $position,
+                    'radius_config_id' => $radiusConfig->id,
+                    'radius_ip'        => $radiusConfig->ip,
+                ]);
+
+                for ($attempt = 1; $attempt <= $maxAttemptsPerConfig; $attempt++) {
+                    try {
+                        $response = Http::withOptions([
+                            'verify' => false
+                        ])
+                        ->withBasicAuth($radiusUsername, $radiusPassword)
+                        ->put($radiusUrl, $payload);
+
+                        $statusCode = $response->status();
+
+                        if ($statusCode === 204 || $response->successful()) {
+                            $radiusSubmitted = true;
+                            $radiusError = null;
+                            break;
+                        }
+
+                        $radiusError = 'HTTP ' . $statusCode . ': ' . $response->body();
+                        $lastFailureWasConnection = false;
+                        \Log::channel('radiusrelated')->error('RADIUS API Error for JobOrder: ' . $id, [
+                            'status' => $statusCode,
+                            'response' => $response->body(),
+                            'payload' => $payload,
+                            'position' => $position,
+                            'attempt' => $attempt,
+                            'radius_config_id' => $radiusConfig->id,
+                            'radius_ip' => $radiusConfig->ip,
+                        ]);
+                    } catch (\Exception $mikrotikException) {
+                        $radiusError = $mikrotikException->getMessage();
+                        $lastFailureWasConnection = true;
+                        \Log::channel('radiusrelated')->error('RADIUS Connection Exception for JobOrder: ' . $id, [
                             'error' => $radiusError,
-                        ];
+                            'trace' => $mikrotikException->getTraceAsString(),
+                            'position' => $position,
+                            'attempt' => $attempt,
+                            'radius_config_id' => $radiusConfig->id,
+                            'radius_ip' => $radiusConfig->ip,
+                        ]);
                     }
                 }
-            } catch (\Exception $mikrotikException) {
-                $radiusError = $mikrotikException->getMessage();
-                \Log::channel('radiusrelated')->error('RADIUS Connection Exception for JobOrder: ' . $id . ' (selected server unavailable)', [
-                    'error' => $radiusError,
-                    'trace' => $mikrotikException->getTraceAsString(),
-                    'radius_config_id' => $radiusConfig->id,
-                    'radius_ip' => $radiusConfig->ip,
-                ]);
-                if (!$credentialsExist) {
-                    return [
-                        'success' => false,
-                        'message' => 'Failed to connect to RADIUS server',
-                        'error' => $radiusError,
-                    ];
+
+                if ($radiusSubmitted) {
+                    break;
                 }
+            }
+
+            if (!$radiusSubmitted && !$credentialsExist) {
+                return [
+                    'success' => false,
+                    'message' => $lastFailureWasConnection
+                        ? 'Failed to connect to RADIUS server'
+                        : 'Failed to create RADIUS account',
+                    'error' => $radiusError,
+                ];
             }
 
             return [
@@ -2003,7 +2060,7 @@ class JobOrderController extends Controller
      */
     private function replaceGlobalVariables(string $message): string
     {
-        $portalUrl = 'sync.akmiis.com';
+        $portalUrl = 'sync.atssfiber.ph';
         $brandName = DB::table('form_ui')->value('brand_name') ?? 'Your ISP';
 
         $message = str_replace('{{portal_url}}', $portalUrl, $message);
