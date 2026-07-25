@@ -3313,6 +3313,7 @@ Route::prefix('payments')->group(function () {
     Route::post('/webhook', [\App\Http\Controllers\Api\XenditPaymentController::class , 'handleWebhook']);
     Route::post('/status', [\App\Http\Controllers\Api\XenditPaymentController::class , 'checkPaymentStatus']);
     Route::post('/check-pending', [\App\Http\Controllers\Api\XenditPaymentController::class , 'checkPendingPayment']);
+    Route::post('/cancel', [\App\Http\Controllers\Api\XenditPaymentController::class , 'cancelPayment']);
     Route::post('/account-balance', [\App\Http\Controllers\Api\XenditPaymentController::class , 'getAccountBalance']);
 
     // Test endpoint to verify webhook configuration

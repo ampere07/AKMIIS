@@ -730,6 +730,7 @@ class BillingGenerationController extends Controller
 
     public function generateCustomBilling(Request $request): JsonResponse
     {
+        $lock = null;
         try {
             $validated = $request->validate([
                 'account_no'     => 'required|string|exists:billing_accounts,account_no',
@@ -741,6 +742,22 @@ class BillingGenerationController extends Controller
             $serviceCharge = floatval($validated['service_charge'] ?? 0);
             $generationDate = \Carbon\Carbon::now('Asia/Manila');
 
+            // ── Concurrency lock: prevent simultaneous double-submission ────
+            // A fast double-click or a retry can fire two "generate" requests
+            // at nearly the same time. Without serialization both pass the
+            // duplicate-check below before either commits, so two invoices are
+            // created and the charge is added to account_balance twice
+            // (~doubled). Acquire a per-account atomic lock so only one
+            // generation can run at a time for a given account.
+            $lock = \Illuminate\Support\Facades\Cache::lock("custom-billing-generate:{$accountNo}", 120);
+            if (!$lock->get()) {
+                $lock = null; // not acquired — do not release it in finally
+                return response()->json([
+                    'success' => false,
+                    'message' => "A billing generation is already in progress for account {$accountNo}. Please wait for it to finish.",
+                ], 429);
+            }
+
             $account = \App\Models\BillingAccount::where('account_no', $accountNo)
                 ->with(['customer', 'technicalDetails', 'plan'])
                 ->first();
@@ -751,6 +768,55 @@ class BillingGenerationController extends Controller
 
             if (!$account->customer) {
                 return response()->json(['success' => false, 'message' => 'No customer linked to this account'], 400);
+            }
+
+            // Snapshot the account balance BEFORE any generation. account_balance
+            // is a running ledger (bills add, payments subtract), so we use this
+            // pristine value to set the post-generation balance exactly once
+            // (see the deterministic balance update after the invoice below).
+            $balanceBefore = round(floatval($account->account_balance), 2);
+
+            // ── Guard: prevent double-billing ──────────────────────────────
+            // createEnhancedInvoice ADDS a full cycle charge on top of the
+            // existing account_balance. If a bill was already generated for the
+            // current billing cycle, generating again would double the balance.
+            // Block the request instead of silently re-charging the customer.
+            $cycle = $this->enhancedBillingService->getBillingCycleWindow($account, $generationDate);
+            $cycleStart = $cycle['start']->format('Y-m-d');
+            $cycleEnd   = $cycle['end']->format('Y-m-d');
+
+            $existingSoa = \App\Models\StatementOfAccount::where('account_no', $accountNo)
+                ->where('statement_date', '>', $cycleStart)
+                ->where('statement_date', '<=', $cycleEnd)
+                ->orderBy('statement_date', 'desc')
+                ->first();
+
+            $existingInvoice = \App\Models\Invoice::where('account_no', $accountNo)
+                ->where('invoice_date', '>', $cycleStart)
+                ->where('invoice_date', '<=', $cycleEnd)
+                ->orderBy('invoice_date', 'desc')
+                ->first();
+
+            if ($existingSoa || $existingInvoice) {
+                Log::info('Custom billing blocked - bill already exists for current cycle', [
+                    'account_no'         => $accountNo,
+                    'cycle_start'        => $cycleStart,
+                    'cycle_end'          => $cycleEnd,
+                    'existing_soa_id'     => $existingSoa->id ?? null,
+                    'existing_invoice_id' => $existingInvoice->id ?? null,
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => "Billing has already been generated for account {$accountNo} in the current cycle ({$cycleStart} to {$cycleEnd}). Generating again would double the balance.",
+                    'data'    => [
+                        'already_generated'   => true,
+                        'cycle_start'         => $cycleStart,
+                        'cycle_end'           => $cycleEnd,
+                        'existing_soa_id'     => $existingSoa->id ?? null,
+                        'existing_invoice_id' => $existingInvoice->id ?? null,
+                    ],
+                ], 409);
             }
 
             // If a custom service charge is provided, insert an Unused record so
@@ -801,37 +867,51 @@ class BillingGenerationController extends Controller
                 $account->refresh();
                 $invoice = $this->enhancedBillingService->createEnhancedInvoice($account, $generationDate, $userId);
 
-                // The service_charge_log was already consumed (marked Used) during SOA
-                // generation above. createEnhancedInvoice therefore sees no Unused records
-                // and returns service_fees = 0. We must explicitly apply the custom service
-                // charge to the invoice and to account_balance here.
+                // Apply the custom service charge to the invoice total — but only
+                // ONCE. Normally the SOA already consumed the Unused
+                // service_charge_log, so createEnhancedInvoice returned
+                // service_fees = 0 and the charge is not yet on the invoice, so we
+                // add it here. But if SOA generation failed/rolled back, the
+                // invoice may have already absorbed the charge — adding it again is
+                // exactly what produced a doubled total_amount, so skip in that case.
                 if ($serviceCharge > 0) {
-                    $newServiceCharge = round(floatval($invoice->service_charge ?? 0) + $serviceCharge, 2);
-                    $newTotal         = round(floatval($invoice->total_amount)       + $serviceCharge, 2);
-
-                    $invoice->update([
-                        'service_charge' => $newServiceCharge,
-                        'total_amount'   => $newTotal,
-                        'status'         => $newTotal <= 0 ? 'Paid' : 'Unpaid',
-                    ]);
                     $invoice->refresh();
+                    $alreadyOnInvoice = (floatval($invoice->service_charge) + 0.01) >= $serviceCharge;
 
-                    // account_balance was already set by createEnhancedInvoice to
-                    // (plan price [+ previous balance]).  Add the service charge on top.
-                    $account->refresh();
-                    $account->update([
-                        'account_balance' => round(floatval($account->account_balance) + $serviceCharge, 2),
-                    ]);
-                    $account->refresh();
+                    if (!$alreadyOnInvoice) {
+                        $newServiceCharge = round(floatval($invoice->service_charge ?? 0) + $serviceCharge, 2);
+                        $newTotal         = round(floatval($invoice->total_amount)       + $serviceCharge, 2);
 
-                    Log::info('Custom billing - service charge patched into invoice and account_balance', [
-                        'account_no'      => $accountNo,
-                        'invoice_id'      => $invoice->id,
-                        'service_charge'  => $serviceCharge,
-                        'new_total'       => $newTotal,
-                        'account_balance' => $account->account_balance,
-                    ]);
+                        $invoice->update([
+                            'service_charge' => $newServiceCharge,
+                            'total_amount'   => $newTotal,
+                            'status'         => $newTotal <= 0 ? 'Paid' : 'Unpaid',
+                        ]);
+                        $invoice->refresh();
+                    }
                 }
+
+                // ── Deterministic, single-application balance update ───────────
+                // account_balance is a running ledger. To guarantee it can NEVER be
+                // doubled, ignore whatever intermediate value createEnhancedInvoice
+                // wrote and set the ledger ONCE from the pre-generation snapshot
+                // plus this invoice's final total. This math is idempotent — running
+                // it again yields the same number, so it cannot compound.
+                $invoiceTotal = round(floatval($invoice->total_amount), 2);
+                $finalBalance = $balanceBefore > 0
+                    ? round($balanceBefore + $invoiceTotal, 2)  // prior balance carried forward + this bill
+                    : round($invoiceTotal, 2);                  // any credit is already folded into the invoice total
+
+                $account->update(['account_balance' => $finalBalance]);
+                $account->refresh();
+
+                Log::info('Custom billing - account_balance set deterministically (single application)', [
+                    'account_no'      => $accountNo,
+                    'invoice_id'      => $invoice->id,
+                    'balance_before'  => $balanceBefore,
+                    'invoice_total'   => $invoiceTotal,
+                    'account_balance' => $finalBalance,
+                ]);
 
                 $results['invoice'] = [
                     'id'             => $invoice->id,
@@ -893,6 +973,12 @@ class BillingGenerationController extends Controller
                 'message' => 'Failed to generate custom billing',
                 'error'   => $e->getMessage(),
             ], 500);
+        } finally {
+            // Always release the per-account lock so future generations aren't
+            // blocked, even if generation threw partway through.
+            if ($lock) {
+                optional($lock)->release();
+            }
         }
     }
 }

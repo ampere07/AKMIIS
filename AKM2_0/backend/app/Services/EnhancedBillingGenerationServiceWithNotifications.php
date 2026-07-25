@@ -16,7 +16,6 @@ use App\Models\Barangay;
 use App\Models\BillingConfig;
 use App\Models\Overdue;
 use App\Models\DCNotice;
-use App\Models\ReconnectionLog;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
@@ -24,15 +23,6 @@ use Carbon\Carbon;
 class EnhancedBillingGenerationServiceWithNotifications
 {
     protected BillingNotificationService $notificationService;
-
-    /**
-     * Reconnection date of the pro-rate matched during the most recent
-     * calculateReconnectionProRate() call (null when no pro-rate applied).
-     * Used to populate pro_rate_start so the PDF coverage period reflects
-     * the actual reconnection day. Reset on every calculation.
-     */
-    protected ?Carbon $lastReconnectionProRateStart = null;
-
     protected const VAT_RATE = 0.12;
     protected const DAYS_IN_MONTH = 30;
     protected const DAYS_UNTIL_DUE = 7;
@@ -60,30 +50,25 @@ class EnhancedBillingGenerationServiceWithNotifications
             'notifications' => []
         ];
 
-        $generatedAccounts = [];
-
         try {
             $accounts = $this->getActiveAccountsForBillingDay($billingDay, $generationDate);
 
-            // Resolved in bulk (one query) instead of one existence check per account.
-            $alreadyBilled = $this->getAccountsAlreadyBilledForMonth('statement', $accounts->pluck('account_no')->all(), $generationDate);
-
             foreach ($accounts as $account) {
                 try {
-                    // Idempotency guard: skip if a statement was already generated for this
-                    // account in the current billing month. Prevents duplicate SOAs when a
-                    // crashed generation is re-run and processes the same customer again.
-                    if (isset($alreadyBilled[$account->account_no])) {
+                    // Idempotency guard: skip (no new record, no notification) if this
+                    // account was already billed for the current cycle.
+                    if ($this->statementAlreadyGeneratedForCycle($account, $generationDate)) {
                         $results['skipped']++;
-                        $this->log('info', "Skipping SOA for account {$account->account_no}: already generated this billing month");
+                        $this->log('info', 'Skipped SOA generation — statement already exists for this billing cycle', [
+                            'account_no' => $account->account_no,
+                            'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
+                        ]);
                         continue;
                     }
 
                     $statement = $this->createEnhancedStatement($account, $generationDate, $userId);
                     $results['statements'][] = $statement;
                     $results['success']++;
-                    $generatedAccounts[] = $account->account_no;
-                    $this->log('info', "Generated SOA for account {$account->account_no}");
 
                     $notificationResult = $this->queueNotification($account, null, $statement);
                     $results['notifications'][] = $notificationResult;
@@ -98,14 +83,6 @@ class EnhancedBillingGenerationServiceWithNotifications
                     $this->log('error', "Failed to generate SOA for account {$account->account_no}: " . $e->getMessage());
                 }
             }
-
-            $this->log('info', "SOA generation complete for billing day {$billingDay}. Generated " . count($generatedAccounts) . " account(s): " . (empty($generatedAccounts) ? '(none)' : implode(', ', $generatedAccounts)), [
-                'billing_day' => $billingDay,
-                'generated_count' => $results['success'],
-                'skipped_count' => $results['skipped'],
-                'failed_count' => $results['failed'],
-                'generated_account_nos' => $generatedAccounts,
-            ]);
 
             return $results;
         } catch (\Exception $e) {
@@ -125,30 +102,25 @@ class EnhancedBillingGenerationServiceWithNotifications
             'notifications' => []
         ];
 
-        $generatedAccounts = [];
-
         try {
             $accounts = $this->getActiveAccountsForBillingDay($billingDay, $generationDate);
 
-            // Resolved in bulk (one query) instead of one existence check per account.
-            $alreadyBilled = $this->getAccountsAlreadyBilledForMonth('invoice', $accounts->pluck('account_no')->all(), $generationDate);
-
             foreach ($accounts as $account) {
                 try {
-                    // Idempotency guard: skip if an invoice was already generated for this
-                    // account in the current billing month. Prevents duplicate invoices when a
-                    // crashed generation is re-run and processes the same customer again.
-                    if (isset($alreadyBilled[$account->account_no])) {
+                    // Idempotency guard: skip (no new record, no notification) if this
+                    // account was already billed for the current cycle.
+                    if ($this->invoiceAlreadyGeneratedForCycle($account, $generationDate)) {
                         $results['skipped']++;
-                        $this->log('info', "Skipping invoice for account {$account->account_no}: already generated this billing month");
+                        $this->log('info', 'Skipped invoice generation — invoice already exists for this billing cycle', [
+                            'account_no' => $account->account_no,
+                            'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
+                        ]);
                         continue;
                     }
 
                     $invoice = $this->createEnhancedInvoice($account, $generationDate, $userId);
                     $results['invoices'][] = $invoice;
                     $results['success']++;
-                    $generatedAccounts[] = $account->account_no;
-                    $this->log('info', "Generated invoice for account {$account->account_no}");
 
                     $notificationResult = $this->queueNotification($account, $invoice, null);
                     $results['notifications'][] = $notificationResult;
@@ -163,14 +135,6 @@ class EnhancedBillingGenerationServiceWithNotifications
                     $this->log('error', "Failed to generate invoice for account {$account->account_no}: " . $e->getMessage());
                 }
             }
-
-            $this->log('info', "Invoice generation complete for billing day {$billingDay}. Generated " . count($generatedAccounts) . " account(s): " . (empty($generatedAccounts) ? '(none)' : implode(', ', $generatedAccounts)), [
-                'billing_day' => $billingDay,
-                'generated_count' => $results['success'],
-                'skipped_count' => $results['skipped'],
-                'failed_count' => $results['failed'],
-                'generated_account_nos' => $generatedAccounts,
-            ]);
 
             return $results;
         } catch (\Exception $e) {
@@ -231,62 +195,6 @@ class EnhancedBillingGenerationServiceWithNotifications
         }
     }
 
-    /**
-     * Returns true when a billing record already exists for the given account within the
-     * same calendar month (Asia/Manila) as the generation date. Makes generation idempotent
-     * so a crashed-and-restarted run does not bill the same customer twice.
-     *
-     * Single-account convenience wrapper over getAccountsAlreadyBilledForMonth() so the
-     * definition of "billing cycle" lives in exactly one place.
-     *
-     * @param string $type 'invoice' or 'statement'
-     */
-    protected function hasBillingForMonth(string $type, BillingAccount $account, Carbon $generationDate): bool
-    {
-        $billed = $this->getAccountsAlreadyBilledForMonth($type, [$account->account_no], $generationDate);
-
-        return isset($billed[$account->account_no]);
-    }
-
-    /**
-     * Resolve, for a whole batch of accounts at once, which ones already have a billing
-     * record of $type inside the billing cycle that $generationDate falls in.
-     *
-     * The billing cycle is keyed on account_no + calendar month/year (Asia/Manila) of the
-     * document date, which is what identifies one billing run for a customer: an account is
-     * picked up by getActiveAccountsForBillingDay() exactly once per month, so a second
-     * record in the same month can only be a duplicate.
-     *
-     * Uses ONE query for the entire batch (instead of one per account) so the idempotency
-     * guard costs two queries per run rather than two per customer.
-     *
-     * @param string $type 'invoice' or 'statement'
-     * @param array<int, string> $accountNos
-     * @return array<string, bool> Keyed by account_no for O(1) lookups.
-     */
-    protected function getAccountsAlreadyBilledForMonth(string $type, array $accountNos, Carbon $generationDate): array
-    {
-        $accountNos = array_values(array_unique(array_filter($accountNos)));
-
-        if (empty($accountNos)) {
-            return [];
-        }
-
-        $gen = $generationDate->copy()->setTimezone('Asia/Manila');
-
-        if ($type === 'statement') {
-            $query = StatementOfAccount::whereIn('account_no', $accountNos)
-                ->whereYear('statement_date', $gen->year)
-                ->whereMonth('statement_date', $gen->month);
-        } else {
-            $query = Invoice::whereIn('account_no', $accountNos)
-                ->whereYear('invoice_date', $gen->year)
-                ->whereMonth('invoice_date', $gen->month);
-        }
-
-        return array_fill_keys($query->distinct()->pluck('account_no')->all(), true);
-    }
-
     protected function getActiveAccountsForBillingDay(int $billingDay, Carbon $generationDate)
     {
         $targetDay = $this->adjustBillingDayForMonth($billingDay, $generationDate);
@@ -315,6 +223,43 @@ class EnhancedBillingGenerationServiceWithNotifications
         ]);
 
         return $accounts;
+    }
+
+    /**
+     * Idempotency guard: has a Statement of Account already been generated for this
+     * account in the billing period (month/year) of the generation date?
+     *
+     * Regular generation only ever runs for Active accounts on their billing day (once
+     * per month), so an existing statement in the same period means this cycle was already
+     * billed. This keeps the generator safe to run repeatedly (e.g. if the cron fires more
+     * than once) without producing duplicate statements or duplicate notifications.
+     */
+    protected function statementAlreadyGeneratedForCycle(BillingAccount $account, Carbon $generationDate): bool
+    {
+        $period = $generationDate->copy()->setTimezone('Asia/Manila');
+
+        return StatementOfAccount::where('account_no', $account->account_no)
+            ->whereMonth('statement_date', $period->month)
+            ->whereYear('statement_date', $period->year)
+            ->exists();
+    }
+
+    /**
+     * Idempotency guard: has an Invoice already been generated for this account in the
+     * billing period (month/year) of the generation date?
+     *
+     * Same rationale as {@see statementAlreadyGeneratedForCycle()} — prevents duplicate
+     * invoices (and the duplicate notifications that would follow) when generation runs
+     * more than once for the same customer and billing cycle.
+     */
+    protected function invoiceAlreadyGeneratedForCycle(BillingAccount $account, Carbon $generationDate): bool
+    {
+        $period = $generationDate->copy()->setTimezone('Asia/Manila');
+
+        return Invoice::where('account_no', $account->account_no)
+            ->whereMonth('invoice_date', $period->month)
+            ->whereYear('invoice_date', $period->year)
+            ->exists();
     }
 
     protected function adjustBillingDayForMonth(int $billingDay, Carbon $date): int
@@ -368,10 +313,6 @@ class EnhancedBillingGenerationServiceWithNotifications
             $adjustedDate = $this->calculateAdjustedBillingDate($account, $statementDate);
             $dueDate = $adjustedDate->copy()->addDays($dueDateOffset);
 
-            // First-time customer detection (no invoice history yet). Detected here so the
-            // SOA mirrors the pro-rated amount that the first invoice will carry.
-            $firstInvoiceProRate = $this->calculateFirstInvoiceProRate($account, $plan->price);
-
             // Create initial statement to get the ID
             $statement = StatementOfAccount::create([
                 'account_no' => $account->account_no,
@@ -394,23 +335,12 @@ class EnhancedBillingGenerationServiceWithNotifications
             ]);
 
             $prorateAmount = $this->calculateProrateAmount($account, $plan->price, $adjustedDate);
-
-            // First bill for a newly installed customer: use the pro-rated amount so the
-            // SOA matches the invoice. Existing customers keep the normal monthly amount.
-            if ($firstInvoiceProRate !== null) {
-                $prorateAmount = $firstInvoiceProRate['amount'];
-            }
-
-            $monthlyFeeGross = $prorateAmount / (1 + self::VAT_RATE);
+            $reconProrate = $this->calculateReconnectionProrate($account, $statementDate, $plan->price);
+            
+            $effectiveProrateAmount = $prorateAmount + $reconProrate['total_prorate'];
+            $monthlyFeeGross = $effectiveProrateAmount / (1 + self::VAT_RATE);
             $vat = $monthlyFeeGross * self::VAT_RATE;
-
-            // Reconnection pro-rate for a customer skipped last cycle but reconnected
-            // inside the generation window. Added to the monthly service fee so it
-            // flows into amount_due / total_amount_due below.
-            $reconnectionProRate = $this->calculateReconnectionProRate($account, $plan->price, $statementDate);
-            $reconnectionProRateStart = $this->lastReconnectionProRateStart;
-
-            $monthlyServiceFee = ($prorateAmount - $vat) + $reconnectionProRate;
+            $monthlyServiceFee = $effectiveProrateAmount - $vat;
 
             // Use statement ID as the reference for charges
             $charges = $this->calculateChargesAndDeductions(
@@ -432,6 +362,18 @@ class EnhancedBillingGenerationServiceWithNotifications
             $remainingBalance = $previousBalance - $paymentReceived;
             $totalAmountDue = $remainingBalance + $amountDue;
 
+            $proRateStart = $reconProrate['pro_rate_start'];
+            if (!$proRateStart) {
+                $planChange = DB::table('plan_change_logs')
+                    ->where('account_id', $account->id)
+                    ->where('status', 'Unused')
+                    ->orderBy('date_changed', 'desc')
+                    ->first();
+                if ($planChange && !empty($planChange->date_changed)) {
+                    $proRateStart = Carbon::parse($planChange->date_changed)->format('Y-m-d');
+                }
+            }
+
             // Update statement with actual values
             $statement->update([
                 'balance_from_previous_bill' => round($previousBalance, 2),
@@ -439,15 +381,15 @@ class EnhancedBillingGenerationServiceWithNotifications
                 'remaining_balance_previous' => round($remainingBalance, 2),
                 'monthly_service_fee' => round($monthlyServiceFee, 2),
                 'others_and_basic_charges' => round($othersAndBasicCharges, 2),
-                'pro_rate' => round($reconnectionProRate, 2),
-                'pro_rate_start' => $reconnectionProRateStart ? $reconnectionProRateStart->format('Y-m-d') : null,
                 'service_charge' => round($charges['service_fees'], 2),
                 'rebate' => round($charges['rebates'], 2),
                 'discounts' => round($charges['discounts'], 2),
                 'staggered' => round($charges['staggered_install_fees'], 2),
                 'vat' => round($vat, 2),
                 'amount_due' => round($amountDue, 2),
-                'total_amount_due' => round($totalAmountDue, 2)
+                'total_amount_due' => round($totalAmountDue, 2),
+                'pro_rate' => round($reconProrate['total_prorate'], 2),
+                'pro_rate_start' => $proRateStart
             ]);
 
             DB::commit();
@@ -524,11 +466,6 @@ class EnhancedBillingGenerationServiceWithNotifications
             $adjustedDate = $this->calculateAdjustedBillingDate($account, $invoiceDate);
             $dueDate = $adjustedDate->copy()->addDays($dueDateOffset);
 
-            // Detect a first-time (newly installed, never billed) customer BEFORE creating
-            // the invoice row below, otherwise the invoice-existence check would be fooled
-            // by this very invoice and never pro-rate the first bill.
-            $firstInvoiceProRate = $this->calculateFirstInvoiceProRate($account, $plan->price);
-
             // Create initial invoice to get the ID
             $invoice = Invoice::create([
                 'account_no' => $account->account_no,
@@ -548,55 +485,71 @@ class EnhancedBillingGenerationServiceWithNotifications
             ]);
             
             $prorateAmount = $this->calculateProrateAmount($account, $plan->price, $adjustedDate);
-
-            // First bill for a newly installed customer: replace the full monthly amount
-            // with the pro-rated (install-date -> billing-day) amount. Existing customers
-            // return null here and keep the normal monthly amount above.
-            if ($firstInvoiceProRate !== null) {
-                $prorateAmount = $firstInvoiceProRate['amount'];
-            }
-
-            // Reconnection pro-rate for a customer skipped last cycle but reconnected
-            // inside the generation window. Added to invoice_balance and total_amount.
-            $reconnectionProRate = $this->calculateReconnectionProRate($account, $plan->price, $invoiceDate);
-            $reconnectionProRateStart = $this->lastReconnectionProRateStart;
+            $reconProrate = $this->calculateReconnectionProrate($account, $invoiceDate, $plan->price);
+            
+            $effectiveProrateAmount = $prorateAmount + $reconProrate['total_prorate'];
 
             $charges = $this->calculateChargesAndDeductions(
-                $account,
-                $invoiceDate,
-                $userId,
+                $account, 
+                $invoiceDate, 
+                $userId, 
                 (string)$invoice->id,
                 $plan->price,
                 true,
                 true
             );
-
+            
             $othersBasicCharges = 0;
 
-            $totalAmount = $prorateAmount + $reconnectionProRate + $charges['staggered_install_fees'] + $charges['service_fees'] - $charges['rebates'] - $charges['discounts'] - $charges['advanced_payments'];
+            // Pure charges for this billing cycle — does NOT include any prior balance.
+            $billAmount = $effectiveProrateAmount + $charges['staggered_install_fees'] + $charges['service_fees'] - $charges['rebates'] - $charges['discounts'] - $charges['advanced_payments'];
 
-            if ($account->account_balance < 0) {
-                $totalAmount += $account->account_balance;
+            // Read the account's current balance FRESH from the database. The
+            // in-memory model can be stale within a batch run (the daily cron loads
+            // many accounts up front), and a stale/positive value here would skip the
+            // credit below and wrongly leave the balance positive after generation
+            // (e.g. a -1299 credit ignored, ending at 1299 instead of 0).
+            $previousBalance = round(floatval(
+                BillingAccount::where('id', $account->id)->value('account_balance') ?? 0
+            ), 2);
+
+            // A negative balance is a credit — net it against this cycle's charges on
+            // the invoice document so a fully-covered bill shows 0 / Paid.
+            $totalAmount = $previousBalance < 0
+                ? round($billAmount + $previousBalance, 2)
+                : round($billAmount, 2);
+
+            $proRateStartInvoice = $reconProrate['pro_rate_start'];
+            if (!$proRateStartInvoice) {
+                $planChange = DB::table('plan_change_logs')
+                    ->where('account_id', $account->id)
+                    ->where('status', 'Unused')
+                    ->orderBy('date_changed', 'desc')
+                    ->first();
+                if ($planChange && !empty($planChange->date_changed)) {
+                    $proRateStartInvoice = Carbon::parse($planChange->date_changed)->format('Y-m-d');
+                }
             }
 
             $invoice->update([
-                'invoice_balance' => round($prorateAmount + $reconnectionProRate, 2),
+                'invoice_balance' => round($effectiveProrateAmount, 2),
                 'others_and_basic_charges' => round($othersBasicCharges, 2),
-                'pro_rate' => round($reconnectionProRate, 2),
-                'pro_rate_start' => $reconnectionProRateStart ? $reconnectionProRateStart->format('Y-m-d') : null,
                 'service_charge' => round($charges['service_fees'], 2),
                 'rebate' => round($charges['rebates'], 2),
                 'discounts' => round($charges['discounts'], 2),
                 'staggered' => round($charges['staggered_install_fees'], 2),
                 'total_amount' => round($totalAmount, 2),
-                'status' => $totalAmount <= 0 ? 'Paid' : 'Unpaid'
+                'status' => $totalAmount <= 0 ? 'Paid' : 'Unpaid',
+                'pro_rate' => round($reconProrate['total_prorate'], 2),
+                'pro_rate_start' => $proRateStartInvoice
             ]);
 
             $appliedDiscounts = $charges['discounts'];
             
-            $newBalance = $account->account_balance > 0 
-                ? $totalAmount + $account->account_balance 
-                : $totalAmount;
+            // account_balance is a running ledger: previous balance + this cycle's
+            // charges. Correct for every case — positive balances accumulate and
+            // negative (credit) balances are drawn down (e.g. -1299 + 1299 = 0).
+            $newBalance = round($previousBalance + $billAmount, 2);
 
             $account->update([
                 'account_balance' => round($newBalance, 2),
@@ -605,23 +558,18 @@ class EnhancedBillingGenerationServiceWithNotifications
             
             $this->log('info', 'Invoice updated with discount applied to balance', [
                 'account_no' => $account->account_no,
-                'invoice_balance' => $prorateAmount,
+                'invoice_balance' => $effectiveProrateAmount,
                 'total_amount' => $totalAmount,
                 'discounts_applied' => $appliedDiscounts,
-                'previous_balance' => $account->account_balance,
+                'previous_balance' => $previousBalance,
                 'new_balance' => $newBalance
             ]);
             
             $this->markDiscountsAsUsed($account, $userId, (string)$invoice->id);
             $this->markRebatesAsUsed($account, $userId, (string)$invoice->id);
             $this->markPlanChangesAsUsed($account, $userId, (string)$invoice->id);
+            $this->markReconnectionProrateAsUsed($account, $userId, (string)$invoice->id, $reconProrate['log_ids'] ?? []);
             $this->trackStaggeredInvoiceAssociation($account->account_no, $invoice->id);
-
-            // Consume the reconnection pro-rate (once, on the invoice) so it is not
-            // re-charged on a subsequent billing cycle. Only when actually charged.
-            if ($reconnectionProRate > 0) {
-                $this->markReconnectionProRateAsUsed($account, $userId, (string)$invoice->id, $invoiceDate);
-            }
 
             DB::commit();
             
@@ -639,6 +587,20 @@ class EnhancedBillingGenerationServiceWithNotifications
         }
     }
     
+
+    /**
+     * Return the current billing-cycle window [start, end] for an account,
+     * relative to a reference date. `end` is the adjusted billing date for the
+     * cycle; `start` is one month before it. Used to detect whether a bill has
+     * already been generated for the current cycle (prevents double-billing).
+     */
+    public function getBillingCycleWindow(BillingAccount $account, Carbon $referenceDate): array
+    {
+        $cycleEnd = $this->calculateAdjustedBillingDate($account, $referenceDate->copy());
+        $cycleStart = $cycleEnd->copy()->subMonth();
+
+        return ['start' => $cycleStart, 'end' => $cycleEnd];
+    }
 
     protected function calculateAdjustedBillingDate(BillingAccount $account, Carbon $baseDate): Carbon
     {
@@ -699,335 +661,195 @@ class EnhancedBillingGenerationServiceWithNotifications
         $totalDays = $cycleStart->diffInDays($cycleEnd);
         if ($totalDays <= 0) $totalDays = self::DAYS_IN_MONTH; 
 
-        // Check if the plan change occurred within this billing cycle
+        // Check if the plan change occurred within or prior to this billing cycle
         if ($dateChanged->lte($cycleEnd)) {
             
             if ($dateChanged->gt($cycleStart)) {
-                // Change happened during the cycle
+                // Change happened during the current billing cycle
                 $daysOnOldPlan = $cycleStart->diffInDays($dateChanged);
-                // Ensure we don't exceed the total days in the period
                 if ($daysOnOldPlan > $totalDays) $daysOnOldPlan = $totalDays;
                 
                 $daysOnNewPlan = $totalDays - $daysOnOldPlan;
+                $proratedAmount = (($daysOnOldPlan / $totalDays) * $oldPrice) + (($daysOnNewPlan / $totalDays) * $newPrice);
+
+                $this->log('info', 'Prorating monthly fee due to mid-cycle plan change', [
+                    'account_no' => $account->account_no,
+                    'old_plan' => $oldPlan->plan_name,
+                    'new_plan' => $newPlan->plan_name,
+                    'days_old' => $daysOnOldPlan,
+                    'days_new' => $daysOnNewPlan,
+                    'old_price' => $oldPrice,
+                    'new_price' => $newPrice,
+                    'total_days_in_month' => $totalDays,
+                    'total_amount' => $proratedAmount
+                ]);
+
+                return round($proratedAmount, 2);
+
             } else {
-                // Change happened before the cycle start but was not used (pushed to this bill)
-                // If it's unused, we'll assume they were on the new plan for the whole month
-                // since they officially switched but it hasn't been applied to a bill yet.
+                // Change happened prior to cycle start (e.g. after previous advance generation).
+                // Compute retroactive delta adjustment for the unbilled days in the previous cycle.
+                $prevCycleEnd = $cycleStart->copy();
+                $prevCycleStart = $prevCycleEnd->copy()->subMonth();
+                $prevTotalDays = $prevCycleStart->diffInDays($prevCycleEnd);
+                if ($prevTotalDays <= 0) $prevTotalDays = self::DAYS_IN_MONTH;
+
+                if ($dateChanged->betweenIncluded($prevCycleStart, $prevCycleEnd)) {
+                    $unbilledDays = $dateChanged->diffInDays($prevCycleEnd);
+                    if ($unbilledDays > 0 && $unbilledDays < $prevTotalDays) {
+                        $dailyDelta = ($newPrice - $oldPrice) / $prevTotalDays;
+                        $retroactiveAdjustment = round($dailyDelta * $unbilledDays, 2);
+                        $proratedAmount = $monthlyFee + $retroactiveAdjustment;
+
+                        $this->log('info', 'Calculated retroactive plan change adjustment for post-advance generation change', [
+                            'account_no' => $account->account_no,
+                            'old_plan' => $oldPlan->plan_name,
+                            'new_plan' => $newPlan->plan_name,
+                            'date_changed' => $dateChanged->format('Y-m-d'),
+                            'unbilled_days' => $unbilledDays,
+                            'daily_delta' => round($dailyDelta, 2),
+                            'retroactive_adjustment' => $retroactiveAdjustment,
+                            'new_monthly_fee' => $monthlyFee,
+                            'total_amount' => $proratedAmount
+                        ]);
+
+                        return round($proratedAmount, 2);
+                    }
+                }
+
                 return $monthlyFee;
             }
-
-            $proratedAmount = (($daysOnOldPlan / $totalDays) * $oldPrice) + (($daysOnNewPlan / $totalDays) * $newPrice);
-            
-            $this->log('info', 'Prorating monthly fee due to plan change', [
-                'account_no' => $account->account_no,
-                'old_plan' => $oldPlan->plan_name,
-                'new_plan' => $newPlan->plan_name,
-                'days_old' => $daysOnOldPlan,
-                'days_new' => $daysOnNewPlan,
-                'old_price' => $oldPrice,
-                'new_price' => $newPrice,
-                'total_days_in_month' => $totalDays,
-                'total_amount' => $proratedAmount
-            ]);
-
-            return round($proratedAmount, 2);
         }
 
         return $monthlyFee;
     }
 
-    /**
-     * Pro-rate the VERY FIRST invoice for a newly installed customer.
-     *
-     * A customer is "first-time billed" when no invoice record exists yet for the
-     * account. Their first bill only covers the partial period from the installation
-     * date up to their configured billing day, charged on a fixed 30-day basis:
-     *
-     *     Daily Rate       = Monthly Plan Amount / 30
-     *     Pro-rated Amount = Daily Rate * Remaining Billable Days
-     *
-     * Where Remaining Billable Days is the number of days from the installation date
-     * to the upcoming billing_day. If the customer installed exactly on their billing
-     * day (or a full cycle away) the full monthly amount is charged instead.
-     *
-     * Returns null for customers who already have invoice history, so they follow the
-     * normal monthly billing process untouched. The returned 'amount' is a drop-in
-     * replacement for the monthly plan price (VAT-inclusive, same basis as the plan
-     * price) and carries no side effects — first-invoice detection stays purely a
-     * function of invoice existence, which prevents duplicate pro-rated first invoices.
-     *
-     * @return array{amount: float, pro_rate_days: int, daily_rate: float, full_month: bool}|null
-     */
-    protected function calculateFirstInvoiceProRate(BillingAccount $account, float $monthlyFee): ?array
+    public function calculateReconnectionProrate(BillingAccount $account, Carbon $generationDate, float $monthlyFee): array
     {
-        // Existing customers (any invoice on record) are billed the normal monthly way.
-        $hasInvoiceHistory = Invoice::where('account_no', $account->account_no)->exists();
-        if ($hasInvoiceHistory) {
-            return null;
-        }
+        $unbilledLogs = DB::table('reconnection_logs')
+            ->where('account_id', $account->id)
+            ->where(function ($q) {
+                $q->where('pro_rate_applied', 0)
+                  ->orWhereNull('pro_rate_applied');
+            })
+            ->where(function ($q) {
+                $q->whereNull('billing_status')
+                  ->orWhere('billing_status', 'Unused');
+            })
+            ->orderBy('created_at', 'asc')
+            ->get();
 
-        $dailyRate = $monthlyFee / self::DAYS_IN_MONTH;
-
-        // Defensive: an account with no installation date cannot be pro-rated by days,
-        // so it is billed the full monthly amount (still flagged as first-time).
-        if (empty($account->date_installed)) {
-            $this->log('warning', 'First-time customer has no installation date; charging full monthly amount', [
-                'account_no'    => $account->account_no,
-                'is_first_time' => true,
-                'billing_day'   => (int) $account->billing_day,
-            ]);
-
+        if ($unbilledLogs->isEmpty()) {
             return [
-                'amount'        => round($monthlyFee, 2),
-                'pro_rate_days' => self::DAYS_IN_MONTH,
-                'daily_rate'    => round($dailyRate, 2),
-                'full_month'    => true,
+                'total_prorate' => 0.00,
+                'pro_rate_start' => null,
+                'log_ids' => []
             ];
         }
 
-        $installDate = Carbon::parse($account->date_installed)->startOfDay();
-        $installDay  = (int) $installDate->day;
+        $totalProrate = 0.00;
+        $proRateStart = null;
+        $logIds = [];
+        $advanceGenOffset = $this->getAdvanceGenerationDay();
 
-        // Remaining days are counted on a fixed 30-day cycle, NOT on actual calendar
-        // days, so the charge is identical whether the month has 28, 30, or 31 days.
-        // End-of-month billing and any day beyond the 30-day frame normalize to 30.
-        $rawBillingDay = (int) $account->billing_day;
-        $billingDay = ($rawBillingDay === self::END_OF_MONTH_BILLING || $rawBillingDay > self::DAYS_IN_MONTH)
-            ? self::DAYS_IN_MONTH
-            : $rawBillingDay;
-        if ($installDay > self::DAYS_IN_MONTH) {
-            $installDay = self::DAYS_IN_MONTH;
+        // Calculate cycle bounds relative to the current generation date
+        $currentCycleEnd = $this->calculateAdjustedBillingDate($account, $generationDate);
+        $currentCycleStart = $currentCycleEnd->copy()->subMonth();
+
+        $totalDaysInCycle = $currentCycleStart->diffInDays($currentCycleEnd);
+        if ($totalDaysInCycle <= 0) {
+            $totalDaysInCycle = self::DAYS_IN_MONTH;
         }
 
-        // Remaining billable days on a fixed 30-day cycle (calendar month length is
-        // irrelevant). The span runs from the install day up to the billing day.
-        if ($installDay < $billingDay) {
-            // Same cycle: install day through billing day, inclusive of both ends.
-            // e.g. installed on the 1st with billing day 30 => 30 - 1 + 1 = 30 days.
-            $proRateDays = $billingDay - $installDay + 1;
-        } else {
-            // Installed on/after the billing day => bill from the install day up to the
-            // NEXT cycle's billing day. Installing exactly on the billing day gives a
-            // full 30-day cycle. e.g. install day 20, billing day 10 => 30 - 10 = 20 days.
-            $proRateDays = self::DAYS_IN_MONTH - ($installDay - $billingDay);
-        }
+        // Calculate advance generation cutoff date for the current cycle (e.g. 23rd if cycleEnd is 30th and offset is 7)
+        $advanceGenCutoff = $currentCycleEnd->copy()->subDays($advanceGenOffset > 0 ? $advanceGenOffset : self::DAYS_UNTIL_DUE);
 
-        // A full 30-day span is simply the normal monthly amount.
-        $fullMonth = ($proRateDays >= self::DAYS_IN_MONTH);
-        $amount = $fullMonth ? $monthlyFee : ($dailyRate * $proRateDays);
+        foreach ($unbilledLogs as $log) {
+            $reconDate = Carbon::parse($log->created_at)->startOfDay();
 
-        $this->log('info', 'First-time customer detected: pro-rating first invoice', [
-            'account_no'    => $account->account_no,
-            'is_first_time' => true,
-            'install_date'  => $installDate->format('Y-m-d'),
-            'billing_day'   => $rawBillingDay,
-            'pro_rate_days' => $proRateDays,
-            'daily_rate'    => round($dailyRate, 2),
-            'monthly_amount' => round($monthlyFee, 2),
-            'final_amount'  => round($amount, 2),
-            'full_month'    => $fullMonth,
-        ]);
+            if ($reconDate->lt($currentCycleStart)) {
+                // Log is from a past billing cycle -> mark as cleared/processed so it doesn't pile up, but do NOT add proration
+                $logIds[] = $log->id;
+                $this->log('info', 'Clearing past-cycle unbilled reconnection log without adding proration to current bill', [
+                    'account_no' => $account->account_no,
+                    'reconnection_log_id' => $log->id,
+                    'reconnection_date' => $reconDate->format('Y-m-d'),
+                    'current_cycle_start' => $currentCycleStart->format('Y-m-d')
+                ]);
+            } elseif ($reconDate->betweenIncluded($currentCycleStart, $currentCycleEnd)) {
+                // Log is within the current billing cycle
+                $logIds[] = $log->id;
 
-        return [
-            'amount'        => round($amount, 2),
-            'pro_rate_days' => $proRateDays,
-            'daily_rate'    => round($dailyRate, 2),
-            'full_month'    => $fullMonth,
-        ];
-    }
+                if ($reconDate->gt($advanceGenCutoff)) {
+                    // Reconnection happened AFTER advance generation cutoff date (e.g., 24th > 23rd)
+                    $excessDays = $advanceGenCutoff->diffInDays($reconDate);
+                    if ($excessDays > 0 && $excessDays < $totalDaysInCycle) {
+                        $dailyRate = $monthlyFee / $totalDaysInCycle;
+                        $proratedAmount = round($dailyRate * $excessDays, 2);
+                        
+                        $totalProrate += $proratedAmount;
 
-    /**
-     * Calculate a pro-rate charge for a customer who was disconnected (and therefore
-     * skipped) during the previous billing run, but reconnected inside that previous
-     * cycle's generation window before their billing_day.
-     *
-     * The pro-rate window is bounded by BOTH billing_day AND advance_generation_day:
-     *   prevBillingDayDate  = previous cycle's billing_day date
-     *   prevGenerationDate  = prevBillingDayDate - advance_generation_day days
-     * If the customer reconnected between those two dates and never received a bill
-     * for that window, they owe a pro-rate for the days from reconnection -> billing_day.
-     *
-     * Example: billing_day=10, advance_generation_day=7, generation runs May 3 for the
-     * May 10 cycle. The next run (June 3, for the June 10 cycle) checks the May 3 -> May 10
-     * window. A reconnection on May 4 yields 6 days => (plan_price / 30) * 6.
-     *
-     * @param  Carbon  $generationDate  The date billing is being generated (today).
-     */
-    protected function calculateReconnectionProRate(BillingAccount $account, float $planPrice, Carbon $generationDate): float
-    {
-        // Reset carried state for every calculation so a previous account's match
-        // can never leak into this account's PDF coverage period.
-        $this->lastReconnectionProRateStart = null;
+                        if (!$proRateStart || $reconDate->lt(Carbon::parse($proRateStart))) {
+                            $proRateStart = $reconDate->format('Y-m-d');
+                        }
 
-        try {
-            $match = $this->findReconnectionForProRate($account, $generationDate);
-            if (!$match) {
-                return 0.0;
+                        $this->log('info', 'Calculated excess days reconnection prorate past advance generation date', [
+                            'account_no' => $account->account_no,
+                            'reconnection_log_id' => $log->id,
+                            'reconnection_date' => $reconDate->format('Y-m-d'),
+                            'advance_gen_cutoff' => $advanceGenCutoff->format('Y-m-d'),
+                            'excess_days' => $excessDays,
+                            'daily_rate' => round($dailyRate, 2),
+                            'prorated_amount' => $proratedAmount
+                        ]);
+                    }
+                } else {
+                    $this->log('info', 'Reconnection occurred on or before advance generation date; covered by standard plan rate', [
+                        'account_no' => $account->account_no,
+                        'reconnection_log_id' => $log->id,
+                        'reconnection_date' => $reconDate->format('Y-m-d'),
+                        'advance_gen_cutoff' => $advanceGenCutoff->format('Y-m-d')
+                    ]);
+                }
             }
-
-            $reconnectionDate   = $match['reconnection_date'];
-            $prevGenerationDate = $match['prev_generation_date'];
-            $prevBillingDayDate = $match['prev_billing_day_date'];
-
-            // Days from the reconnection date up to the cycle's billing_day.
-            $proRateDays = (int) abs(
-                $reconnectionDate->copy()->startOfDay()
-                    ->diffInDays($prevBillingDayDate->copy()->startOfDay())
-            );
-
-            // Guard: nothing to charge if they reconnected on/after the billing day.
-            if ($proRateDays <= 0) {
-                return 0.0;
-            }
-
-            $proRateAmount = round(($planPrice / self::DAYS_IN_MONTH) * $proRateDays, 2);
-
-            // Carry the reconnection date so the billing document's coverage period
-            // (PDF Period_Start) can reflect the actual first billed day.
-            $this->lastReconnectionProRateStart = $reconnectionDate->copy();
-
-            $this->log('info', 'Reconnection pro-rate applied', [
-                'account_no'           => $account->account_no,
-                'reconnection_date'    => $reconnectionDate->format('Y-m-d'),
-                'prev_generation_date' => $prevGenerationDate->format('Y-m-d'),
-                'prev_billing_day'     => $prevBillingDayDate->format('Y-m-d'),
-                'pro_rate_days'        => $proRateDays,
-                'pro_rate_amount'      => $proRateAmount,
-            ]);
-
-            return $proRateAmount;
-        } catch (\Throwable $e) {
-            // Never let a pro-rate lookup break billing generation.
-            $this->log('error', 'Failed to calculate reconnection pro-rate', [
-                'account_no' => $account->account_no,
-                'error'      => $e->getMessage(),
-            ]);
-            return 0.0;
-        }
-    }
-
-    /**
-     * Locate the reconnection log (if any) that qualifies this account for a
-     * reconnection pro-rate on the current generation run, together with the
-     * previous-cycle window dates. Returns null when no pro-rate is owed.
-     *
-     * Guard conditions (any => null):
-     *   - A billing (invoice) already exists for the account inside the window
-     *     (the account was NOT skipped last cycle).
-     *   - No un-applied reconnection log exists inside the window.
-     *
-     * @return array{reconnection: ReconnectionLog, reconnection_date: Carbon, prev_generation_date: Carbon, prev_billing_day_date: Carbon}|null
-     */
-    protected function findReconnectionForProRate(BillingAccount $account, Carbon $generationDate): ?array
-    {
-        $advanceGenerationDay = $this->getAdvanceGenerationDay();
-
-        // Current cycle's billing_day date (already handles advance-generation
-        // month wrap-around, e.g. generating in advance for next month).
-        $adjustedBillingDate = $this->calculateAdjustedBillingDate($account, $generationDate);
-
-        // Previous billing cycle window.
-        $prevBillingDayDate = $adjustedBillingDate->copy()->subMonthNoOverflow()->startOfDay();
-
-        // For end-of-month accounts the previous billing day is the LAST day of the
-        // previous month (e.g. May 31). subMonthNoOverflow alone does not yield this
-        // when the current month is shorter (June 30 -> May 30), so re-snap to the
-        // end of the previous month to keep the window and day count correct.
-        if ((int) $account->billing_day === self::END_OF_MONTH_BILLING) {
-            $prevBillingDayDate = $prevBillingDayDate->endOfMonth()->startOfDay();
-        }
-
-        $prevGenerationDate = $prevBillingDayDate->copy()->subDays($advanceGenerationDay)->startOfDay();
-        $windowEnd          = $prevBillingDayDate->copy()->endOfDay();
-
-        // Guard: if the account already has an invoice dated inside the previous
-        // window, it was billed (not skipped) and no pro-rate is needed.
-        $billingExists = Invoice::where('account_no', $account->account_no)
-            ->whereBetween('invoice_date', [$prevGenerationDate, $windowEnd])
-            ->exists();
-
-        if ($billingExists) {
-            return null;
-        }
-
-        // Most recent reconnection inside the window that has not yet been billed
-        // a pro-rate (prevents double-charging on later cycles).
-        $reconnection = ReconnectionLog::where('account_id', $account->id)
-            ->whereBetween('created_at', [$prevGenerationDate, $windowEnd])
-            ->where(function ($q) {
-                $q->where('pro_rate_applied', false)
-                    ->orWhereNull('pro_rate_applied');
-            })
-            ->orderBy('created_at', 'desc')
-            ->first();
-
-        if (!$reconnection) {
-            return null;
         }
 
         return [
-            'reconnection'          => $reconnection,
-            'reconnection_date'     => Carbon::parse($reconnection->created_at)->startOfDay(),
-            'prev_generation_date'  => $prevGenerationDate,
-            'prev_billing_day_date' => $prevBillingDayDate,
+            'total_prorate' => round($totalProrate, 2),
+            'pro_rate_start' => $proRateStart,
+            'log_ids' => $logIds
         ];
     }
 
-    /**
-     * Mark the reconnection that drove a pro-rate as billed so it is never
-     * charged again on a subsequent cycle. Called once, from the invoice
-     * (the authoritative document that "consumes" one-time charges) so that
-     * the SOA and invoice for the same run both reflect the pro-rate first.
-     */
-    protected function markReconnectionProRateAsUsed(BillingAccount $account, int $userId, string $invoiceId, Carbon $generationDate): void
+    protected function markReconnectionProrateAsUsed(BillingAccount $account, int $userId, string $invoiceId, array $logIds = []): void
     {
-        try {
-            $match = $this->findReconnectionForProRate($account, $generationDate);
-            if (!$match) {
-                return;
-            }
-
-            /** @var ReconnectionLog $reconnection */
-            $reconnection = $match['reconnection'];
-            $reconnection->update([
-                'pro_rate_applied'    => true,
-                'billing_status'      => 'Billed',
-                'pro_rate_invoice_id' => $invoiceId,
-                'pro_rate_billed_at'  => now(),
-                'updated_by_user'     => (string) $userId,
-            ]);
-
-            // Only the most recent reconnection in the window is charged (per spec).
-            // Mark any other un-applied reconnections in the same window as superseded
-            // so they are not left lingering as pending / re-evaluated later.
-            $superseded = ReconnectionLog::where('account_id', $account->id)
-                ->where('id', '!=', $reconnection->id)
-                ->whereBetween('created_at', [
-                    $match['prev_generation_date'],
-                    $match['prev_billing_day_date']->copy()->endOfDay(),
-                ])
+        if (empty($logIds)) {
+            $logIds = DB::table('reconnection_logs')
+                ->where('account_id', $account->id)
                 ->where(function ($q) {
-                    $q->where('pro_rate_applied', false)
-                        ->orWhereNull('pro_rate_applied');
+                    $q->where('pro_rate_applied', 0)
+                      ->orWhereNull('pro_rate_applied');
                 })
+                ->pluck('id')
+                ->toArray();
+        }
+
+        if (!empty($logIds)) {
+            DB::table('reconnection_logs')
+                ->whereIn('id', $logIds)
                 ->update([
-                    'pro_rate_applied'    => true,
-                    'billing_status'      => 'Superseded',
+                    'pro_rate_applied' => 1,
+                    'billing_status' => 'Billed',
                     'pro_rate_invoice_id' => $invoiceId,
-                    'pro_rate_billed_at'  => now(),
-                    'updated_by_user'     => (string) $userId,
+                    'pro_rate_billed_at' => now(),
+                    'updated_by_user' => (string) $userId,
+                    'updated_at' => now()
                 ]);
 
-            $this->log('info', 'Reconnection marked as pro-rate applied', [
-                'account_no'        => $account->account_no,
-                'reconnection_id'   => $reconnection->id,
-                'invoice_id'        => $invoiceId,
-                'superseded_count'  => $superseded,
-            ]);
-        } catch (\Throwable $e) {
-            $this->log('error', 'Failed to mark reconnection pro-rate as applied', [
+            $this->log('info', 'Marked reconnection logs as billed', [
                 'account_no' => $account->account_no,
-                'error'      => $e->getMessage(),
+                'invoice_id' => $invoiceId,
+                'log_ids' => $logIds
             ]);
         }
     }
@@ -1117,20 +939,20 @@ class EnhancedBillingGenerationServiceWithNotifications
 
         foreach ($targetBillingDays as $billingDay) {
             $billingDayLabel = $billingDay === self::END_OF_MONTH_BILLING ? 'End of Month (0)' : "Day {$billingDay}";
-            
+
             $this->log('info', "Processing billing day: {$billingDayLabel}");
-            
+
             // Use Unified Billing Generation to prevent duplicate SMS
             $unifiedResults = $this->generateUnifiedBilling($billingDay, $today, $userId);
-            
+
             $results['billing_days_processed'][] = $billingDayLabel;
-            
+
             // Merge Invoice Results
             $results['invoices']['success'] += $unifiedResults['invoices']['success'];
             $results['invoices']['failed'] += $unifiedResults['invoices']['failed'];
             $results['invoices']['skipped'] += $unifiedResults['invoices']['skipped'] ?? 0;
             $results['invoices']['errors'] = array_merge($results['invoices']['errors'], $unifiedResults['invoices']['errors']);
-
+            
             // Merge Statement Results
             $results['statements']['success'] += $unifiedResults['statements']['success'];
             $results['statements']['failed'] += $unifiedResults['statements']['failed'];
@@ -1155,94 +977,67 @@ class EnhancedBillingGenerationServiceWithNotifications
         try {
             $accounts = $this->getActiveAccountsForBillingDay($billingDay, $generationDate);
 
-            // Idempotency guard, resolved in bulk (two queries) BEFORE the loop: any account
-            // that already has a record for this billing cycle is skipped entirely, so a cron
-            // that fires twice — or is re-run manually after a crash — never double-bills a
-            // customer, double-charges their balance, or re-sends a notification.
-            $accountNos = $accounts->pluck('account_no')->all();
-            $alreadyHasStatement = $this->getAccountsAlreadyBilledForMonth('statement', $accountNos, $generationDate);
-            $alreadyHasInvoice = $this->getAccountsAlreadyBilledForMonth('invoice', $accountNos, $generationDate);
-
-            $skippedInvoiceAccounts = [];
-
             foreach ($accounts as $account) {
                 $soa = null;
                 $invoice = null;
 
-                // 1. Generate SOA
-                if (isset($alreadyHasStatement[$account->account_no])) {
-                    $results['statements']['skipped']++;
-                    $this->log('info', "Skipping SOA for account {$account->account_no}: billing already generated for this billing cycle", [
-                        'account_no' => $account->account_no,
-                        'billing_day' => $billingDay,
-                        'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
-                    ]);
-                } else {
-                    try {
+                // 1. Generate SOA — skip if one already exists for this billing cycle
+                try {
+                    if ($this->statementAlreadyGeneratedForCycle($account, $generationDate)) {
+                        $results['statements']['skipped']++;
+                        $this->log('info', 'Skipped SOA generation — statement already exists for this billing cycle', [
+                            'account_no' => $account->account_no,
+                            'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
+                        ]);
+                    } else {
                         $soa = $this->createEnhancedStatement($account, $generationDate, $userId);
                         $results['statements']['success']++;
-                    } catch (\Exception $e) {
-                        $results['statements']['failed']++;
-                        $results['statements']['errors'][] = [
-                            'account_id' => $account->id,
-                            'account_no' => $account->account_no,
-                            'error' => "SOA Error: " . $e->getMessage()
-                        ];
-                        $this->log('error', "Failed to generate SOA for account {$account->account_no}: " . $e->getMessage());
                     }
+                } catch (\Exception $e) {
+                    $results['statements']['failed']++;
+                    $results['statements']['errors'][] = [
+                        'account_id' => $account->id,
+                        'account_no' => $account->account_no,
+                        'error' => "SOA Error: " . $e->getMessage()
+                    ];
+                    $this->log('error', "Failed to generate SOA for account {$account->account_no}: " . $e->getMessage());
                 }
 
-                // 2. Generate Invoice
-                if (isset($alreadyHasInvoice[$account->account_no])) {
-                    $results['invoices']['skipped']++;
-                    $skippedInvoiceAccounts[] = $account->account_no;
-                    $this->log('info', "Skipping invoice for account {$account->account_no}: billing already generated for this billing cycle", [
-                        'account_no' => $account->account_no,
-                        'billing_day' => $billingDay,
-                        'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
-                    ]);
-                } else {
-                    try {
+                // 2. Generate Invoice — skip if one already exists for this billing cycle
+                try {
+                    if ($this->invoiceAlreadyGeneratedForCycle($account, $generationDate)) {
+                        $results['invoices']['skipped']++;
+                        $this->log('info', 'Skipped invoice generation — invoice already exists for this billing cycle', [
+                            'account_no' => $account->account_no,
+                            'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
+                        ]);
+                    } else {
                         $invoice = $this->createEnhancedInvoice($account, $generationDate, $userId);
                         $results['invoices']['success']++;
-                    } catch (\Exception $e) {
-                        $results['invoices']['failed']++;
-                        $results['invoices']['errors'][] = [
-                            'account_id' => $account->id,
-                            'account_no' => $account->account_no,
-                            'error' => "Invoice Error: " . $e->getMessage()
-                        ];
-                        $this->log('error', "Failed to generate Invoice for account {$account->account_no}: " . $e->getMessage());
                     }
+                } catch (\Exception $e) {
+                    $results['invoices']['failed']++;
+                    $results['invoices']['errors'][] = [
+                        'account_id' => $account->id,
+                        'account_no' => $account->account_no,
+                        'error' => "Invoice Error: " . $e->getMessage()
+                    ];
+                    $this->log('error', "Failed to generate Invoice for account {$account->account_no}: " . $e->getMessage());
                 }
 
-                // 3. Notify ONCE (only when something was actually generated). Both $soa and
-                //    $invoice stay null for a skipped account, so no duplicate notification
-                //    is ever sent on a repeat run.
+                // 3. Notify ONCE — only when we actually created something new this run.
+                // If both SOA and invoice were skipped as duplicates, no notification is sent.
                 if ($soa || $invoice) {
                      $notificationResult = $this->queueNotification($account, $invoice, $soa);
                      $results['notifications'][] = $notificationResult;
                 }
             }
-
-            $this->log('info', "Unified billing complete for billing day {$billingDay}", [
-                'billing_day' => $billingDay,
-                'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m'),
-                'accounts_considered' => $accounts->count(),
-                'invoices_generated' => $results['invoices']['success'],
-                'invoices_skipped' => $results['invoices']['skipped'],
-                'invoices_failed' => $results['invoices']['failed'],
-                'statements_generated' => $results['statements']['success'],
-                'statements_skipped' => $results['statements']['skipped'],
-                'statements_failed' => $results['statements']['failed'],
-                'skipped_invoice_account_nos' => $skippedInvoiceAccounts,
-            ]);
         } catch (\Exception $e) {
             $this->log('error', "Error in generateUnifiedBilling: " . $e->getMessage());
             // In case of catastrophic failure, we just return partial results with the error logged
             // You might want to bubble this up depending on desire
         }
-
+        
         return $results;
     }
 
@@ -1801,8 +1596,3 @@ class EnhancedBillingGenerationServiceWithNotifications
         return $results;
     }
 }
-
-
-
-
-
