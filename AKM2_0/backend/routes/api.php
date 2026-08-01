@@ -1241,9 +1241,43 @@ Route::post('/login', function (Request $request) {
             ]);
         }
 
-        // Generate token
-        $token = 'user_token_' . $user->id . '_' . time();
-        $responseData['token'] = $token;
+        // Issue a REAL Sanctum personal access token.
+        //
+        // The SPA can then authenticate via the `Authorization: Bearer <token>` header instead
+        // of the cross-origin session cookie. This is REQUIRED for embedded in-app browsers
+        // (e.g. Facebook Messenger's WebView) which block third-party cookie storage and can
+        // therefore never use the session cookie set by a different subdomain. First-party
+        // browsers keep working via either the session (\Auth::login above) OR this token.
+        //
+        // NOTE: the previous implementation returned a fake string ('user_token_<id>_<time>')
+        // that auth:sanctum could never validate — the app was 100% session-cookie dependent,
+        // which is exactly why it failed inside Messenger.
+        try {
+            // Bound token-table growth: drop this user's tokens older than the session lifetime
+            // window on each successful login so abandoned devices don't accumulate forever.
+            $user->tokens()
+                ->where('created_at', '<', now()->subDays(30))
+                ->delete();
+
+            $tokenName = 'spa:' . substr((string) ($request->userAgent() ?? 'unknown'), 0, 120);
+            $responseData['token'] = $user->createToken($tokenName)->plainTextToken;
+
+            \Log::info('Sanctum token issued at login', [
+                'user_id'    => $user->id,
+                'user_agent' => $request->userAgent(),
+                'ip'         => $request->ip(),
+            ]);
+        } catch (\Throwable $tokenError) {
+            // Never block login if token issuance fails (e.g. personal_access_tokens table not
+            // migrated yet). First-party browsers still work via the session cookie; only the
+            // embedded-browser path degrades until `php artisan migrate` is run.
+            \Log::error('Failed to issue Sanctum token at login', [
+                'user_id'    => $user->id,
+                'user_agent' => $request->userAgent(),
+                'error'      => $tokenError->getMessage(),
+            ]);
+            $responseData['token'] = null;
+        }
 
         return response()->json([
         'status' => 'success',
@@ -1265,6 +1299,32 @@ Route::post('/login', function (Request $request) {
         'error' => 'An error occurred during authentication'
         ], 500);
     }
+});
+
+// Logout — revokes the bearer token used for this request (token clients) and clears the
+// web session (cookie clients). Safe for both auth styles; never errors if one is absent.
+Route::middleware('auth:sanctum')->post('/logout', function (Request $request) {
+    try {
+        $token = $request->user()?->currentAccessToken();
+        // Real PATs expose delete(); session-auth requests return a TransientToken (no delete()).
+        if ($token && method_exists($token, 'delete')) {
+            $token->delete();
+        }
+    } catch (\Throwable $e) {
+        \Log::warning('Logout token revocation failed: ' . $e->getMessage());
+    }
+
+    try {
+        \Auth::guard('web')->logout();
+        if ($request->hasSession()) {
+            $request->session()->invalidate();
+            $request->session()->regenerateToken();
+        }
+    } catch (\Throwable $e) {
+        // Pure token clients may have no session — ignore.
+    }
+
+    return response()->json(['status' => 'success', 'message' => 'Logged out']);
 });
 
 Route::post('/forgot-password', function (Request $request) {

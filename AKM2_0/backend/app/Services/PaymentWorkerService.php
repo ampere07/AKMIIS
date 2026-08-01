@@ -220,7 +220,12 @@ class PaymentWorkerService
                 // pullout / for-pullout service orders. Gating this on billing_status_id != 1
                 // meant a customer who paid before the disconnect cron ran (still status 1)
                 // never got their queued disconnect cancelled or pullout SOs failed.
-                $balanceSettled  = ($currentBalance <= 0);
+                // 0.01 epsilon — consistent with updateBilling() (line ~334),
+                // cancelPendingDisconnectionsInQueue() (line ~666) and failPulloutServiceOrders()
+                // (line ~709). A payment that leaves a sub-centavo rounding residual still shows
+                // the customer ₱0.00; without this tolerance the strict `<= 0` left such accounts
+                // paid-but-not-reconnected because attemptReconnect() was never called.
+                $balanceSettled  = ($currentBalance <= 0.01);
 
                 // Commit billing FIRST — payment is real regardless of what RADIUS does
                 DB::commit();
@@ -414,7 +419,10 @@ class PaymentWorkerService
             
             // Step 1: Check if balance qualifies (0 or negative)
             $balance = floatval($billingAccount->account_balance ?? 0);
-            if ($balance > 0) {
+            // 0.01 epsilon, matching the settled-balance gate in processPayment() and the
+            // queue-cancel / pullout-fail guards below — a sub-centavo rounding residual must not
+            // block reconnect for a customer whose balance already reads ₱0.00.
+            if ($balance > 0.01) {
                 $this->workerLog("[RECONNECT SKIP] Balance is positive: ₱{$balance}");
                 return 'balance_positive';
             }

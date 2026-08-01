@@ -21,6 +21,17 @@ export const forgotPassword = async (email: string): Promise<ForgotPasswordRespo
   return response.data;
 };
 
+// Best-effort logout: revokes the current Sanctum bearer token (and clears the web session).
+// Failures are swallowed so the client always logs out locally even if the network call fails
+// (e.g. offline, or a blocked request inside an embedded browser).
+export const logout = async (): Promise<void> => {
+  try {
+    await apiClient.post('/logout');
+  } catch (error) {
+    console.warn('[API] Logout request failed (continuing local logout):', error);
+  }
+};
+
 export const healthCheck = async (): Promise<HealthCheckResponse> => {
   const response = await apiClient.get<HealthCheckResponse>('/health');
   return response.data;

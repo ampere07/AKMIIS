@@ -244,7 +244,17 @@ class RadiusQueueService
             case 'reconnect_user':
                 $service = app(ManualRadiusOperationsService::class);
                 $result = $service->reconnectUser($params);
-                if (($result['status'] ?? '') !== 'success') {
+                $reconnectSucceeded = (($result['status'] ?? '') === 'success');
+
+                // Auto-fail open pullout service orders regardless of whether the RADIUS
+                // reconnect itself succeeded on this run. The customer has already paid (the
+                // balance guard inside enforces ≤ ₱0.01), so their equipment must NOT be pulled
+                // out even while the reconnect is still queued/retrying. This runs every time
+                // the queued item is processed and is idempotent, so a still-open pullout SO is
+                // failed on the first cron pass rather than waiting for the reconnect to land.
+                $this->failPulloutServiceOrders($params['accountNumber'] ?? '');
+
+                if (!$reconnectSucceeded) {
                     $errorMessage = $result['message'] ?? 'Operation returned failure status';
                     return false;
                 }
@@ -402,6 +412,61 @@ class RadiusQueueService
                 ]);
 
             $this->writeLog("  [RETRY] Item #{$item->id} scheduled for retry (attempt {$newAttempts}/{$item->max_attempts})");
+        }
+    }
+
+    /**
+     * Mark open Pullout service orders as Failed after a QUEUED reconnect succeeds.
+     *
+     * Mirrors PaymentWorkerService::failPulloutServiceOrders() and
+     * TransactionController::failPulloutServiceOrders() so the queued reconnect path behaves
+     * identically to the immediate ones. Fails ALL of the account's pullout SOs whose concern
+     * is exactly "pullout" / "for pullout" (case & spacing insensitive) and whose
+     * support_status is currently "In Progress" or "Reschedule". Idempotent and balance-guarded.
+     */
+    private function failPulloutServiceOrders(string $accountNo): void
+    {
+        if (trim($accountNo) === '') {
+            return;
+        }
+
+        try {
+            // Balance guard: only auto-fail when the account is fully paid. The 0.01 epsilon
+            // absorbs sub-centavo rounding residuals (consistent with the immediate paths).
+            $balance = floatval(DB::table('billing_accounts')
+                ->where('account_no', $accountNo)
+                ->value('account_balance') ?? 0);
+
+            if ($balance > 0.01) {
+                $this->writeLog("  [PULLOUT SKIP] Account balance still positive (₱" . number_format($balance, 2) . ") - not failing pullout SOs for account: {$accountNo}");
+                return;
+            }
+
+            $ids = DB::table('service_orders')
+                ->where('account_no', $accountNo)
+                ->whereIn(DB::raw('LOWER(TRIM(concern))'), ['pullout', 'for pullout'])
+                ->whereRaw("LOWER(COALESCE(support_status, '')) IN (?, ?)", ['in progress', 'reschedule'])
+                ->pluck('id');
+
+            if ($ids->isEmpty()) {
+                $this->writeLog("  [PULLOUT SKIP] No open pullout service orders for account: {$accountNo}");
+                return;
+            }
+
+            $affected = DB::table('service_orders')
+                ->whereIn('id', $ids)
+                ->update([
+                    'support_status'  => 'Failed',
+                    'visit_status'    => 'Failed',
+                    'support_remarks' => 'auto failed due to client reconnected',
+                    'updated_by_user' => 'System',
+                    'updated_at'      => now(),
+                ]);
+
+            $this->writeLog("  [PULLOUT] Marked {$affected} pullout service order(s) Failed for account: {$accountNo} (IDs: " . $ids->implode(', ') . ")");
+            Log::channel('radiusrelated')->info('[Radius_Queue] [PULLOUT FAILED] ' . $affected . ' pullout SO(s) auto-failed after queued reconnect for account ' . $accountNo);
+        } catch (\Exception $e) {
+            $this->writeLog("  [PULLOUT EXCEPTION] Account {$accountNo}: " . $e->getMessage());
         }
     }
 

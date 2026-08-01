@@ -4,6 +4,7 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import { UserData } from './types/api';
 import { initializeCsrf } from './config/api';
+import { logout } from './services/api';
 import { userSettingsService } from './services/userSettingsService';
 import PaymentResultModal from './components/PaymentResultModal';
 import SplashScreen from './components/SplashScreen';
@@ -152,7 +153,11 @@ function App() {
     setIsLoggedIn(true);
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // Revoke the server-side token FIRST (while it is still in localStorage so the
+    // Authorization header is attached). Best-effort — never blocks local logout.
+    await logout();
+
     resetAllStores();
     // Remove user data from localStorage
     localStorage.removeItem('authData');

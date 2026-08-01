@@ -5,6 +5,35 @@ const getCookie = (name: string): string | null => {
   return match ? decodeURIComponent(match[2]) : null;
 };
 
+/**
+ * Read the Sanctum bearer token stored at login.
+ *
+ * This is the primary authentication mechanism: it is sent as an `Authorization: Bearer`
+ * header and does NOT depend on cookies, so it works in embedded in-app browsers
+ * (Facebook Messenger, Instagram, etc.) that block third-party cookie storage.
+ */
+const getAuthToken = (): string | null => {
+  try {
+    const raw = localStorage.getItem('authData');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.token || null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Detect embedded / in-app WebViews (Facebook, Messenger, Instagram, Line, WeChat, generic
+ * Android WebView, etc.). These environments block third-party cookies, so cookie/session and
+ * CSRF-cookie based auth cannot work there — we rely on the bearer token instead.
+ */
+export const isEmbeddedBrowser = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /FBAN|FBAV|FB_IAB|FBIOS|Messenger|Instagram|Line\/|MicroMessenger|Twitter|; wv\)|WebView/i.test(ua);
+};
+
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL as string;
 
 if (!API_BASE_URL) {
@@ -13,6 +42,8 @@ if (!API_BASE_URL) {
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
+  // Still send cookies when the browser allows it (first-party browsers keep their session),
+  // but auth no longer depends on them — the bearer token below is authoritative.
   withCredentials: true,
   timeout: 60000,
   headers: {
@@ -27,6 +58,12 @@ let csrfInitializationPromise: Promise<void> | null = null;
 
 export const initializeCsrf = async (): Promise<void> => {
   if (csrfInitialized) {
+    return;
+  }
+
+  // Pointless in embedded browsers: the CSRF cookie cannot be stored, and api/* routes are
+  // CSRF-exempt on the backend anyway. Skip so we never block startup there.
+  if (isEmbeddedBrowser()) {
     return;
   }
 
@@ -54,11 +91,27 @@ export const initializeCsrf = async (): Promise<void> => {
 
 apiClient.interceptors.request.use(
   async (config: any) => {
+    // 1) Attach the bearer token — primary, cookie-independent authentication.
+    const token = getAuthToken();
+    if (token) {
+      config.headers = config.headers || {};
+      if (!config.headers['Authorization']) {
+        config.headers['Authorization'] = `Bearer ${token}`;
+      }
+    }
+
     const method = config.method?.toUpperCase();
     const requiresCsrf = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method || '');
 
-    if (requiresCsrf && !csrfInitialized) {
-      await initializeCsrf();
+    // 2) CSRF cookie flow is best-effort and only relevant to first-party, cookie-based
+    //    sessions. It must NEVER block the request: api/* routes are CSRF-exempt on the
+    //    backend, and token-authenticated / embedded-browser requests don't use it at all.
+    if (requiresCsrf && !token && !isEmbeddedBrowser() && !csrfInitialized) {
+      try {
+        await initializeCsrf();
+      } catch (e) {
+        console.warn('[API] CSRF init skipped (non-fatal):', e);
+      }
     }
 
     const xsrfToken = getCookie('XSRF-TOKEN');
@@ -81,8 +134,8 @@ apiClient.interceptors.response.use(
   async (error) => {
     if (error.response) {
       const status = error.response.status;
-      
-      // Handle CSRF expiration
+
+      // Handle CSRF expiration (only reachable for cookie-based first-party sessions).
       if (status === 419) {
         csrfInitialized = false;
         try {
@@ -94,13 +147,28 @@ apiClient.interceptors.response.use(
           return Promise.reject(retryError);
         }
       }
-      
-      // Handle Session expiration (401)
+
+      // Handle Session/Token expiration (401)
       if (status === 401) {
-        console.warn('[API] Unauthorized (401). Triggering session expiration modal...');
+        console.warn('[API] Unauthorized (401). Triggering session expiration modal...', {
+          embedded: isEmbeddedBrowser(),
+          hasToken: !!getAuthToken(),
+          url: error.config?.url,
+        });
         // Dispatch custom event so App.tsx can show the modal
         window.dispatchEvent(new CustomEvent('auth:session-expired'));
       }
+    } else {
+      // No response object => network / CORS / TLS failure, or a request blocked by the
+      // WebView. This is the classic symptom inside embedded browsers — log rich context so
+      // it can be diagnosed from the field instead of guessing.
+      console.error('[API] Network/transport error (no HTTP response received).', {
+        embedded: isEmbeddedBrowser(),
+        url: error.config?.url,
+        method: error.config?.method,
+        message: error.message,
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+      });
     }
     return Promise.reject(error);
   }

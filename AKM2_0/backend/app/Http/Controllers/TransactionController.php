@@ -1210,8 +1210,11 @@ class TransactionController extends Controller
             \Log::info('[TRANSACTION RECONNECT] Starting check for account: ' . $accountNo);
 
             // Step 1: Check if balance qualifies (0 or negative)
+            // 0.01 epsilon, consistent with the queue-cancel / pullout-fail guards below (lines
+            // ~1460 / ~1504) and PaymentWorkerService — a sub-centavo rounding residual must not
+            // block reconnect for a customer whose balance already reads ₱0.00.
             $balance = floatval($billingAccount->account_balance ?? 0);
-            if ($balance > 0) {
+            if ($balance > 0.01) {
                 \Log::info('[TRANSACTION RECONNECT SKIP] Balance is positive: ₱' . $balance);
                 return 'balance_positive';
             }

@@ -52,6 +52,9 @@ export interface UserData {
     id: number;
     name: string;
   };
+  // Sanctum bearer token — sent as `Authorization: Bearer <token>` so auth works without
+  // cookies (required for embedded in-app browsers like Facebook Messenger's WebView).
+  token?: string;
 }
 
 export interface User {

@@ -106,7 +106,10 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           role: response.data.user.role,
           role_id: response.data.user.role_id,
           permissions: response.data.user.permissions || null,
-          organization: response.data.user.organization
+          organization: response.data.user.organization,
+          // Persist the Sanctum bearer token so API requests authenticate via the
+          // Authorization header (cookie-independent — works inside Messenger's WebView).
+          token: response.data.token
         };
         onLogin(userData);
       } else {
@@ -188,12 +191,6 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
             padding: 40px 0 20px 0 !important;
             background: transparent !important;
           }
-          .apply-section {
-            order: 3 !important;
-            width: 100% !important;
-            padding: 0 0 40px 0 !important;
-            background: transparent !important;
-          }
           .login-input {
             border-radius: 50px !important;
             padding: 16px 25px !important;
@@ -212,17 +209,6 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           .login-button:disabled {
             color: #ffffff !important;
             background-color: #6b7280 !important;
-          }
-          .apply-button {
-            border-radius: 50px !important;
-            padding: 16px 60px !important;
-            background-color: ${colorPalette?.primary || '#7c3aed'} !important;
-            width: 100% !important;
-            max-width: 280px !important;
-          }
-          .new-here-text {
-            color: ${colorPalette?.primary || '#7c3aed'} !important;
-            font-size: 32px !important;
           }
         }
       `}</style>
@@ -450,7 +436,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                         outline: 'none',
                         fontWeight: '600'
                       }}
-                      placeholder="Account No./Username/Email"
+                      placeholder="Account No."
                     />
                   </div>
 
@@ -616,64 +602,6 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
               }}>
                 Powered by <span style={{ color: colorPalette?.primary || '#7c3aed' }}>SYNC</span>
               </p>
-            </div>
-
-            <div className="apply-section" style={{
-              textAlign: 'center',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center'
-            }}>
-              <div style={{ marginBottom: '30px' }}>
-                <h2 className="new-here-text" style={{
-                  fontSize: '36px',
-                  fontWeight: '700',
-                  marginBottom: '15px',
-                  color: colorPalette?.primary || '#7c3aed'
-                }}>
-                  New Here?
-                </h2>
-                <p style={{
-                  fontSize: '16px',
-                  color: '#6b7280'
-                }}>
-                  Apply online in just 2 minutes.
-                </p>
-              </div>
-
-              <button
-                type="button"
-                className="apply-button"
-                onClick={() => {
-                  window.open('https://apply.akmiis.com', '_blank');
-                }}
-                style={{
-                  padding: '16px 48px',
-                  backgroundColor: colorPalette?.primary || '#7c3aed',
-                  color: '#ffffff',
-                  border: 'none',
-                  borderRadius: '30px',
-                  fontSize: '16px',
-                  fontWeight: '700',
-                  cursor: 'pointer',
-                  transition: 'transform 0.2s',
-                  boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 6px 12px rgba(0, 0, 0, 0.15)';
-                  if (colorPalette?.accent) {
-                    e.currentTarget.style.backgroundColor = colorPalette.accent;
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.transform = 'translateY(0)';
-                  e.currentTarget.style.boxShadow = '0 4px 6px rgba(0, 0, 0, 0.1)';
-                  e.currentTarget.style.backgroundColor = colorPalette?.primary || '#7c3aed';
-                }}
-              >
-                APPLY NOW
-              </button>
             </div>
           </div>
         </div>
