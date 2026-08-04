@@ -65,7 +65,11 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "AKM uses your location to show your position on the map and set installation locations."
+          "locationWhenInUsePermission": "Allow AKM to access your location so dispatch can see your live position while you are on duty.",
+          "locationAlwaysAndWhenInUsePermission": "Allow AKM to access your location in the background so dispatch can keep seeing your live position while you are on duty.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       [

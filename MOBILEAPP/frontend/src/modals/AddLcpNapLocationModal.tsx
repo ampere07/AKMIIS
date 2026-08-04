@@ -10,6 +10,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
+import { ensureLocationPermission } from '../services/locationConsent';
 import { getRegions, getCities, City } from '../services/cityService';
 import { barangayService, Barangay } from '../services/barangayService';
 import { getActiveImageSize } from '../services/imageSettingsService';
@@ -395,8 +396,9 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({ isOpen,
   const handleGetMyLocation = useCallback(async () => {
     setLoading(true);
     try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
+      // Shows the in-app location disclosure before the OS prompt, then requests.
+      const granted = await ensureLocationPermission();
+      if (!granted) return;
       const loc = await Location.getCurrentPositionAsync({});
       const lat = loc.coords.latitude;
       const lng = loc.coords.longitude;

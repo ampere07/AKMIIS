@@ -23,6 +23,7 @@ import { version as currentVersion } from './package.json';
 import ForceUpdateModal from './src/modals/ForceUpdateModal';
 import { StatusBar } from 'expo-status-bar';
 import ErrorBoundary from './src/components/ErrorBoundary';
+import LocationDisclosureHost from './src/components/LocationDisclosureHost';
 
 const IDLE_TIMEOUT = 2 * 60 * 60 * 1000; // 2 hours in ms
 const WARNING_TIMEOUT = 1.5 * 60 * 60 * 1000; // 1.5 hours in ms
@@ -354,6 +355,11 @@ function App() {
           onClose={() => setShowUpdateModal(false)}
         />
       )}
+
+      {/* Location prominent disclosure. Mounted at the root so it can be shown before
+          ANY location permission request, on any screen and for any role — required by
+          Google Play's User Data policy. */}
+      <LocationDisclosureHost />
     </View>
       </ErrorBoundary>
     </SafeAreaProvider>

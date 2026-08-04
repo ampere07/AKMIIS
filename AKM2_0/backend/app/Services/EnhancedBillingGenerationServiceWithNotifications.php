@@ -280,8 +280,29 @@ class EnhancedBillingGenerationServiceWithNotifications
         return $billingDay;
     }
 
+    /**
+     * One statement per account per billing month, for the same reason as the invoice:
+     * generating twice runs calculateAdvancedPayments() again, which marks advance payments
+     * Used and would spend the customer's credit without it reaching their bill.
+     */
     public function createEnhancedStatement(BillingAccount $account, Carbon $statementDate, int $userId): StatementOfAccount
     {
+        $period = $statementDate->copy()->setTimezone('Asia/Manila');
+        $existingStatement = StatementOfAccount::where('account_no', $account->account_no)
+            ->whereMonth('statement_date', $period->month)
+            ->whereYear('statement_date', $period->year)
+            ->first();
+
+        if ($existingStatement) {
+            $this->log('info', 'Statement already exists for this billing cycle — returning it without regenerating', [
+                'account_no' => $account->account_no,
+                'statement_id' => $existingStatement->id,
+                'billing_period' => $period->format('Y-m')
+            ]);
+
+            return $existingStatement;
+        }
+
         $statementDate = $statementDate->copy()->setTimezone('Asia/Manila')->startOfDay();
         DB::beginTransaction();
 
@@ -435,8 +456,35 @@ class EnhancedBillingGenerationServiceWithNotifications
         }
     }
 
+    /**
+     * One invoice per account per billing month. If one already exists for the cycle it is
+     * returned untouched and nothing is charged again.
+     *
+     * The guard lives here rather than only in the generation loops because the manual
+     * generation endpoints call this method directly. Billing a cycle twice consumes any
+     * credit twice over: the first run applies it and leaves the balance at zero, so the
+     * second run finds no credit and charges the full amount again — which looks exactly like
+     * the advance payment having been ignored.
+     */
     public function createEnhancedInvoice(BillingAccount $account, Carbon $invoiceDate, int $userId): Invoice
     {
+        $period = $invoiceDate->copy()->setTimezone('Asia/Manila');
+        $existingInvoice = Invoice::where('account_no', $account->account_no)
+            ->whereMonth('invoice_date', $period->month)
+            ->whereYear('invoice_date', $period->year)
+            ->first();
+
+        if ($existingInvoice) {
+            $this->log('info', 'Invoice already exists for this billing cycle — returning it without re-billing', [
+                'account_no' => $account->account_no,
+                'invoice_id' => $existingInvoice->id,
+                'billing_period' => $period->format('Y-m'),
+                'account_balance' => $account->account_balance
+            ]);
+
+            return $existingInvoice;
+        }
+
         $invoiceDate = $invoiceDate->copy()->setTimezone('Asia/Manila')->startOfDay();
         DB::beginTransaction();
 
@@ -1057,20 +1105,26 @@ class EnhancedBillingGenerationServiceWithNotifications
         ];
     }
 
+    /**
+     * @param bool $consumeRecords True only for the invoice pass, which is the one that
+     *                             spends the credits and charges it reads. The statement is
+     *                             produced first and must read everything without consuming
+     *                             it, or the invoice finds nothing left to apply.
+     */
     protected function calculateChargesAndDeductions(
-        BillingAccount $account, 
-        Carbon $date, 
-        int $userId, 
+        BillingAccount $account,
+        Carbon $date,
+        int $userId,
         string $invoiceId,
         float $monthlyFee,
-        bool $updateDiscountStatus = false,
+        bool $consumeRecords = false,
         bool $includeDiscounts = true
     ): array {
-        $staggeredInstallFees = $this->calculateStaggeredInstallFees($account, $userId, $invoiceId, $updateDiscountStatus);
-        $discounts = $includeDiscounts ? $this->calculateDiscounts($account, $userId, $invoiceId, $updateDiscountStatus) : 0;
-        $advancedPayments = $this->calculateAdvancedPayments($account, $date, $userId, $invoiceId);
+        $staggeredInstallFees = $this->calculateStaggeredInstallFees($account, $userId, $invoiceId, $consumeRecords);
+        $discounts = $includeDiscounts ? $this->calculateDiscounts($account, $userId, $invoiceId, $consumeRecords) : 0;
+        $advancedPayments = $this->calculateAdvancedPayments($account, $date, $userId, $invoiceId, $consumeRecords);
         $rebates = $this->calculateRebates($account, $date, $monthlyFee);
-        $serviceFees = $this->calculateServiceFees($account, $date, $userId);
+        $serviceFees = $this->calculateServiceFees($account, $date, $userId, $consumeRecords);
         $paymentReceived = $this->calculatePaymentReceived($account, $date);
 
         return [
@@ -1121,11 +1175,22 @@ class EnhancedBillingGenerationServiceWithNotifications
         return round($total, 2);
     }
 
+    /**
+     * Advance payments recorded against this billing month.
+     *
+     * @param bool $consume Mark the records Used. Only the invoice pass may do this. The
+     *                      statement is generated first and must read without consuming:
+     *                      marking them Used there left nothing for the invoice to find, so
+     *                      the credit appeared on the statement but never reached the invoice
+     *                      total or the account balance, and the customer was charged in full
+     *                      despite having paid in advance.
+     */
     protected function calculateAdvancedPayments(
-        BillingAccount $account, 
-        Carbon $date, 
-        int $userId, 
-        string $invoiceId
+        BillingAccount $account,
+        Carbon $date,
+        int $userId,
+        string $invoiceId,
+        bool $consume = false
     ): float {
         $total = 0;
         $currentMonth = $date->format('F');
@@ -1137,11 +1202,14 @@ class EnhancedBillingGenerationServiceWithNotifications
 
         foreach ($advancedPayments as $payment) {
             $total += $payment->payment_amount;
-            $payment->update([
-                'status' => 'Used',
-                'invoice_used_id' => $invoiceId,
-                'updated_by' => $userId
-            ]);
+
+            if ($consume) {
+                $payment->update([
+                    'status' => 'Used',
+                    'invoice_used_id' => $invoiceId,
+                    'updated_by' => $userId
+                ]);
+            }
         }
 
         return round($total, 2);
@@ -1204,7 +1272,19 @@ class EnhancedBillingGenerationServiceWithNotifications
         return round($total, 2);
     }
 
-    protected function calculateServiceFees(BillingAccount $account, Carbon $date, int $userId): float
+    /**
+     * Outstanding service charges waiting to be billed.
+     *
+     * @param bool $consume Mark the charges Used. Only the invoice pass may do this, for the
+     *                      same reason as advance payments: the statement runs first, and
+     *                      consuming there left the invoice with nothing to charge.
+     *
+     * Disconnection fees and additional-invoice charges are deliberately not picked up here.
+     * AutoDisconnectService adds those straight to the account balance and writes its rows
+     * without a status, so they never match 'Unused'. Billing them here as well would charge
+     * them twice.
+     */
+    protected function calculateServiceFees(BillingAccount $account, Carbon $date, int $userId, bool $consume = false): float
     {
         $total = 0;
 
@@ -1215,14 +1295,16 @@ class EnhancedBillingGenerationServiceWithNotifications
 
         foreach ($serviceFees as $fee) {
             $total += $fee->service_charge;
-            
-            DB::table('service_charge_logs')
-                ->where('id', $fee->id)
-                ->update([
-                    'status' => 'Used',
-                    'date_used' => now(),
-                    'updated_at' => now()
-                ]);
+
+            if ($consume) {
+                DB::table('service_charge_logs')
+                    ->where('id', $fee->id)
+                    ->update([
+                        'status' => 'Used',
+                        'date_used' => now(),
+                        'updated_at' => now()
+                    ]);
+            }
         }
 
         return round($total, 2);

@@ -3,6 +3,7 @@ import { View, Text, TextInput, Pressable, Alert, ActivityIndicator } from 'reac
 import MapView, { Marker, MapPressEvent } from 'react-native-maps';
 import { MapPin, Navigation } from 'lucide-react-native';
 import * as Location from 'expo-location';
+import { ensureLocationPermission } from '../services/locationConsent';
 
 interface LocationPickerProps {
   value: string;
@@ -130,9 +131,9 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
   const handleGetCurrentLocation = async () => {
     setIsGettingLocation(true);
     try {
-      // 1) permission
-      const perm = await Location.requestForegroundPermissionsAsync();
-      if (perm.status !== "granted") {
+      // 1) permission — shows the in-app disclosure before the OS prompt, then requests.
+      const granted = await ensureLocationPermission();
+      if (!granted) {
         Alert.alert('Permission Denied', 'Permission to access location was denied. Please enable it in settings.');
         setIsGettingLocation(false);
         return;

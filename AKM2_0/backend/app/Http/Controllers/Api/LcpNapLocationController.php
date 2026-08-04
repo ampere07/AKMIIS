@@ -648,6 +648,9 @@ class LcpNapLocationController extends Controller
                 ->join('billing_accounts as ba', 'td.account_id', '=', 'ba.id')
                 ->join('customers as c', 'ba.customer_id', '=', 'c.id')
                 ->leftJoin('online_status as os', 'td.account_id', '=', 'os.account_id')
+                // Billing status decides whether this customer still occupies the port:
+                // once pulled out, the port is free for someone else.
+                ->leftJoin('billing_status as bs', 'ba.billing_status_id', '=', 'bs.id')
                 ->where('td.lcpnap', '=', $lcpnap->lcpnap_name);
             
             if ($currentUser) {
@@ -663,7 +666,9 @@ class LcpNapLocationController extends Controller
                     'ba.account_no',
                     \DB::raw("TRIM(CONCAT_WS(' ', c.first_name, c.middle_initial, c.last_name)) as full_name"),
                     'td.port',
-                    'os.session_status as status'
+                    'os.session_status as status',
+                    'ba.billing_status_id',
+                    'bs.status_name as billing_status'
                 )
                 ->get();
 

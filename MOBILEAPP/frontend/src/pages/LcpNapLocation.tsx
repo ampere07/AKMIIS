@@ -3,6 +3,7 @@ import { View, Text, Pressable, useWindowDimensions, ActivityIndicator, TextInpu
 import { MapPin, Search, Plus, Navigation } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ExpoLocation from 'expo-location';
+import { ensureLocationPermission } from '../services/locationConsent';
 import MapView, { Marker, Circle, UrlTile } from 'react-native-maps';
 import { FlashList } from '@shopify/flash-list';
 import AddLcpNapLocationModal from '../modals/AddLcpNapLocationModal';
@@ -234,7 +235,10 @@ const LcpNapLocation: React.FC = () => {
       }
     };
     initData();
-    ExpoLocation.requestForegroundPermissionsAsync().catch(() => { });
+    // No location permission is requested on mount. Google Play requires a runtime
+    // permission request to be immediately preceded by a user action and an in-app
+    // disclosure, so location is only ever asked for from handleGetMyLocation(), which
+    // the user triggers themselves by pressing the locate button.
   }, []);
 
   // Combined search using local markers + Nominatim (free OSM geocoding)
@@ -454,8 +458,9 @@ const LcpNapLocation: React.FC = () => {
 
   const handleGetMyLocation = useCallback(async () => {
     try {
-      const { status } = await ExpoLocation.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return Alert.alert('Permission denied', 'Location permission is required.');
+      // Shows the in-app location disclosure before the OS prompt, then requests.
+      const granted = await ensureLocationPermission();
+      if (!granted) return Alert.alert('Permission denied', 'Location permission is required.');
       const loc = await ExpoLocation.getCurrentPositionAsync({ accuracy: ExpoLocation.Accuracy.Balanced });
       mapRef.current?.animateToRegion({
         latitude: loc.coords.latitude,

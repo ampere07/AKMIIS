@@ -111,6 +111,58 @@ interface OrderItem {
   quantity: string;
 }
 
+/**
+ * Values that occur in technical_details.port but mean "no port assigned". Ports are
+ * numbered from 1, so anything resolving to zero counts as blank too.
+ */
+const BLANK_PORT_VALUES = new Set([
+  '', '0', '00', 'P0', 'P00', '-', '--', 'N/A', 'NA', 'NONE', 'NULL', 'UNDEFINED', 'TBD',
+]);
+
+/**
+ * Ports are stored inconsistently ('3', 'P3', 'p03', ' P03 '), so everything is compared
+ * in the canonical picker form: P + two digits.
+ *
+ * Returns '' when there is no port assigned — the caller treats that as "this record
+ * holds no port". An unrecognised but non-empty value is returned as-is rather than
+ * discarded: a port we cannot parse must never be silently reported as free, or two
+ * customers end up on it.
+ */
+const normalizePortLabel = (raw: any): string => {
+  const p = (raw ?? '').toString().replace(/\s+/g, '').toUpperCase();
+  if (BLANK_PORT_VALUES.has(p)) return '';
+  if (/^\d+$/.test(p)) {
+    const n = Number(p);
+    return n > 0 ? `P${String(n).padStart(2, '0')}` : '';
+  }
+  if (/^P\d+$/.test(p)) {
+    const n = Number(p.substring(1));
+    return n > 0 ? `P${String(n).padStart(2, '0')}` : '';
+  }
+  return p;
+};
+
+/**
+ * Billing status id for Pullout, matching billing_status.status_name = 'Pullout'.
+ * Used only as a fallback when the API did not return the status name.
+ */
+const PULLOUT_BILLING_STATUS_ID = 5;
+
+/**
+ * Has this customer been pulled out? Only then is their LCP/NAP port free to reassign.
+ * Matched on the status name where available, falling back to the id.
+ */
+const isPulledOut = (customer: any): boolean => {
+  const name = (customer?.billing_status ?? customer?.billing_status_name ?? '')
+    .toString()
+    .trim()
+    .toLowerCase();
+  if (name) return name.replace(/[\s_-]/g, '') === 'pullout';
+
+  const id = customer?.billing_status_id;
+  return id != null && Number(id) === PULLOUT_BILLING_STATUS_ID;
+};
+
 // ─── Mini Modal Item Component ──────────────────────────────────────────────
 interface MiniModalItemProps {
   label: string;
@@ -306,6 +358,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
   const [isItemMiniModalVisible, setIsItemMiniModalVisible] = useState(false);
   const [activeItemIndex, setActiveItemIndex] = useState<number | null>(null);
   const [usedPorts, setUsedPorts] = useState<Set<string>>(new Set());
+  // port -> who is holding it, for the "not available" message.
+  const [portOccupants, setPortOccupants] = useState<Map<string, string>>(new Map());
 
   const [isOnsiteStatusPickerOpen, setIsOnsiteStatusPickerOpen] = useState(false);
   const [onsiteStatusSearch, setOnsiteStatusSearch] = useState('');
@@ -698,34 +752,47 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
           joResponseResult.value.data.data.forEach((jo: any) => {
             const joLcpnap = jo.lcpnap || jo.LCPNAP;
             if (joLcpnap === formData.lcpnap) {
-              const joPort = (jo.port || jo.PORT || '').toString().replace(/\s+/g, '');
               const joId = jo.id || jo.JobOrder_ID;
+              const joPort = normalizePortLabel(jo.port || jo.PORT);
               if (joPort && String(joId) !== String(currentId)) {
-                let p = joPort.toUpperCase();
-                if (/^\d+$/.test(p)) p = `P${p.padStart(2, '0')}`;
-                else if (/^P\d+$/.test(p)) p = `P${p.substring(1).padStart(2, '0')}`;
-                used.add(p);
+                used.add(joPort);
               }
             }
           });
         }
 
-        // Process Related Customers results
+        // Process Related Customers results.
+        //
+        // An installed customer holds a port only when BOTH are true:
+        //   1. their account is still in service — billing status is anything other than
+        //      Pullout. Once pulled out the equipment is gone and the port is reusable.
+        //   2. their technical details actually name a port. A record with the port left
+        //      blank ('', '0', '-', 'N/A'...) occupies nothing, so it must not take a
+        //      port out of circulation.
+        const occupants = new Map<string, string>();
         if (rcResponseResult.status === 'fulfilled' && rcResponseResult.value?.data?.success) {
           rcResponseResult.value.data.data.forEach((rc: any) => {
-            const rcPort = (rc.port || '').toString().replace(/\s+/g, '');
+            const rcPort = normalizePortLabel(rc.port);
             const rcAccountId = rc.id || rc.account_id || rc.Account_ID;
-            if (rcPort && String(rcAccountId) !== String(currentAccountId)) {
-              let p = rcPort.toUpperCase();
-              if (/^\d+$/.test(p)) p = `P${p.padStart(2, '0')}`;
-              else if (/^P\d+$/.test(p)) p = `P${p.substring(1).padStart(2, '0')}`;
-              used.add(p);
-            }
+
+            // Rule 2: no port recorded -> holds nothing. Also skips the account being
+            // edited, so a technician never blocks themselves out of their own port.
+            if (!rcPort || String(rcAccountId) === String(currentAccountId)) return;
+
+            // Rule 1: pulled out -> port released.
+            if (isPulledOut(rc)) return;
+
+            used.add(rcPort);
+
+            const who = (rc.full_name || rc.account_no || 'another customer').toString().trim();
+            const statusName = (rc.billing_status || '').toString().trim();
+            occupants.set(rcPort, statusName ? `${who} (${statusName})` : who);
           });
         }
 
         if (isCurrentSession()) {
           setUsedPorts(used);
+          setPortOccupants(occupants);
         }
       } catch (error: any) {
         if (error?.name !== 'AbortError' && error?.code !== 'ERR_CANCELED') {
@@ -1008,8 +1075,35 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
         if (!formData.ip.trim()) newErrors.ip = 'IP is required';
 
       } else if (formData.connectionType === 'Fiber') {
+        // Resolved here rather than reusing the `portTotal` computed further down the
+        // component, so this check does not depend on declaration order.
+        const totalPortsOnLcpnap = Number(
+          lcpnaps.find(ln => (ln.lcpnap_name || (ln as any).name) === formData.lcpnap)?.port_total || 0
+        ) || 0;
+
         if (!formData.lcpnap.trim()) newErrors.lcpnap = 'LCP-NAP is required';
-        if (!formData.port.trim()) newErrors.port = 'PORT is required';
+        if (!formData.port.trim()) {
+          newErrors.port = 'PORT is required';
+        } else {
+          // The picker already hides taken ports, but a value can survive a change of
+          // LCP-NAP or be left over from an earlier edit, so re-check on save.
+          const chosen = normalizePortLabel(formData.port);
+
+          if (!chosen) {
+            // Non-empty but meaningless ('N/A', '0', '-'), so it would slip past the
+            // required check without naming a real port.
+            newErrors.port = 'PORT is required';
+          } else if (!/^P\d{2,}$/.test(chosen) || Number(chosen.substring(1)) > totalPortsOnLcpnap) {
+            newErrors.port = totalPortsOnLcpnap
+              ? `PORT ${chosen} does not exist on ${formData.lcpnap} (it has ${totalPortsOnLcpnap} ports)`
+              : `PORT ${chosen} is not valid for ${formData.lcpnap}`;
+          } else if (usedPorts.has(chosen)) {
+            const holder = portOccupants.get(chosen);
+            newErrors.port = holder
+              ? `PORT ${chosen} is not available — still assigned to ${holder}`
+              : `PORT ${chosen} is not available — already in use`;
+          }
+        }
         if (!formData.vlan.trim()) newErrors.vlan = 'VLAN is required';
       }
 
