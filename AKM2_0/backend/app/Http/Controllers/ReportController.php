@@ -69,4 +69,32 @@ class ReportController extends Controller
         }
     }
 
+    public function destroy($id)
+    {
+        $authUser = auth()->user();
+        $roleId = $authUser ? $authUser->role_id : null;
+
+        if ($roleId != 7) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized. Only Super Admin can delete reports.',
+            ], 403);
+        }
+
+        $report = Report::find($id);
+        if (!$report) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Report not found.',
+            ], 404);
+        }
+
+        $report->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Report deleted successfully.',
+        ]);
+    }
+
 }

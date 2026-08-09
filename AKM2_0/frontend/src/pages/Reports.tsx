@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
     RefreshCw, Filter, ArrowUp, ArrowDown, ExternalLink,
-    ChevronLeft, ChevronRight, X, Settings2, FileText, Plus, DownloadCloud
+    ChevronLeft, ChevronRight, X, Settings2, FileText, Plus, DownloadCloud,
+    Trash2, ToggleLeft, ToggleRight, CheckCircle2, AlertCircle
 } from 'lucide-react';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import apiClient from '../config/api';
@@ -102,6 +103,19 @@ const hasReportsAccess = (): boolean => {
     }
 };
 
+const isSuperAdmin = (): boolean => {
+    try {
+        const authData = localStorage.getItem('authData');
+        if (!authData) return false;
+        const user = JSON.parse(authData);
+        const roleId = String(user.role_id ?? '');
+        const role = (user.role ?? '').toLowerCase().trim();
+        return roleId === '7' || role === 'superadmin';
+    } catch {
+        return false;
+    }
+};
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 const Reports: React.FC = () => {
@@ -109,12 +123,25 @@ const Reports: React.FC = () => {
     const [isMobile, setIsMobile] = useState<boolean>(window.innerWidth < 768);
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
     const [accessDenied] = useState<boolean>(!hasReportsAccess());
+    const [canDelete] = useState<boolean>(isSuperAdmin());
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
 
     // Data
     const [rows, setRows] = useState<ReportData[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
+
+    // Auto Send Report toggle
+    const [autoSendEnabled, setAutoSendEnabled] = useState<boolean | null>(null);
+    const [autoSendLoading, setAutoSendLoading] = useState(false);
+
+    // Delete confirmation
+    const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+    const [deletingId, setDeletingId] = useState<number | null>(null);
+
+    // Toast notifications
+    const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+    const toastTimerRef = useRef<number | null>(null);
 
     // UI state
     const [searchQuery, setSearchQuery] = useState('');
@@ -184,9 +211,64 @@ const Reports: React.FC = () => {
         }
     };
 
+    const fetchAutoSendSetting = async () => {
+        try {
+            const res = await apiClient.get<{ success: boolean; data: { is_enabled: boolean } }>('/settings/auto-report');
+            if (res.data.success) setAutoSendEnabled(!!res.data.data.is_enabled);
+        } catch (err) {
+            console.error('Failed to fetch Auto Send Report setting:', err);
+        }
+    };
+
     useEffect(() => {
-        if (!accessDenied) fetchReports();
+        if (!accessDenied) {
+            fetchReports();
+            fetchAutoSendSetting();
+        }
     }, [accessDenied]);
+
+    // ── Toast helper ───────────────────────────────────────────────────────────
+
+    const showToast = (type: 'success' | 'error', message: string) => {
+        if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+        setToast({ type, message });
+        toastTimerRef.current = window.setTimeout(() => setToast(null), 4000);
+    };
+
+    // ── Auto Send Report toggle ────────────────────────────────────────────────
+
+    const handleToggleAutoSend = async () => {
+        if (autoSendEnabled === null || autoSendLoading) return;
+        const next = !autoSendEnabled;
+        setAutoSendLoading(true);
+        try {
+            const res = await apiClient.put<{ success: boolean; message?: string }>('/settings/auto-report', { is_enabled: next });
+            if (!res.data.success) throw new Error(res.data.message || 'Failed to update setting.');
+            setAutoSendEnabled(next);
+            showToast('success', `Auto Send Report ${next ? 'enabled' : 'disabled'}.`);
+        } catch (err: any) {
+            showToast('error', err?.response?.data?.message || err?.message || 'Failed to update Auto Send Report setting.');
+        } finally {
+            setAutoSendLoading(false);
+        }
+    };
+
+    // ── Delete report (Super Admin only) ──────────────────────────────────────
+
+    const handleDeleteReport = async (id: number) => {
+        setDeletingId(id);
+        try {
+            const res = await apiClient.delete<{ success: boolean; message?: string }>(`/reports/${id}`);
+            if (!res.data.success) throw new Error(res.data.message || 'Failed to delete report.');
+            setRows(prev => prev.filter(r => r.id !== id));
+            showToast('success', 'Report deleted successfully.');
+        } catch (err: any) {
+            showToast('error', err?.response?.data?.message || err?.message || 'Failed to delete report.');
+        } finally {
+            setDeletingId(null);
+            setConfirmDeleteId(null);
+        }
+    };
 
     // ── Toggle columns ─────────────────────────────────────────────────────────
 
@@ -319,6 +401,23 @@ const Reports: React.FC = () => {
                             <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
                                 {filtered.length.toLocaleString()} records
                             </span>
+                            {autoSendEnabled !== null && (
+                                <button
+                                    onClick={handleToggleAutoSend}
+                                    disabled={autoSendLoading}
+                                    title={autoSendEnabled ? 'Auto Send Report is enabled — click to disable' : 'Auto Send Report is disabled — click to enable'}
+                                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-opacity disabled:opacity-60 ${isDarkMode ? 'border-gray-700' : 'border-gray-300'}`}
+                                >
+                                    {autoSendEnabled ? (
+                                        <ToggleRight size={16} style={{ color: primary }} />
+                                    ) : (
+                                        <ToggleLeft size={16} className={subText} />
+                                    )}
+                                    <span className={autoSendEnabled ? text : subText}>
+                                        Auto Send Report: {autoSendEnabled ? 'On' : 'Off'}
+                                    </span>
+                                </button>
+                            )}
                         </div>
                         {isMobile && (
                             <button
@@ -466,6 +565,11 @@ const Reports: React.FC = () => {
                                     <th className={`sticky top-0 z-20 px-3 py-2.5 text-center font-semibold border-b text-xs ${thCls} whitespace-nowrap`}>
                                         Download
                                     </th>
+                                    {canDelete && (
+                                        <th className={`sticky top-0 z-20 px-3 py-2.5 text-center font-semibold border-b text-xs ${thCls} whitespace-nowrap`}>
+                                            Delete
+                                        </th>
+                                    )}
                                 </tr>
                             </thead>
                             <tbody>
@@ -514,6 +618,23 @@ const Reports: React.FC = () => {
                                                     )}
                                                 </div>
                                             </td>
+                                            {canDelete && (
+                                                <td className={`px-3 py-2 border-b text-center ${tdCls}`}>
+                                                    <div className="flex justify-center">
+                                                        <button
+                                                            onClick={() => setConfirmDeleteId(row.id)}
+                                                            disabled={deletingId === row.id}
+                                                            className={`p-1.5 rounded-lg transition-colors border disabled:opacity-50 ${isDarkMode
+                                                                ? 'hover:bg-red-900/30 border-gray-700 text-red-400'
+                                                                : 'hover:bg-red-50 border-gray-300 text-red-500'
+                                                                }`}
+                                                            title="Delete report"
+                                                        >
+                                                            <Trash2 size={14} />
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            )}
                                         </tr>
                                     );
                                 })}
@@ -616,6 +737,49 @@ const Reports: React.FC = () => {
                 onClose={() => setIsAddModalOpen(false)}
                 onSaved={() => fetchReports(true)}
             />
+
+            {/* ── Delete Confirmation Dialog ─────────────────────── */}
+            {confirmDeleteId !== null && (
+                <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-[10000]">
+                    <div className={`border rounded-lg p-6 max-w-sm w-full mx-4 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
+                        <h3 className={`text-lg font-semibold mb-2 ${text}`}>Delete Report</h3>
+                        <p className={`text-sm mb-6 ${subText}`}>
+                            Are you sure you want to delete this report configuration? This action cannot be undone.
+                        </p>
+                        <div className="flex items-center justify-end gap-3">
+                            <button
+                                onClick={() => setConfirmDeleteId(null)}
+                                disabled={deletingId !== null}
+                                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${isDarkMode ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => handleDeleteReport(confirmDeleteId)}
+                                disabled={deletingId !== null}
+                                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                            >
+                                {deletingId !== null ? 'Deleting…' : 'Delete'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Toast Notification ──────────────────────────────── */}
+            {toast && (
+                <div className="fixed bottom-6 right-6 z-[10001]">
+                    <div
+                        className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-2xl border text-sm font-medium ${toast.type === 'success'
+                            ? (isDarkMode ? 'bg-green-900/90 border-green-700 text-green-200' : 'bg-green-50 border-green-300 text-green-800')
+                            : (isDarkMode ? 'bg-red-900/90 border-red-700 text-red-200' : 'bg-red-50 border-red-300 text-red-800')
+                            }`}
+                    >
+                        {toast.type === 'success' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+                        {toast.message}
+                    </div>
+                </div>
+            )}
         </>
     );
 };

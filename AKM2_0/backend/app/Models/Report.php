@@ -18,6 +18,7 @@ class Report extends Model
         'time_and_date',
         'send_to',
         'date_range',
+        'last_period_end',
         'created_by',
         'file_url'
     ];

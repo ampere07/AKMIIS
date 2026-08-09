@@ -25,6 +25,13 @@ class QueueScheduledReports extends Command
 
         $logger->info('--- Starting Scheduled Reports Queue Processing Run ---');
 
+        $autoReportSetting = \App\Models\SettingsAutoReport::firstOrCreate(['id' => 1], ['is_enabled' => true]);
+        if (!$autoReportSetting->is_enabled) {
+            $logger->info('--- Auto Send Report is disabled. Skipping this run. ---');
+            $this->info('Auto Send Report is disabled. Skipping.');
+            return Command::SUCCESS;
+        }
+
         $now = \Carbon\Carbon::now('Asia/Manila');
         $currentTime = $now->format('H:i');
         $currentDay = $now->day;
@@ -79,20 +86,52 @@ class QueueScheduledReports extends Command
                 $sendTo = $report->send_to;
                 $emails = array_map('trim', explode(',', $sendTo));
 
-                // Generate fresh attachment
+                // Roll the reporting window forward each run instead of resending
+                // the original date_range every time. The window length comes from
+                // the originally configured range; only its position advances.
+                $windowRange = $report->date_range;
+                $windowTo = null;
+                $originalParts = array_map('trim', explode(' to ', (string) $report->date_range));
+
+                if (count($originalParts) === 2 && $originalParts[0] && $originalParts[1]) {
+                    try {
+                        $originalFrom = \Carbon\Carbon::parse($originalParts[0]);
+                        $originalTo = \Carbon\Carbon::parse($originalParts[1]);
+                        $periodLengthDays = $originalFrom->diffInDays($originalTo) + 1;
+
+                        if ($report->last_period_end) {
+                            $windowFrom = \Carbon\Carbon::parse($report->last_period_end)->addDay();
+                        } else {
+                            $windowFrom = $originalFrom;
+                        }
+                        $windowToCarbon = $windowFrom->copy()->addDays($periodLengthDays - 1);
+
+                        $windowRange = $windowFrom->format('Y-m-d') . ' to ' . $windowToCarbon->format('Y-m-d');
+                        $windowTo = $windowToCarbon->format('Y-m-d');
+                    } catch (\Exception $e) {
+                        $logger->error("Report ID {$report->id} ('{$report->report_name}') failed to compute rolling window, falling back to stored date_range: " . $e->getMessage());
+                    }
+                }
+
+                // Generate fresh attachment for the current rolling window
                 $tempPath = null;
                 try {
                     if (strtolower($report->report_type) === 'summary') {
                         $pdfService = new \App\Services\ReportPdfService();
-                        $tempPath = $pdfService->generateSummaryPdf($report);
+                        $tempPath = $pdfService->generateSummaryPdf($report, $windowRange);
                     } else {
                         $csvService = new \App\Services\ReportCsvService();
-                        $tempPath = $csvService->generateFile($report->report_type, $report->date_range);
+                        $tempPath = $csvService->generateFile($report->report_type, $windowRange);
                     }
-                    $logger->info("Report ID {$report->id} ('{$report->report_name}') attachment generated successfully.");
+                    $logger->info("Report ID {$report->id} ('{$report->report_name}') attachment generated successfully for window {$windowRange}.");
                 } catch (\Exception $e) {
                     $logger->error("Report ID {$report->id} ('{$report->report_name}') CSV generation failed: " . $e->getMessage());
                     \Illuminate\Support\Facades\Log::error('Scheduled Report CSV Generation Failed: ' . $e->getMessage());
+                }
+
+                if ($windowTo) {
+                    $report->last_period_end = $windowTo;
+                    $report->save();
                 }
 
                 foreach ($emails as $email) {
@@ -106,7 +145,7 @@ class QueueScheduledReports extends Command
                         'reply_to' => 'billing@akmiis.com',
                         'sender_name' => 'AKM IIS',
                         'subject' => 'Scheduled Report: ' . $report->report_name,
-                        'body_html' => 'Report ' . htmlspecialchars($report->report_type),
+                        'body_html' => 'Report ' . htmlspecialchars($report->report_type) . ' — Period: ' . htmlspecialchars($windowRange),
                         'attachment_path' => $tempPath,
                         'status' => 'pending',
                         'attempts' => 0

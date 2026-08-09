@@ -28,6 +28,7 @@ use App\Http\Controllers\TransactionController;
 use App\Http\Controllers\BillingGenerationController;
 use App\Http\Controllers\ImageProxyController;
 use App\Http\Controllers\SettingsColorPaletteController;
+use App\Http\Controllers\SettingsAutoReportController;
 use App\Http\Controllers\RelatedDataController;
 use App\Http\Controllers\InventoryRelatedDataController;
 use App\Http\Controllers\PPPoEController;
@@ -63,6 +64,9 @@ Route::get('/commissions/incentive-history', [CommissionController::class, 'getI
 Route::get('/commissions/bonus-history', [CommissionController::class, 'getBonusHistory']);
 Route::post('/commissions/bonus-history', [CommissionController::class, 'storeBonusHistory']);
 Route::post('/reports', [ReportController::class , 'store']);
+Route::delete('/reports/{id}', [ReportController::class, 'destroy']);
+Route::get('/settings/auto-report', [SettingsAutoReportController::class, 'show']);
+Route::put('/settings/auto-report', [SettingsAutoReportController::class, 'update']);
 Route::get('/reports-migrate-pdf', function () {
     $reports = \App\Models\Report::all();
     $pdfService = new \App\Services\ReportPdfService();

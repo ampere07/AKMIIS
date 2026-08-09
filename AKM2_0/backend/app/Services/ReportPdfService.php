@@ -8,15 +8,17 @@ use Illuminate\Support\Facades\Schema;
 
 class ReportPdfService
 {
-    public function generateSummaryPdf($report)
+    public function generateSummaryPdf($report, $dateRangeOverride = null)
     {
+        $dateRange = $dateRangeOverride ?? $report->date_range;
+
         $csvService = new ReportCsvService();
-        $metrics = $csvService->getSummaryMetrics($report->date_range);
+        $metrics = $csvService->getSummaryMetrics($dateRange);
 
         $data = [
             'reportName' => $report->report_name,
             'reportType' => $report->report_type,
-            'dateRange'  => $report->date_range,
+            'dateRange'  => $dateRange,
             'createdBy'  => $report->created_by,
             'metrics'    => $metrics,
             'generatedAt'=> now()->format('F d, Y h:i A')
