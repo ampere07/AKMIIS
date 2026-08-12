@@ -29,6 +29,13 @@ class EnhancedBillingGenerationServiceWithNotifications
     protected const DAYS_UNTIL_DC_NOTICE = 4;
     protected const END_OF_MONTH_BILLING = 0;
 
+    /**
+     * Minimum number of days a subscriber must have been disconnected before the
+     * reconnection is prorated. Shorter outages are absorbed and the full plan price
+     * is charged. {@see calculateReconnectionProrate()}
+     */
+    protected const RECONNECTION_GRACE_DAYS = 7;
+
     public function __construct(BillingNotificationService $notificationService)
     {
         $this->notificationService = $notificationService;
@@ -679,8 +686,10 @@ class EnhancedBillingGenerationServiceWithNotifications
             ->first();
 
         if (!$planChange) {
-            // No plan change, return the fixed monthly plan price
-            return $monthlyFee;
+            // No plan change on file. Before falling back to the full monthly fee,
+            // check whether this is a never-billed new installation, which is only
+            // charged for the days it actually consumed.
+            return $this->calculateNewInstallProrate($account, $monthlyFee, $currentDate);
         }
 
         // Get the old and new plan details
@@ -772,8 +781,87 @@ class EnhancedBillingGenerationServiceWithNotifications
         return $monthlyFee;
     }
 
+    /**
+     * First-bill proration for a brand-new installation.
+     *
+     * An account that has never been billed still has an empty `balance_update_date`
+     * (the invoice generator stamps it on every run). Such an account must only pay for
+     * the days it actually consumed — from `date_installed` up to and including this
+     * cycle's due date — instead of a full month.
+     *
+     * Days are always divided by the fixed 30-day billing cycle and capped at 30, so an
+     * install that predates the cycle by more than a month can never be over-charged.
+     *
+     * Any account that fails the new-install test (already billed, or no install date)
+     * falls back to the full monthly fee, preserving previous behaviour.
+     */
+    protected function calculateNewInstallProrate(BillingAccount $account, float $monthlyFee, Carbon $currentDate): float
+    {
+        if (!empty($account->balance_update_date)) {
+            return $monthlyFee;
+        }
+
+        if (empty($account->date_installed)) {
+            $this->log('info', 'Account has never been billed but has no install date; charging full monthly fee', [
+                'account_no' => $account->account_no,
+                'monthly_fee' => $monthlyFee
+            ]);
+
+            return $monthlyFee;
+        }
+
+        $installDate = Carbon::parse($account->date_installed)->startOfDay();
+        $dueDate = $currentDate->copy()->startOfDay()->addDays($this->getDueDateOffset());
+
+        // Defensive: a future-dated installation cannot have consumed any days yet.
+        if ($installDate->gt($dueDate)) {
+            $this->log('warning', 'Install date is after the computed due date; charging full monthly fee', [
+                'account_no' => $account->account_no,
+                'date_installed' => $installDate->format('Y-m-d'),
+                'due_date' => $dueDate->format('Y-m-d')
+            ]);
+
+            return $monthlyFee;
+        }
+
+        $daysConsumed = $installDate->diffInDays($dueDate) + 1;
+        $cappedDays = min($daysConsumed, self::DAYS_IN_MONTH);
+        $dailyRate = $monthlyFee / self::DAYS_IN_MONTH;
+        $proratedFee = round($dailyRate * $cappedDays, 2);
+
+        $this->log('info', 'Prorating first bill for new installation', [
+            'account_no' => $account->account_no,
+            'date_installed' => $installDate->format('Y-m-d'),
+            'billing_date' => $currentDate->format('Y-m-d'),
+            'due_date' => $dueDate->format('Y-m-d'),
+            'days_consumed' => $daysConsumed,
+            'days_charged' => $cappedDays,
+            'monthly_fee' => $monthlyFee,
+            'daily_rate' => round($dailyRate, 2),
+            'prorated_fee' => $proratedFee
+        ]);
+
+        return $proratedFee;
+    }
+
+    /**
+     * Proration owed for reconnections that have not been billed yet.
+     *
+     * Only Active accounts are billed, so a disconnected subscriber is skipped by the
+     * generator entirely. On reconnection the days between the reconnection and the next
+     * billing date are therefore un-billed and are charged here, on top of the plan fee
+     * that covers the following cycle.
+     *
+     * 7-day grace rule: a subscriber who was disconnected for fewer than
+     * RECONNECTION_GRACE_DAYS days is not prorated at all — the outage is absorbed and the
+     * full plan price stands (this method contributes 0.00 for that log).
+     *
+     * @return array{total_prorate:float, pro_rate_start:?string, log_ids:array}
+     */
     public function calculateReconnectionProrate(BillingAccount $account, Carbon $generationDate, float $monthlyFee): array
     {
+        $startedAt = microtime(true);
+
         $unbilledLogs = DB::table('reconnection_logs')
             ->where('account_id', $account->id)
             ->where(function ($q) {
@@ -798,19 +886,20 @@ class EnhancedBillingGenerationServiceWithNotifications
         $totalProrate = 0.00;
         $proRateStart = null;
         $logIds = [];
-        $advanceGenOffset = $this->getAdvanceGenerationDay();
 
         // Calculate cycle bounds relative to the current generation date
         $currentCycleEnd = $this->calculateAdjustedBillingDate($account, $generationDate);
         $currentCycleStart = $currentCycleEnd->copy()->subMonth();
 
-        $totalDaysInCycle = $currentCycleStart->diffInDays($currentCycleEnd);
-        if ($totalDaysInCycle <= 0) {
-            $totalDaysInCycle = self::DAYS_IN_MONTH;
-        }
-
-        // Calculate advance generation cutoff date for the current cycle (e.g. 23rd if cycleEnd is 30th and offset is 7)
-        $advanceGenCutoff = $currentCycleEnd->copy()->subDays($advanceGenOffset > 0 ? $advanceGenOffset : self::DAYS_UNTIL_DUE);
+        // Single lookup of every disconnection this account has on file up to the latest
+        // reconnection, so the per-log "last disconnection before reconnection" match below
+        // costs no additional queries.
+        $latestReconAt = Carbon::parse($unbilledLogs->last()->created_at)->endOfDay();
+        $disconnectionLogs = DB::table('disconnected_logs')
+            ->where('account_id', $account->id)
+            ->where('created_at', '<=', $latestReconAt)
+            ->orderBy('created_at', 'desc')
+            ->get(['id', 'created_at', 'remarks']);
 
         foreach ($unbilledLogs as $log) {
             $reconDate = Carbon::parse($log->created_at)->startOfDay();
@@ -824,46 +913,98 @@ class EnhancedBillingGenerationServiceWithNotifications
                     'reconnection_date' => $reconDate->format('Y-m-d'),
                     'current_cycle_start' => $currentCycleStart->format('Y-m-d')
                 ]);
-            } elseif ($reconDate->betweenIncluded($currentCycleStart, $currentCycleEnd)) {
-                // Log is within the current billing cycle
-                $logIds[] = $log->id;
-
-                if ($reconDate->gt($advanceGenCutoff)) {
-                    // Reconnection happened AFTER advance generation cutoff date (e.g., 24th > 23rd)
-                    $excessDays = $advanceGenCutoff->diffInDays($reconDate);
-                    if ($excessDays > 0 && $excessDays < $totalDaysInCycle) {
-                        $dailyRate = $monthlyFee / $totalDaysInCycle;
-                        $proratedAmount = round($dailyRate * $excessDays, 2);
-                        
-                        $totalProrate += $proratedAmount;
-
-                        if (!$proRateStart || $reconDate->lt(Carbon::parse($proRateStart))) {
-                            $proRateStart = $reconDate->format('Y-m-d');
-                        }
-
-                        $this->log('info', 'Calculated excess days reconnection prorate past advance generation date', [
-                            'account_no' => $account->account_no,
-                            'reconnection_log_id' => $log->id,
-                            'reconnection_date' => $reconDate->format('Y-m-d'),
-                            'advance_gen_cutoff' => $advanceGenCutoff->format('Y-m-d'),
-                            'excess_days' => $excessDays,
-                            'daily_rate' => round($dailyRate, 2),
-                            'prorated_amount' => $proratedAmount
-                        ]);
-                    }
-                } else {
-                    $this->log('info', 'Reconnection occurred on or before advance generation date; covered by standard plan rate', [
-                        'account_no' => $account->account_no,
-                        'reconnection_log_id' => $log->id,
-                        'reconnection_date' => $reconDate->format('Y-m-d'),
-                        'advance_gen_cutoff' => $advanceGenCutoff->format('Y-m-d')
-                    ]);
-                }
+                continue;
             }
+
+            if (!$reconDate->betweenIncluded($currentCycleStart, $currentCycleEnd)) {
+                // Reconnection belongs to a later cycle; leave it unbilled for that run.
+                continue;
+            }
+
+            $logIds[] = $log->id;
+
+            // Latest disconnection that precedes this reconnection.
+            $disconnection = $disconnectionLogs->first(function ($dcLog) use ($log) {
+                return Carbon::parse($dcLog->created_at)->lte(Carbon::parse($log->created_at));
+            });
+
+            if (!$disconnection) {
+                $this->log('warning', 'Reconnection log has no preceding disconnection log; skipping proration', [
+                    'account_no' => $account->account_no,
+                    'reconnection_log_id' => $log->id,
+                    'reconnection_date' => $reconDate->format('Y-m-d')
+                ]);
+                continue;
+            }
+
+            $dcDate = Carbon::parse($disconnection->created_at)->startOfDay();
+            $daysDisconnected = $dcDate->diffInDays($reconDate);
+
+            // 7-day grace rule: short outages are absorbed, the full plan price stands.
+            if ($daysDisconnected < self::RECONNECTION_GRACE_DAYS) {
+                $this->log('info', 'Disconnection shorter than the grace threshold; charging full plan price without proration', [
+                    'account_no' => $account->account_no,
+                    'reconnection_log_id' => $log->id,
+                    'disconnected_log_id' => $disconnection->id,
+                    'disconnection_date' => $dcDate->format('Y-m-d'),
+                    'reconnection_date' => $reconDate->format('Y-m-d'),
+                    'days_disconnected' => $daysDisconnected,
+                    'grace_days' => self::RECONNECTION_GRACE_DAYS
+                ]);
+                continue;
+            }
+
+            // Charge the days the service is actually active between the reconnection and
+            // this cycle's billing date, on the fixed 30-day divisor.
+            $daysActive = min($reconDate->diffInDays($currentCycleEnd), self::DAYS_IN_MONTH);
+
+            if ($daysActive <= 0) {
+                $this->log('info', 'Reconnection falls on the billing date; no active days to prorate', [
+                    'account_no' => $account->account_no,
+                    'reconnection_log_id' => $log->id,
+                    'reconnection_date' => $reconDate->format('Y-m-d'),
+                    'cycle_end' => $currentCycleEnd->format('Y-m-d')
+                ]);
+                continue;
+            }
+
+            $dailyRate = $monthlyFee / self::DAYS_IN_MONTH;
+            $proratedAmount = round($dailyRate * $daysActive, 2);
+            $totalProrate += $proratedAmount;
+
+            if (!$proRateStart || $reconDate->lt(Carbon::parse($proRateStart))) {
+                $proRateStart = $reconDate->format('Y-m-d');
+            }
+
+            $this->log('info', 'Calculated reconnection prorate for active days after a qualifying disconnection', [
+                'account_no' => $account->account_no,
+                'reconnection_log_id' => $log->id,
+                'disconnected_log_id' => $disconnection->id,
+                'disconnection_date' => $dcDate->format('Y-m-d'),
+                'reconnection_date' => $reconDate->format('Y-m-d'),
+                'days_disconnected' => $daysDisconnected,
+                'cycle_end' => $currentCycleEnd->format('Y-m-d'),
+                'days_active' => $daysActive,
+                'monthly_fee' => $monthlyFee,
+                'daily_rate' => round($dailyRate, 2),
+                'prorated_amount' => $proratedAmount
+            ]);
         }
 
+        $totalProrate = round($totalProrate, 2);
+
+        $this->log('info', 'Reconnection proration completed', [
+            'account_no' => $account->account_no,
+            'generation_date' => $generationDate->format('Y-m-d'),
+            'logs_evaluated' => $unbilledLogs->count(),
+            'logs_consumed' => count($logIds),
+            'total_prorate' => $totalProrate,
+            'pro_rate_start' => $proRateStart,
+            'duration_ms' => round((microtime(true) - $startedAt) * 1000, 2)
+        ]);
+
         return [
-            'total_prorate' => round($totalProrate, 2),
+            'total_prorate' => $totalProrate,
             'pro_rate_start' => $proRateStart,
             'log_ids' => $logIds
         ];

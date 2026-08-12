@@ -25,6 +25,7 @@ class Invoice extends Model
         'received_payment',
         'due_date',
         'status',
+        'remarks',
         'payment_portal_log_ref',
         'transaction_id',
         'created_by',

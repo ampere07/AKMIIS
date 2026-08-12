@@ -466,6 +466,18 @@ class EnhancedBillingGenerationService
         return $adjustedDate;
     }
 
+    /**
+     * Monthly fee for this cycle, prorated for a brand-new installation.
+     *
+     * An account that has never been billed still has an empty `balance_update_date`
+     * (the invoice generator stamps it on every run). Such an account is only charged for
+     * the days it actually consumed — from `date_installed` up to and including this
+     * cycle's due date — instead of a full month.
+     *
+     * Days are always divided by the fixed 30-day billing cycle and capped at 30, so an
+     * install that predates the cycle by more than a month can never be over-charged.
+     * Anything that is not a new installation falls back to the full monthly fee.
+     */
     protected function calculateProrateAmount(BillingAccount $account, float $monthlyFee, Carbon $currentDate): float
     {
         if ($account->balance_update_date) {
@@ -473,14 +485,46 @@ class EnhancedBillingGenerationService
         }
 
         if (!$account->date_installed) {
+            Log::info('Account has never been billed but has no install date; charging full monthly fee', [
+                'account_no' => $account->account_no,
+                'monthly_fee' => $monthlyFee
+            ]);
+
             return $monthlyFee;
         }
 
-        $dateInstalled = Carbon::parse($account->date_installed);
-        $daysToCalculate = $this->getDaysBetweenDatesIncludingDueDate($dateInstalled, $currentDate);
+        $installDate = Carbon::parse($account->date_installed)->startOfDay();
+        $dueDate = $currentDate->copy()->startOfDay()->addDays(self::DAYS_UNTIL_DUE);
+
+        // Defensive: a future-dated installation cannot have consumed any days yet.
+        if ($installDate->gt($dueDate)) {
+            Log::warning('Install date is after the computed due date; charging full monthly fee', [
+                'account_no' => $account->account_no,
+                'date_installed' => $installDate->format('Y-m-d'),
+                'due_date' => $dueDate->format('Y-m-d')
+            ]);
+
+            return $monthlyFee;
+        }
+
+        $daysConsumed = $installDate->diffInDays($dueDate) + 1;
+        $cappedDays = min($daysConsumed, self::DAYS_IN_MONTH);
         $dailyRate = $monthlyFee / self::DAYS_IN_MONTH;
-        
-        return round($dailyRate * $daysToCalculate, 2);
+        $proratedFee = round($dailyRate * $cappedDays, 2);
+
+        Log::info('Prorating first bill for new installation', [
+            'account_no' => $account->account_no,
+            'date_installed' => $installDate->format('Y-m-d'),
+            'billing_date' => $currentDate->format('Y-m-d'),
+            'due_date' => $dueDate->format('Y-m-d'),
+            'days_consumed' => $daysConsumed,
+            'days_charged' => $cappedDays,
+            'monthly_fee' => $monthlyFee,
+            'daily_rate' => round($dailyRate, 2),
+            'prorated_fee' => $proratedFee
+        ]);
+
+        return $proratedFee;
     }
 
     protected function calculateChargesAndDeductions(

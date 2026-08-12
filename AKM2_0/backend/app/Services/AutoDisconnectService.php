@@ -52,11 +52,22 @@ class AutoDisconnectService
     private const ADDITIONAL_INVOICE_OFFSET_DAYS = 7;
     private const PRORATE_DIVISOR_DAYS = 30;
 
-    // Due-date offset applied to a generated additional invoice (mirrors the billing generator's DAYS_UNTIL_DUE).
-    private const ADDITIONAL_INVOICE_DUE_OFFSET_DAYS = 7;
-
-    // Marker used in service_charge_logs to identify (and dedupe) auto-generated additional invoices.
+    // Charge type written by the previous grace-period implementation, which created a
+    // separate invoice instead of updating the open one. Retained so historical
+    // service_charge_logs rows remain identifiable by name.
     private const ADDITIONAL_INVOICE_CHARGE_TYPE = 'Prorated Additional Invoice';
+
+    // Remark written to disconnected_logs by processAutoDisconnect(); the grace period charge
+    // selects its candidates by it, so the two must stay in sync.
+    private const AUTO_DC_REMARK = 'Auto DC';
+
+    // Grace period charge markers. The log reference makes the charge idempotent per
+    // disconnected_logs entry (see getChargedGracePeriodLogIds()).
+    private const GRACE_PERIOD_CHARGE_TYPE = 'Grace Period Charge';
+    private const GRACE_PERIOD_LOG_REF = 'DC Log #';
+
+    // Only accounts still in one of these billing statuses are charged the grace period.
+    private const GRACE_PERIOD_STATUSES = ['Inactive', 'Pullout'];
 
     // radius_operation_queue coordinates for operations deferred by an unreachable RADIUS server.
     private const QUEUE_SOURCE_AUTO_DC = 'auto_disconnect';
@@ -406,7 +417,7 @@ class AutoDisconnectService
         $radiusParams = [
             'username' => $username,
             'accountNumber' => $accountNo,
-            'remarks' => 'Auto DC',
+            'remarks' => self::AUTO_DC_REMARK,
             'updatedBy' => 'System'
         ];
 
@@ -946,16 +957,24 @@ class AutoDisconnectService
     }
 
     /**
-     * Grace-period charge: generate prorated additional invoices for accounts whose
-     * additional-invoice generation date is today (7 fixed billing-cycle days after the
-     * DC/restriction date). Invoked by the console command right after processAutoDisconnect().
+     * Grace-period charge: bill the grace period consumed by subscribers who were
+     * auto-disconnected exactly ADDITIONAL_INVOICE_OFFSET_DAYS (7) days ago and are still
+     * disconnected. Invoked by the console command right after processAutoDisconnect().
      *
-     * additionalInvoiceDate = billing day + DC_OFFSET_DAYS + ADDITIONAL_INVOICE_OFFSET_DAYS
-     *                         (all fixed billing-cycle days), normalized to a real date.
+     * Driven by disconnected_logs rather than by billing-cycle arithmetic, so off-cycle
+     * disconnections (manual re-runs, catch-up runs, accounts whose DC did not land on the
+     * computed cycle date) are covered as well:
      *
-     * Coverage is the fixed DC_OFFSET_DAYS (10 billing-cycle days) and proration always
-     * divides the monthly fee by PRORATE_DIVISOR_DAYS (30), never by the real number of
-     * calendar days in the month.
+     *   1. disconnected_logs written on today - 7 whose remarks mark them as 'Auto DC'
+     *   2. the account is still Inactive or Pullout (a subscriber who paid and was
+     *      reconnected is Active again and is never charged)
+     *   3. penalty = (plan price / 30) * disconnection_day coverage days (10 by default)
+     *   4. the penalty is folded into the subscriber's OLDEST open (Unpaid/Partial)
+     *      invoice — no separate invoice is created — and added to the account ledger
+     *
+     * Idempotency: every charge writes a service_charge_logs marker carrying the source
+     * disconnected_logs id, and the invoice remark carries the same reference, so a
+     * re-run on the same day (or a later catch-up run) can never double-charge.
      *
      * @return array{success:bool, charged:int, skipped:int, errors:array, duration:int}
      */
@@ -963,7 +982,7 @@ class AutoDisconnectService
     {
         $this->writeLog("");
         $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
-        $this->writeLog("║         STARTING GRACE PERIOD CHARGE (ADDITIONAL INVOICE)      ║");
+        $this->writeLog("║         STARTING GRACE PERIOD CHARGE (AUTO DC + 7 DAYS)        ║");
         $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
         $startTime = Carbon::now();
         $this->writeLog("Start Time: " . $startTime->format('Y-m-d H:i:s'));
@@ -983,190 +1002,223 @@ class AutoDisconnectService
             return ['success' => true, 'charged' => 0, 'skipped' => 0, 'errors' => [], 'duration' => $duration];
         }
 
-        $totalOffset = $off['grace_offset'];
-        $cycleMap = $this->resolveCycleDaysForTarget($today, $totalOffset);
-        $billingDays = array_keys($cycleMap);
+        // Grace window: disconnections written exactly this many days ago are charged today.
+        $graceDays = $off['grace_after_dc'] > 0 ? $off['grace_after_dc'] : self::ADDITIONAL_INVOICE_OFFSET_DAYS;
+        $targetDcDate = $today->copy()->subDays($graceDays);
 
-        if (empty($billingDays)) {
-            $this->writeLog("[GRACE] No billing-cycle day resolves to an additional-invoice date of today. Nothing to generate.");
-            $duration = Carbon::now()->diffInSeconds($startTime);
-            return ['success' => true, 'charged' => 0, 'skipped' => 0, 'errors' => [], 'duration' => $duration];
-        }
+        // Penalty coverage window (due date -> DC), always divided by the fixed 30-day cycle.
+        $coverageDays = $off['coverage'] > 0 ? $off['coverage'] : self::DC_OFFSET_DAYS;
+        $invoiceRemark = ' | GP Charge (' . $coverageDays . ' Days)';
 
-        $this->writeLog("[GRACE] Billing day(s) whose additional-invoice date is today (billing day + {$totalOffset} cycle days): " . implode(', ', $billingDays));
+        $this->writeLog("[GRACE] Target disconnection date (today - {$graceDays} days): " . $targetDcDate->format('Y-m-d'));
+        $this->writeLog("[GRACE] Coverage days: {$coverageDays} (fixed divisor " . self::PRORATE_DIVISOR_DAYS . ")");
 
-        // Only restricted/disconnected/pulled-out accounts qualify (any status except Active and Pending).
-        $disconnectedStatusIds = DB::table('billing_status')
-            ->whereNotIn('status_name', ['Active', 'Pending'])
-            ->pluck('id')
-            ->toArray();
+        // 1. Auto-DC entries written on the target date. Range-bound rather than DATE() so
+        //    the comparison stays index-friendly.
+        $dcLogs = DB::table('disconnected_logs')
+            ->whereNotNull('account_id')
+            ->whereBetween('created_at', [$targetDcDate->copy()->startOfDay(), $targetDcDate->copy()->endOfDay()])
+            ->where('remarks', 'like', '%' . self::AUTO_DC_REMARK . '%')
+            ->orderBy('id')
+            ->get(['id', 'account_id', 'created_at', 'remarks'])
+            // One grace charge per account per disconnection date, even if the day produced
+            // more than one Auto DC entry for the same subscriber.
+            ->unique('account_id')
+            ->values();
 
-        $latestInvoiceIds = DB::table('invoices')
-            ->select(DB::raw('MAX(id) as id'))
-            ->groupBy('account_no')
-            ->pluck('id');
-
-        $invoices = Invoice::with(['billingAccount.customer', 'billingAccount.plan', 'billingAccount.billingStatus'])
-            ->whereIn('id', $latestInvoiceIds)
-            ->whereIn('status', ['Unpaid', 'Partial'])
-            ->whereHas('billingAccount', function ($query) use ($billingDays, $disconnectedStatusIds) {
-                $query->whereIn('billing_day', $billingDays);
-                if (!empty($disconnectedStatusIds)) {
-                    $query->whereIn('billing_status_id', $disconnectedStatusIds);
-                }
-            })
-            ->get();
-
-        $totalCount = $invoices->count();
-        $this->writeLog("[GRACE] Found {$totalCount} restricted/disconnected account(s) due for an additional invoice today.");
-        $this->writeVerbose("Grace status filter status_ids=(" . implode(', ', $disconnectedStatusIds) . ")");
+        $totalCount = $dcLogs->count();
+        $this->writeLog("[GRACE] Found {$totalCount} '" . self::AUTO_DC_REMARK . "' disconnection log(s) dated " . $targetDcDate->format('Y-m-d') . ".");
 
         if ($totalCount === 0) {
             $duration = Carbon::now()->diffInSeconds($startTime);
+            $this->writeLog("[GRACE] Nothing to charge.");
             return ['success' => true, 'charged' => 0, 'skipped' => 0, 'errors' => [], 'duration' => $duration];
         }
 
+        // 2. Eager-load every account, plan and status touched by this batch in one query.
+        $accounts = BillingAccount::with(['plan', 'billingStatus', 'customer'])
+            ->whereIn('id', $dcLogs->pluck('account_id')->unique()->all())
+            ->get()
+            ->keyBy('id');
+
+        $accountNos = $accounts->pluck('account_no')->filter()->unique()->values()->all();
+
+        // 3. Idempotency: every previously applied grace charge for these accounts, keyed by
+        //    the disconnection log it came from.
+        $alreadyChargedLogIds = $this->getChargedGracePeriodLogIds($accountNos);
+
+        // 4. All open invoices for these accounts, oldest first, in one query.
+        $openInvoices = Invoice::whereIn('account_no', $accountNos)
+            ->whereIn('status', ['Unpaid', 'Partial'])
+            ->orderBy('invoice_date')
+            ->orderBy('id')
+            ->get()
+            ->groupBy('account_no');
+
+        $this->writeVerbose(
+            "Grace batch: accounts=" . $accounts->count() .
+            " open_invoice_accounts=" . $openInvoices->count() .
+            " already_charged_logs=" . count($alreadyChargedLogIds)
+        );
+
         $counter = 0;
-        foreach ($invoices as $invoice) {
+        foreach ($dcLogs as $dcLog) {
             $counter++;
-            $accountNo = $invoice->account_no;
-            $billingAccount = $invoice->billingAccount;
+            $accountStart = microtime(true);
+
+            $billingAccount = $accounts->get($dcLog->account_id);
+            $accountNo = $billingAccount ? (string) $billingAccount->account_no : ('account_id ' . $dcLog->account_id);
 
             $this->writeLog("");
-            $this->writeLog("[GRACE][{$counter}/{$totalCount}] Account: {$accountNo}");
-            $this->writeVerbose("Grace candidate: invoice#{$invoice->id} account={$accountNo} status={$invoice->status} balance=" . number_format(floatval($billingAccount->account_balance ?? 0), 2));
+            $this->writeLog("[GRACE][{$counter}/{$totalCount}] Account: {$accountNo} (DC log #{$dcLog->id})");
 
             if (!$billingAccount) {
-                $this->writeLog("  [SKIP] Billing account not found");
+                $this->writeLog("  [SKIP] Billing account not found for disconnection log #{$dcLog->id}");
                 $skipped++;
                 continue;
             }
 
-            $billingDay = (int) ($billingAccount->billing_day ?? 0);
-            if (!isset($cycleMap[$billingDay])) {
-                $this->writeLog("  [SKIP] Billing day {$billingDay} does not resolve to today");
+            if (isset($alreadyChargedLogIds[$dcLog->id])) {
+                $this->writeLog("  [SKIP] Grace period charge already applied for DC log #{$dcLog->id}");
                 $skipped++;
                 continue;
             }
 
-            $cycle = $cycleMap[$billingDay];
-            $cycleYear = $cycle['cycle_year'];
-            $cycleMonth = $cycle['cycle_month'];
-
-            // Fixed billing-cycle coordinates: billing -> due -> DC -> additional invoice.
-            $normalizedBilling = $this->normalizeBillingCycleDate($cycleYear, $cycleMonth, $billingDay);
-            $due = $this->addFixedBillingCycleDays($cycleYear, $cycleMonth, $billingDay, $off['due_offset']);
-            $dc = $this->addFixedBillingCycleDays($cycleYear, $cycleMonth, $billingDay, $off['dc_offset']);
-            $additional = $this->addFixedBillingCycleDays($dc['year'], $dc['month'], $dc['day'], $off['grace_after_dc']);
-
-            // Dedup guard: generate at most once per account per generation date.
-            $alreadyGenerated = DB::table('service_charge_logs')
-                ->where('account_no', $accountNo)
-                ->where('service_charge_type', self::ADDITIONAL_INVOICE_CHARGE_TYPE)
-                ->whereDate('date_used', $today)
-                ->exists();
-
-            if ($alreadyGenerated) {
-                $this->writeLog("  [SKIP] Additional invoice already generated today for this account");
+            // Still disconnected? A subscriber who settled and was reconnected is Active
+            // again and must not be penalised.
+            $statusName = (string) ($billingAccount->billingStatus?->status_name ?? '');
+            if (!in_array($statusName, self::GRACE_PERIOD_STATUSES, true)) {
+                $this->writeLog("  [SKIP] Status is '{$statusName}' (expected " . implode(' or ', self::GRACE_PERIOD_STATUSES) . ")");
                 $skipped++;
                 continue;
             }
 
-            // Monthly fee comes from the account's plan price.
-            $monthlyFee = floatval($billingAccount->plan->price ?? 0);
-            if ($monthlyFee <= 0) {
-                $this->writeLog("  [SKIP] Monthly fee (plan price) unavailable or zero");
+            $planPrice = floatval($billingAccount->plan?->price ?? 0);
+            if ($planPrice <= 0) {
+                $this->writeLog("  [SKIP] Plan price unavailable or zero");
                 $skipped++;
                 continue;
             }
 
-            // Fixed 30-day proration over the due-date -> DC coverage window (disconnection_day).
-            $coverageDays = $off['coverage'];
-            $dailyRate = $monthlyFee / self::PRORATE_DIVISOR_DAYS;
-            $proratedAmount = round($dailyRate * $coverageDays, 2);
+            // Oldest open invoice carries the penalty; no new invoice is created.
+            $targetInvoice = optional($openInvoices->get($accountNo))->first();
+            if (!$targetInvoice) {
+                $this->writeLog("  [SKIP] No Unpaid/Partial invoice to carry the grace period charge");
+                $skipped++;
+                continue;
+            }
 
-            // Required logging of all computed values.
-            $this->writeLog("  [CALC] Billing Day: {$billingDay}");
-            $this->writeLog("  [CALC] Billing Cycle Year: {$cycleYear}");
-            $this->writeLog("  [CALC] Billing Cycle Month: {$cycleMonth}");
-            $this->writeLog("  [CALC] Normalized Billing Date: " . $normalizedBilling->format('Y-m-d'));
-            $this->writeLog("  [CALC] Due Offset Days: {$off['due_offset']}");
-            $this->writeLog("  [CALC] Normalized Due Date: " . $due['date']->format('Y-m-d'));
-            $this->writeLog("  [CALC] DC Offset Days (from billing day): {$off['dc_offset']}");
-            $this->writeLog("  [CALC] DC Cycle Day: {$dc['day']}");
-            $this->writeLog("  [CALC] DC Cycle Month: {$dc['month']}");
-            $this->writeLog("  [CALC] Normalized DC Date: " . $dc['date']->format('Y-m-d'));
-            $this->writeLog("  [CALC] Additional Invoice Offset Days: {$off['grace_after_dc']}");
-            $this->writeLog("  [CALC] Additional Invoice Cycle Day: {$additional['day']}");
-            $this->writeLog("  [CALC] Additional Invoice Cycle Month: {$additional['month']}");
-            $this->writeLog("  [CALC] Normalized Additional Invoice Date: " . $additional['date']->format('Y-m-d'));
-            $this->writeLog("  [CALC] Monthly Fee: ₱" . number_format($monthlyFee, 2));
-            $this->writeLog("  [CALC] Fixed Daily Rate (fee / " . self::PRORATE_DIVISOR_DAYS . "): ₱" . number_format($dailyRate, 2));
-            $this->writeLog("  [CALC] Coverage Days (due→DC): {$coverageDays}");
-            $this->writeLog("  [CALC] Prorated Amount: ₱" . number_format($proratedAmount, 2));
+            if (str_contains((string) ($targetInvoice->remarks ?? ''), self::GRACE_PERIOD_LOG_REF . $dcLog->id)) {
+                $this->writeLog("  [SKIP] Invoice #{$targetInvoice->id} already carries the charge for DC log #{$dcLog->id}");
+                $skipped++;
+                continue;
+            }
+
+            $dailyRate = $planPrice / self::PRORATE_DIVISOR_DAYS;
+            $chargeAmount = round($dailyRate * $coverageDays, 2);
+
+            $this->writeLog("  [CALC] Disconnection Date: " . Carbon::parse($dcLog->created_at)->format('Y-m-d H:i:s'));
+            $this->writeLog("  [CALC] Billing Status: {$statusName}");
+            $this->writeLog("  [CALC] Plan Price: ₱" . number_format($planPrice, 2));
+            $this->writeLog("  [CALC] Fixed Daily Rate (price / " . self::PRORATE_DIVISOR_DAYS . "): ₱" . number_format($dailyRate, 2));
+            $this->writeLog("  [CALC] Coverage Days: {$coverageDays}");
+            $this->writeLog("  [CALC] Grace Period Charge: ₱" . number_format($chargeAmount, 2));
+            $this->writeLog("  [CALC] Target Invoice: #{$targetInvoice->id} ({$targetInvoice->status}, dated " . Carbon::parse($targetInvoice->invoice_date)->format('Y-m-d') . ")");
 
             DB::beginTransaction();
             try {
-                $invoiceDate = $additional['date']->copy();
-                $dueDate = $invoiceDate->copy()->addDays(self::ADDITIONAL_INVOICE_DUE_OFFSET_DAYS);
+                // Re-read both rows inside the transaction: a batch-loaded model can be
+                // stale, and these amounts are accumulators.
+                $invoiceRow = DB::table('invoices')->where('id', $targetInvoice->id)->lockForUpdate()->first();
+                if (!$invoiceRow) {
+                    throw new Exception("Invoice #{$targetInvoice->id} disappeared before the grace charge was applied");
+                }
 
-                $newInvoiceId = DB::table('invoices')->insertGetId([
-                    'account_no' => $accountNo,
-                    'invoice_date' => $invoiceDate,
-                    'invoice_balance' => $proratedAmount,
-                    'others_and_basic_charges' => 0.00,
-                    'pro_rate' => $proratedAmount,
-                    'pro_rate_start' => $normalizedBilling->toDateString(),
-                    'service_charge' => 0.00,
-                    'rebate' => 0.00,
-                    'discounts' => 0.00,
-                    'staggered' => 0.00,
-                    'total_amount' => $proratedAmount,
-                    'received_payment' => 0.00,
-                    'due_date' => $dueDate,
-                    'status' => 'Unpaid',
-                    'payment_portal_log_ref' => null,
-                    'transaction_id' => null,
-                    'created_by' => 'System',
-                    'updated_by' => 'System',
-                    'created_at' => Carbon::now(),
-                    'updated_at' => Carbon::now(),
-                ]);
+                $accountRow = DB::table('billing_accounts')->where('id', $billingAccount->id)->lockForUpdate()->first();
+                if (!$accountRow) {
+                    throw new Exception("Billing account #{$billingAccount->id} disappeared before the grace charge was applied");
+                }
 
-                // Marker for dedup + audit trail (mirrors the DC fee logging pattern).
-                DB::table('service_charge_logs')->insert([
-                    'account_no' => $accountNo,
-                    'invoice_id' => $newInvoiceId,
-                    'service_charge_type' => self::ADDITIONAL_INVOICE_CHARGE_TYPE,
-                    'service_charge' => $proratedAmount,
-                    'date_used' => Carbon::now(),
-                    'created_at' => Carbon::now(),
-                    'updated_at' => Carbon::now(),
-                    'created_by' => 'System',
-                    'updated_by' => 'System',
-                ]);
+                $newServiceCharge = floatval($invoiceRow->service_charge ?? 0) + $chargeAmount;
+                $newTotalAmount = floatval($invoiceRow->total_amount ?? 0) + $chargeAmount;
+                $newInvoiceBalance = floatval($invoiceRow->invoice_balance ?? 0) + $chargeAmount;
+                $newRemarks = trim((string) ($invoiceRow->remarks ?? '')) . $invoiceRemark . ' ' . self::GRACE_PERIOD_LOG_REF . $dcLog->id;
 
-                $currentBalance = floatval($billingAccount->account_balance);
-                $newBalance = $currentBalance + $proratedAmount;
+                DB::table('invoices')
+                    ->where('id', $invoiceRow->id)
+                    ->update([
+                        'service_charge' => $newServiceCharge,
+                        'total_amount' => $newTotalAmount,
+                        'invoice_balance' => $newInvoiceBalance,
+                        'remarks' => ltrim($newRemarks, ' |'),
+                        'updated_by' => 'System',
+                        'updated_at' => Carbon::now(),
+                    ]);
+
+                $currentBalance = floatval($accountRow->account_balance ?? 0);
+                $newBalance = round($currentBalance + $chargeAmount, 2);
+
                 DB::table('billing_accounts')
-                    ->where('id', $billingAccount->id)
+                    ->where('id', $accountRow->id)
                     ->update([
                         'account_balance' => $newBalance,
                         'updated_by' => 'System',
                         'updated_at' => Carbon::now(),
                     ]);
 
+                // Marker for dedup + audit trail (mirrors the DC fee logging pattern).
+                DB::table('service_charge_logs')->insert([
+                    'account_no' => $accountNo,
+                    'invoice_id' => $invoiceRow->id,
+                    'service_charge_type' => self::GRACE_PERIOD_CHARGE_TYPE,
+                    'service_charge' => $chargeAmount,
+                    'status' => 'Used',
+                    'date_used' => Carbon::now(),
+                    'remarks' => trim($invoiceRemark, ' |') . ' ' . self::GRACE_PERIOD_LOG_REF . $dcLog->id,
+                    'created_at' => Carbon::now(),
+                    'updated_at' => Carbon::now(),
+                    'created_by' => 'System',
+                    'updated_by' => 'System',
+                ]);
+
                 DB::commit();
 
-                $this->writeLog("  [DB] ✓ Additional invoice #{$newInvoiceId} created (₱" . number_format($proratedAmount, 2) . "). New Balance: ₱" . number_format($newBalance, 2));
+                // Keep the in-memory copies consistent for the rest of the run.
+                $billingAccount->account_balance = $newBalance;
+                $targetInvoice->total_amount = $newTotalAmount;
+                $alreadyChargedLogIds[$dcLog->id] = true;
+
+                $elapsedMs = round((microtime(true) - $accountStart) * 1000, 2);
                 $charged++;
+
+                $this->writeLog("  [DB] ✓ Grace period charge ₱" . number_format($chargeAmount, 2) . " applied to invoice #{$invoiceRow->id}. New Balance: ₱" . number_format($newBalance, 2) . " ({$elapsedMs}ms)");
+
+                Log::info('[AUTO DC] Grace period charge applied', [
+                    'account_no' => $accountNo,
+                    'disconnected_log_id' => $dcLog->id,
+                    'disconnection_date' => Carbon::parse($dcLog->created_at)->format('Y-m-d'),
+                    'billing_status' => $statusName,
+                    'plan_price' => $planPrice,
+                    'coverage_days' => $coverageDays,
+                    'charge_amount' => $chargeAmount,
+                    'invoice_id' => $invoiceRow->id,
+                    'invoice_total_amount' => $newTotalAmount,
+                    'account_balance' => $newBalance,
+                    'duration_ms' => $elapsedMs,
+                ]);
 
             } catch (Throwable $e) {
                 DB::rollBack();
-                $this->writeLog("  [ERROR] Failed to generate additional invoice: " . $e->getMessage());
+                $this->writeLog("  [ERROR] Failed to apply grace period charge: " . $e->getMessage());
                 $this->writeLog("  [TRACE] " . $e->getTraceAsString());
-                $errors[] = "Account {$accountNo} (additional invoice): " . $e->getMessage();
+                $errors[] = "Account {$accountNo} (grace period charge): " . $e->getMessage();
                 $skipped++;
+
+                Log::error('[AUTO DC] Grace period charge failed', [
+                    'account_no' => $accountNo,
+                    'disconnected_log_id' => $dcLog->id,
+                    'error' => $e->getMessage(),
+                ]);
             }
         }
 
@@ -1175,7 +1227,49 @@ class AutoDisconnectService
         $this->writeLog("[GRACE] Summary: Charged {$charged}, Skipped {$skipped}, Errors " . count($errors) . ", Duration {$duration}s");
         $this->writeVerbose("Peak memory: " . $this->formatBytes(memory_get_peak_usage(true)));
 
+        Log::info('[AUTO DC] Grace period charge run completed', [
+            'target_dc_date' => $targetDcDate->format('Y-m-d'),
+            'candidates' => $totalCount,
+            'charged' => $charged,
+            'skipped' => $skipped,
+            'errors' => count($errors),
+            'duration_seconds' => $duration,
+        ]);
+
         return ['success' => true, 'charged' => $charged, 'skipped' => $skipped, 'errors' => $errors, 'duration' => $duration];
+    }
+
+    /**
+     * Disconnection-log ids that already carry a grace period charge for the given accounts.
+     *
+     * The source log id is stamped into service_charge_logs.remarks
+     * (e.g. "GP Charge (10 Days) DC Log #1234"), which makes the charge idempotent per
+     * disconnection entry rather than merely per day.
+     *
+     * @param array<int, string> $accountNos
+     * @return array<int, bool> keyed by disconnected_logs.id
+     */
+    private function getChargedGracePeriodLogIds(array $accountNos): array
+    {
+        if (empty($accountNos)) {
+            return [];
+        }
+
+        $charged = [];
+        $pattern = '/' . preg_quote(self::GRACE_PERIOD_LOG_REF, '/') . '(\d+)/';
+
+        $remarks = DB::table('service_charge_logs')
+            ->whereIn('account_no', $accountNos)
+            ->where('service_charge_type', self::GRACE_PERIOD_CHARGE_TYPE)
+            ->pluck('remarks');
+
+        foreach ($remarks as $remark) {
+            if (preg_match($pattern, (string) $remark, $matches)) {
+                $charged[(int) $matches[1]] = true;
+            }
+        }
+
+        return $charged;
     }
 
     /**
