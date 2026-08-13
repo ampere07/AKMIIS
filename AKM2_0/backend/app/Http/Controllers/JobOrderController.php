@@ -1796,27 +1796,32 @@ class JobOrderController extends Controller
 
             $organizationId = $jobOrder->organization_id ?? auth()->user()?->organization_id ?? null;
 
-            // Server placement no longer depends on the barangay. We use the first
-            // radius_config (#1) and, only if it fails 3 times, fall back to the
-            // second radius_config (#2). The account is created on whichever succeeds.
-            $configs = app(RadiusServerResolver::class)->orderedConfigs($organizationId);
-
-            if ($configs->isEmpty()) {
-                \Log::channel('radiusrelated')->error('No RADIUS configuration available for JobOrder: ' . $id, [
-                    'job_order_id'    => $id,
-                    'organization_id' => $organizationId,
-                ]);
-                return [
-                    'success' => false,
-                    'message' => 'No RADIUS server is configured. Please add a RADIUS Config before creating the account.',
-                ];
-            }
-
             if (!$jobOrder->application) {
                 throw new \Exception('Job order must have an associated application');
             }
 
             $application = $jobOrder->application;
+
+            // Server placement is driven by the client's barangay: the account is created
+            // only on the radius_config assigned to that barangay. There is deliberately no
+            // fallback to another server — an unassigned barangay is surfaced as an error
+            // instead of silently placing the account on the wrong RADIUS server.
+            $barangay = $application->barangay ?? '';
+            $city = $application->city ?? '';
+            $radiusConfig = app(RadiusServerResolver::class)->resolveForBarangay($barangay, $city, $organizationId);
+
+            if (!$radiusConfig) {
+                \Log::channel('radiusrelated')->error('No RADIUS server is assigned to this barangay for JobOrder: ' . $id, [
+                    'job_order_id'    => $id,
+                    'barangay'        => $barangay,
+                    'city'            => $city,
+                    'organization_id' => $organizationId,
+                ]);
+                return [
+                    'success' => false,
+                    'message' => 'No RADIUS server is assigned to this barangay. Please assign a RADIUS Config to the barangay before creating the account.',
+                ];
+            }
 
             $credentialsExist = !empty($jobOrder->pppoe_username) && !empty($jobOrder->pppoe_password);
             $pppoeUsername = $jobOrder->pppoe_username;
@@ -1881,75 +1886,59 @@ class JobOrderController extends Controller
                 'password' => $pppoePassword
             ];
 
-            // Try radius_config #1 up to 3 times; if it never succeeds, fall back to #2.
-            $maxAttemptsPerConfig = 3;
-            $positionsToTry = [1];
-            if ($configs->count() >= 2) {
-                $positionsToTry[] = 2;
-            }
-
+            // Create the account on the barangay's assigned server only, retrying up to 3
+            // times. There is no fallback to another radius_config.
+            $maxAttempts = 3;
             $lastFailureWasConnection = false;
 
-            foreach ($positionsToTry as $position) {
-                $radiusConfig = $configs->get($position - 1);
-                if (!$radiusConfig) {
-                    continue;
-                }
+            $radiusUrl = $radiusConfig->ssl_type . '://' . $radiusConfig->ip . ':' . $radiusConfig->port . '/rest/user-manage/user';
+            $radiusUsername = $radiusConfig->username;
+            $radiusPassword = $radiusConfig->password;
 
-                $radiusUrl = $radiusConfig->ssl_type . '://' . $radiusConfig->ip . ':' . $radiusConfig->port . '/rest/user-manage/user';
-                $radiusUsername = $radiusConfig->username;
-                $radiusPassword = $radiusConfig->password;
+            \Log::channel('radiusrelated')->info('RADIUS server selected for JobOrder account creation', [
+                'job_order_id'     => $id,
+                'barangay'         => $barangay,
+                'city'             => $city,
+                'radius_config_id' => $radiusConfig->id,
+                'radius_ip'        => $radiusConfig->ip,
+            ]);
 
-                \Log::channel('radiusrelated')->info('RADIUS server selected for JobOrder account creation', [
-                    'job_order_id'     => $id,
-                    'position'         => $position,
-                    'radius_config_id' => $radiusConfig->id,
-                    'radius_ip'        => $radiusConfig->ip,
-                ]);
+            for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+                try {
+                    $response = Http::withOptions([
+                        'verify' => false
+                    ])
+                    ->withBasicAuth($radiusUsername, $radiusPassword)
+                    ->put($radiusUrl, $payload);
 
-                for ($attempt = 1; $attempt <= $maxAttemptsPerConfig; $attempt++) {
-                    try {
-                        $response = Http::withOptions([
-                            'verify' => false
-                        ])
-                        ->withBasicAuth($radiusUsername, $radiusPassword)
-                        ->put($radiusUrl, $payload);
+                    $statusCode = $response->status();
 
-                        $statusCode = $response->status();
-
-                        if ($statusCode === 204 || $response->successful()) {
-                            $radiusSubmitted = true;
-                            $radiusError = null;
-                            break;
-                        }
-
-                        $radiusError = 'HTTP ' . $statusCode . ': ' . $response->body();
-                        $lastFailureWasConnection = false;
-                        \Log::channel('radiusrelated')->error('RADIUS API Error for JobOrder: ' . $id, [
-                            'status' => $statusCode,
-                            'response' => $response->body(),
-                            'payload' => $payload,
-                            'position' => $position,
-                            'attempt' => $attempt,
-                            'radius_config_id' => $radiusConfig->id,
-                            'radius_ip' => $radiusConfig->ip,
-                        ]);
-                    } catch (\Exception $mikrotikException) {
-                        $radiusError = $mikrotikException->getMessage();
-                        $lastFailureWasConnection = true;
-                        \Log::channel('radiusrelated')->error('RADIUS Connection Exception for JobOrder: ' . $id, [
-                            'error' => $radiusError,
-                            'trace' => $mikrotikException->getTraceAsString(),
-                            'position' => $position,
-                            'attempt' => $attempt,
-                            'radius_config_id' => $radiusConfig->id,
-                            'radius_ip' => $radiusConfig->ip,
-                        ]);
+                    if ($statusCode === 204 || $response->successful()) {
+                        $radiusSubmitted = true;
+                        $radiusError = null;
+                        break;
                     }
-                }
 
-                if ($radiusSubmitted) {
-                    break;
+                    $radiusError = 'HTTP ' . $statusCode . ': ' . $response->body();
+                    $lastFailureWasConnection = false;
+                    \Log::channel('radiusrelated')->error('RADIUS API Error for JobOrder: ' . $id, [
+                        'status' => $statusCode,
+                        'response' => $response->body(),
+                        'payload' => $payload,
+                        'attempt' => $attempt,
+                        'radius_config_id' => $radiusConfig->id,
+                        'radius_ip' => $radiusConfig->ip,
+                    ]);
+                } catch (\Exception $mikrotikException) {
+                    $radiusError = $mikrotikException->getMessage();
+                    $lastFailureWasConnection = true;
+                    \Log::channel('radiusrelated')->error('RADIUS Connection Exception for JobOrder: ' . $id, [
+                        'error' => $radiusError,
+                        'trace' => $mikrotikException->getTraceAsString(),
+                        'attempt' => $attempt,
+                        'radius_config_id' => $radiusConfig->id,
+                        'radius_ip' => $radiusConfig->ip,
+                    ]);
                 }
             }
 

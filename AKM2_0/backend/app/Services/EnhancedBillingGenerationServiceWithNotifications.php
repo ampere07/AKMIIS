@@ -784,10 +784,9 @@ class EnhancedBillingGenerationServiceWithNotifications
     /**
      * First-bill proration for a brand-new installation.
      *
-     * An account that has never been billed still has an empty `balance_update_date`
-     * (the invoice generator stamps it on every run). Such an account must only pay for
-     * the days it actually consumed — from `date_installed` up to and including this
-     * cycle's due date — instead of a full month.
+     * An account that has never been billed has no invoice on record yet. Such an
+     * account must only pay for the days it actually consumed — from `date_installed`
+     * up to and including this cycle's due date — instead of a full month.
      *
      * Days are always divided by the fixed 30-day billing cycle and capped at 30, so an
      * install that predates the cycle by more than a month can never be over-charged.
@@ -797,7 +796,11 @@ class EnhancedBillingGenerationServiceWithNotifications
      */
     protected function calculateNewInstallProrate(BillingAccount $account, float $monthlyFee, Carbon $currentDate): float
     {
-        if (!empty($account->balance_update_date)) {
+        $hasPriorInvoices = Invoice::where('account_no', $account->account_no)
+            ->where('invoice_date', '<', $currentDate->copy()->startOfMonth())
+            ->exists();
+
+        if ($hasPriorInvoices) {
             return $monthlyFee;
         }
 

@@ -15,11 +15,14 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::table('invoices', function (Blueprint $table) {
-            if (!Schema::hasColumn('invoices', 'remarks')) {
+        if (Schema::hasColumn('invoices', 'remarks')) {
+            // Ensure any existing remarks column is nullable to prevent database errors during insert
+            \Illuminate\Support\Facades\DB::statement("ALTER TABLE invoices MODIFY remarks varchar(255) DEFAULT NULL");
+        } else {
+            Schema::table('invoices', function (Blueprint $table) {
                 $table->text('remarks')->nullable()->after('status');
-            }
-        });
+            });
+        }
     }
 
     public function down(): void
