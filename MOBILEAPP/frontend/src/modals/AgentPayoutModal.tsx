@@ -277,7 +277,12 @@ const AgentPayoutForm: React.FC<{
             const payload = {
                 ...formData,
                 proof_of_payment: proofUrl,
-                type: 'agent_payout',
+                // Send the payout type the user actually picked. The option values
+                // (commission / incentives_payout / Bonus_payout / all) map 1:1 onto the
+                // balance branches in CommissionController::storeHistory — a literal
+                // 'agent_payout' matches none of them, so the incentives and bonus
+                // buckets would be left untouched while the balance was debited.
+                type: formData.payout_type,
                 job_order_ids: [],
                 ...(currentUser?.organization_id ? { organization_id: currentUser.organization_id } : {}),
             };

@@ -10,6 +10,7 @@ import { useAgentStore } from '../store/agentStore';
 import ModalUITemplate from '../modals/ui-modal/ModalUITemplate';
 import { Agent, User } from '../types/api';
 import { userService } from '../services/userService';
+import apiClient from '../config/api';
 
 interface ColumnDefinition {
     key: string;
@@ -33,8 +34,36 @@ const payoutColumns: ColumnDefinition[] = [
     { key: 'ref_number', label: 'Ref Number', minWidth: 150 },
     { key: 'total_amount', label: 'Total Amount', minWidth: 150 },
     { key: 'commission_id_list', label: 'Job Orders', minWidth: 200 },
-    { key: 'created_by', label: 'Processed By', minWidth: 150 },
+    // Who raised the record, and who signed it off. Paired deliberately, the
+    // same way the Transaction List shows them.
+    { key: 'created_by', label: 'Created By', minWidth: 180 },
+    { key: 'status', label: 'Status', minWidth: 120 },
+    { key: 'approved_by', label: 'Approved By', minWidth: 180 },
 ];
+
+/**
+ * Reconcile a saved column order with the columns that exist today.
+ *
+ * The order each user arranges is remembered in their browser, so a column
+ * added later would never appear for anyone who has already used the page.
+ * Keys that no longer exist are dropped and new ones appended, which keeps a
+ * user's arrangement intact while still surfacing new columns.
+ */
+const mergeColumnOrder = (saved: string | null, columns: ColumnDefinition[]): string[] => {
+    const valid = columns.map(c => c.key);
+    if (!saved) return valid;
+
+    try {
+        const parsed = JSON.parse(saved);
+        if (!Array.isArray(parsed)) return valid;
+
+        const merged = parsed.filter((key: string) => valid.includes(key));
+        valid.forEach(key => { if (!merged.includes(key)) merged.push(key); });
+        return merged;
+    } catch {
+        return valid;
+    }
+};
 
 interface PaginationControlsProps {
     totalPages: number;
@@ -165,6 +194,9 @@ const AgentPayout: React.FC = () => {
 
     const [selectedRecord, setSelectedRecord] = useState<CommissionData | PayoutHistoryData | null>(null);
     const [showDetails, setShowDetails] = useState(false);
+    // True while an approve/reject request is in flight, so the buttons cannot be
+    // pressed twice and apply a payout more than once.
+    const [approvalPending, setApprovalPending] = useState(false);
     const [agentList, setAgentList] = useState<User[]>([]);
     const [selectedAgentId, setSelectedAgentId] = useState<string | number>('all');
     const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
@@ -182,10 +214,9 @@ const AgentPayout: React.FC = () => {
     const [showAgentPayoutModal, setShowAgentPayoutModal] = useState(false);
     const [payoutAgent, setPayoutAgent] = useState<Agent | null>(null);
     const { agents, fetchAgents } = useAgentStore();
-    const [columnOrderPayouts, setColumnOrderPayouts] = useState<string[]>(() => {
-        const saved = localStorage.getItem('agentPayoutPayoutColumnOrder');
-        return saved ? JSON.parse(saved) : payoutColumns.map(c => c.key);
-    });
+    const [columnOrderPayouts, setColumnOrderPayouts] = useState<string[]>(
+        () => mergeColumnOrder(localStorage.getItem('agentPayoutPayoutColumnOrder'), payoutColumns)
+    );
 
     // Close dropdown on outside click
     useEffect(() => {
@@ -468,6 +499,42 @@ const AgentPayout: React.FC = () => {
     const handleRowClick = (record: CommissionData | PayoutHistoryData) => {
         setSelectedRecord(record);
         setShowDetails(true);
+    };
+
+    /**
+     * Approve or reject a pending payout.
+     *
+     * The approver is never sent from here — the server records the signed-in
+     * user, exactly as it does when a transaction is approved.
+     */
+    const handleApproval = async (record: any, action: 'approve' | 'reject') => {
+        if (approvalPending) return;
+
+        // This screen lists the commission ledger; bonus records are approved
+        // from the Bonus History tab on the Commission page.
+        // Spelled out rather than interpolated, so each endpoint can be found by
+        // searching for it.
+        const url = action === 'approve'
+            ? `/commissions/history/${record.id}/approve`
+            : `/commissions/history/${record.id}/reject`;
+
+        setApprovalPending(true);
+        try {
+            const res = await apiClient.post<{ success: boolean; message?: string }>(url);
+
+            if (!res.data?.success) {
+                throw new Error(res.data?.message || `Failed to ${action} the payout.`);
+            }
+
+            await fetchData();
+            setShowDetails(false);
+            setSelectedRecord(null);
+        } catch (err: any) {
+            const message = err?.response?.data?.message || err?.message || `Failed to ${action} the payout.`;
+            window.alert(message);
+        } finally {
+            setApprovalPending(false);
+        }
     };
 
     const handlePrevious = () => {
@@ -848,11 +915,15 @@ const AgentPayout: React.FC = () => {
                                                         {colKey === 'id' ? (
                                                             <span className={`font-mono font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>{val}</span>
                                                         ) : colKey === 'status' ? (
-                                                            <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${val === 'Paid'
+                                                            // Approval state, using the same reading as the Transaction List:
+                                                            // settled states in green, awaiting action in amber, declined in red.
+                                                            <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${(val === 'Paid' || val === 'Approved')
                                                                 ? isDarkMode ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-green-100 text-green-700'
-                                                                : isDarkMode ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-amber-100 text-amber-700'
+                                                                : val === 'Rejected'
+                                                                    ? isDarkMode ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-red-100 text-red-700'
+                                                                    : isDarkMode ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-amber-100 text-amber-700'
                                                                 }`}>
-                                                                {val}
+                                                                {val || 'Pending'}
                                                             </span>
                                                         ) : colKey === 'type' ? (
                                                             <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${row.type === 'incentives_payout'
@@ -925,6 +996,9 @@ const AgentPayout: React.FC = () => {
                         data={selectedRecord}
                         type="payouts"
                         isMobile={isMobile}
+                        approvalPending={approvalPending}
+                        onApprove={(record) => handleApproval(record, 'approve')}
+                        onReject={(record) => handleApproval(record, 'reject')}
                         onClose={() => { setShowDetails(false); setSelectedRecord(null); }}
                         onPrevious={currentData.findIndex(r => r.id === (selectedRecord as any).id) > 0 ? handlePrevious : undefined}
                         onNext={currentData.findIndex(r => r.id === (selectedRecord as any).id) < currentData.length - 1 ? handleNext : undefined}

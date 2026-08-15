@@ -57,6 +57,13 @@ class JobOrder extends Model
         'organization_id',
         'technicians',
         'commission_status',
+        // What this job order settled with its referring agent, and the rates
+        // it settled at. Snapshots: an administrator changing either setting
+        // later must not restate a job order already paid.
+        'commission_value',
+        'incentive_value',
+        'agent_paid_at',
+        'agent_paid_to',
     ];
 
     protected $dates = [
@@ -73,6 +80,10 @@ class JobOrder extends Model
         'date_installed' => 'datetime',
         'organization_id' => 'integer',
         'technicians' => 'array',
+        'commission_value' => 'decimal:2',
+        'incentive_value' => 'decimal:2',
+        'agent_paid_at' => 'datetime',
+        'agent_paid_to' => 'integer',
     ];
 
     public function application()

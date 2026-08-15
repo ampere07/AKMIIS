@@ -22,6 +22,9 @@ class AgentBonusHistory extends Model
         'updated_by',
         'approve_by',
         'organization_id',
+        // Approval state, mirroring transactions: Pending / Approved / Rejected.
+        // A bonus only moves the agent's balance once it reaches Approved.
+        'status',
     ];
 
     // created_at is defaulted by the DB (CURRENT_TIMESTAMP); updated_at is set manually.

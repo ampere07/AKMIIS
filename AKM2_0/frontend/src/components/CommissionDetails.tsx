@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  X, Info, ExternalLink, Receipt, CheckCircle,
-  ChevronRight, ChevronLeft, DollarSign, Calendar,
-  User, Hash, MessageSquare, Image as ImageIcon
+    X, Info, ExternalLink, Receipt, CheckCircle,
+    ChevronRight, ChevronLeft, DollarSign, Calendar,
+    User, Hash, MessageSquare, Image as ImageIcon
 } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { CommissionData, PayoutHistoryData } from '../types/commission';
@@ -14,10 +14,17 @@ interface CommissionDetailsProps {
     onPrevious?: () => void;
     onNext?: () => void;
     isMobile?: boolean;
+    /** Approve the record on screen. Omitted when the viewer may not approve. */
+    onApprove?: (record: any) => void;
+    /** Reject the record on screen. Omitted when the viewer may not approve. */
+    onReject?: (record: any) => void;
+    /** True while an approval or rejection is in flight. */
+    approvalPending?: boolean;
 }
 
 const CommissionDetails: React.FC<CommissionDetailsProps> = ({
-    data, type, onClose, onPrevious, onNext, isMobile = false
+    data, type, onClose, onPrevious, onNext, isMobile = false,
+    onApprove, onReject, approvalPending = false
 }) => {
     const [localIsMobile, setLocalIsMobile] = useState<boolean>(window.innerWidth < 768);
     useEffect(() => {
@@ -137,15 +144,14 @@ const CommissionDetails: React.FC<CommissionDetailsProps> = ({
     }, [payout.proof_of_payment, isEarning, type]);
 
     return (
-        <div className={`${
-            activeIsMobile
+        <div className={`${activeIsMobile
                 ? 'fixed inset-0 z-[9999] w-screen h-[100dvh] max-h-[100dvh]'
                 : 'h-full flex flex-col overflow-hidden md:border-l relative w-full md:w-auto transition-all duration-300'
-        } flex flex-col overflow-hidden border-l relative ${isDarkMode
-            ? 'bg-gray-950 border-white border-opacity-30'
-            : 'bg-white border-gray-300'
+            } flex flex-col overflow-hidden border-l relative ${isDarkMode
+                ? 'bg-gray-950 border-white border-opacity-30'
+                : 'bg-white border-gray-300'
             }`} style={!activeIsMobile && window.innerWidth >= 768 ? { width: `${detailsWidth}px` } : undefined}>
-            
+
             {/* Resize Handle */}
             {!activeIsMobile && (
                 <div className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize transition-colors z-50"
@@ -166,12 +172,12 @@ const CommissionDetails: React.FC<CommissionDetailsProps> = ({
 
                 <div className="flex items-center space-x-3">
                     <div className="flex items-center">
-                        <button onClick={onPrevious} disabled={!onPrevious} 
+                        <button onClick={onPrevious} disabled={!onPrevious}
                             className={`p-2 rounded transition-colors ${!onPrevious ? 'opacity-50 cursor-not-allowed' : ''} ${isDarkMode ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'}`}
                             title="Previous Record">
                             <ChevronLeft size={18} />
                         </button>
-                        <button onClick={onNext} disabled={!onNext} 
+                        <button onClick={onNext} disabled={!onNext}
                             className={`p-2 rounded transition-colors ${!onNext ? 'opacity-50 cursor-not-allowed' : ''} ${isDarkMode ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'}`}
                             title="Next Record">
                             <ChevronRight size={18} />
@@ -212,8 +218,49 @@ const CommissionDetails: React.FC<CommissionDetailsProps> = ({
                                 {renderField('Date Processed', new Date(payout.created_at).toLocaleString())}
                                 {renderField('Processed By', payout.created_by)}
                                 {renderField('Agent Name', payout.agent_name)}
+                                {/* Approval, shown the same way as on a transaction. */}
+                                {renderField('Status', (payout as any).status || 'Pending')}
+                                {renderField('Approved By', (payout as any).approved_by || (payout as any).approve_by || 'Not yet approved')}
                                 {renderField('Remarks', payout.remarks || 'No remarks provided')}
-                                
+
+                                {/* Approve / Reject — offered only while the record is
+                                    Pending, and only to a viewer permitted to approve.
+                                    Mirrors the Transaction List, where approving is what
+                                    actually applies the money. */}
+                                {(onApprove || onReject) && ((payout as any).status ?? 'Pending') === 'Pending' && (
+                                    <div className={`mt-5 pt-4 border-t ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+                                        <p className={`text-xs font-bold uppercase tracking-wider mb-2 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                                            Awaiting Approval
+                                        </p>
+                                        <p className={`text-xs mb-3 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                                            The agent&apos;s balance has not been changed yet. Approving applies
+                                            this payout; rejecting closes it without moving any money.
+                                        </p>
+                                        <div className="flex items-center gap-2">
+                                            {onApprove && (
+                                                <button
+                                                    type="button"
+                                                    disabled={approvalPending}
+                                                    onClick={() => onApprove(payout)}
+                                                    className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 transition-colors"
+                                                >
+                                                    {approvalPending ? 'Working…' : 'Approve'}
+                                                </button>
+                                            )}
+                                            {onReject && (
+                                                <button
+                                                    type="button"
+                                                    disabled={approvalPending}
+                                                    onClick={() => onReject(payout)}
+                                                    className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 transition-colors"
+                                                >
+                                                    Reject
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+
                                 <div className="mt-4">
                                     <p className={`text-xs font-bold uppercase tracking-wider mb-2 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>Proof of Payment</p>
                                     {payout.proof_of_payment ? (

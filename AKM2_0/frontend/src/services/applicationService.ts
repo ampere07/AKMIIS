@@ -112,3 +112,15 @@ export const getRelatedDetailsUpdateLogs = async (id: string): Promise<any> => {
     };
   }
 };
+
+export const uploadApplicationImages = async (
+  id: number | string,
+  formData: FormData
+): Promise<{ success?: boolean; message?: string; data?: any }> => {
+  const response = await apiClient.post<{ success?: boolean; message?: string; data?: any }>(
+    `/applications/${id}/upload-images`,
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } }
+  );
+  return response.data;
+};

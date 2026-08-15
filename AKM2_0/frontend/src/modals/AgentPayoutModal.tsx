@@ -158,10 +158,14 @@ const AgentPayoutForm: React.FC<{
 
     const getAgentBalances = (agentObj: any) => {
         const balance = Number(agentObj?.agent_balance?.balance || 0);
+        // What the agent has earned in commission from approved job orders.
+        // Read from commission_value, NOT from `commission` — that column is
+        // the rate one referral pays, a setting rather than a balance.
+        const commission = Number(agentObj?.agent_balance?.commission_value || 0);
         const incentives = Number(agentObj?.agent_balance?.incentives || 0);
         const bonus = Number(agentObj?.agent_balance?.Bonus || agentObj?.agent_balance?.bonus || 0);
-        const total = balance + incentives + bonus;
-        return { balance, incentives, bonus, total };
+        const total = commission + balance + incentives + bonus;
+        return { balance, commission, incentives, bonus, total };
     };
 
     // Auto-fill when agentId changes or isOpen triggers
@@ -212,9 +216,10 @@ const AgentPayoutForm: React.FC<{
                 if (currentAgentId && agents.length > 0) {
                     const selectedAgentObj = agents.find(a => Number(a.id) === Number(currentAgentId));
                     if (selectedAgentObj) {
-                        const { balance, incentives, bonus, total } = getAgentBalances(selectedAgentObj);
+                        const { balance, commission, incentives, bonus, total } = getAgentBalances(selectedAgentObj);
                         let autoAmount = 0;
-                        if (currentPayoutType === 'commission') autoAmount = balance;
+                        if (currentPayoutType === 'commission') autoAmount = commission;
+                        else if (currentPayoutType === 'balance') autoAmount = balance;
                         else if (currentPayoutType === 'incentives_payout') autoAmount = incentives;
                         else if (currentPayoutType === 'Bonus_payout') autoAmount = bonus;
                         else if (currentPayoutType === 'all') autoAmount = total;
@@ -256,10 +261,11 @@ const AgentPayoutForm: React.FC<{
         }
 
         const selectedAgentObj = agents.find(a => Number(a.id) === Number(formData.agent_id));
-        const { balance, incentives, bonus, total } = getAgentBalances(selectedAgentObj);
+        const { balance, commission, incentives, bonus, total } = getAgentBalances(selectedAgentObj);
 
         let maxAvailable = total;
-        if (formData.payout_type === 'commission') maxAvailable = balance;
+        if (formData.payout_type === 'commission') maxAvailable = commission;
+        else if (formData.payout_type === 'balance') maxAvailable = balance;
         else if (formData.payout_type === 'incentives_payout') maxAvailable = incentives;
         else if (formData.payout_type === 'Bonus_payout') maxAvailable = bonus;
         else if (formData.payout_type === 'all') maxAvailable = total;
@@ -295,7 +301,12 @@ const AgentPayoutForm: React.FC<{
             const payload = {
               ...formData,
               proof_of_payment: proofUrl,
-              type: 'agent_payout',
+              // Send the payout type the user actually picked. The option values
+              // (commission / incentives_payout / Bonus_payout / all) map 1:1 onto the
+              // balance branches in CommissionController::storeHistory — a literal
+              // 'agent_payout' matches none of them, so the incentives and bonus
+              // buckets would be left untouched while the balance was debited.
+              type: formData.payout_type,
               job_order_ids: [],
               ...(currentUser?.organization_id ? { organization_id: currentUser.organization_id } : {})
             };
@@ -422,7 +433,10 @@ const AgentPayoutForm: React.FC<{
                         onChange={handleInputChange}
                         className={inputClass}
                     >
-                        <option value="commission">Commission (Balance)</option>
+                        {/* Commission earnings and the spendable balance are
+                            separate buckets, so each is cashed out on its own. */}
+                        <option value="commission">Commission</option>
+                        <option value="balance">Balance</option>
                         <option value="incentives_payout">Incentives</option>
                         <option value="Bonus_payout">Bonus</option>
                         <option value="all">All Balance</option>

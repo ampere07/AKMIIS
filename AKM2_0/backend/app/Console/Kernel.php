@@ -236,6 +236,32 @@ class Kernel extends ConsoleKernel
                  });
 
         // ===================================================================
+        // AGENT REFERRAL INVOICES
+        // ===================================================================
+
+        // One referral invoice per agent team, and one per solo agent, for the
+        // week that has just ended. Runs at 00:00 every Monday in the app
+        // timezone (config/app.php -> Asia/Manila).
+        //
+        // Uses: AgentInvoiceService, AgentInvoicePdfService
+        // Logs: storage/logs/agent-invoices/Agent_Invoices.log
+        //
+        // Safe if it runs late or twice: an owner already invoiced for the week
+        // is skipped, and the database refuses a customer already billed to
+        // them, so a repeat run creates nothing.
+        $schedule->command('cron:generate-agent-invoices')
+                 ->weeklyOn(1, '00:00')
+                 ->timezone(config('app.timezone'))
+                 ->withoutOverlapping()
+                 ->runInBackground()
+                 ->onSuccess(function () {
+                     \Illuminate\Support\Facades\Log::info('Agent invoice generation completed successfully');
+                 })
+                 ->onFailure(function () {
+                     \Illuminate\Support\Facades\Log::error('Agent invoice generation failed');
+                 });
+
+        // ===================================================================
         // TECHNICIAN LIVE LOCATION
         // ===================================================================
         // The stale-location sweep (cron:mark-stale-locations) is invoked directly

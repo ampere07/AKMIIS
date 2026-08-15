@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ModalUITemplate from './ui-modal/ModalUITemplate';
 import apiClient from '../config/api';
-import { User, Camera, X, Loader2 } from 'lucide-react';
+import { User, Camera, X, Loader2, AlertTriangle } from 'lucide-react';
 import SearchableField, { GroupedOption } from '../components/common/SearchableField';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import { transactionService } from '../services/transactionService';
@@ -390,6 +390,21 @@ const CommissionPayoutForm: React.FC<{
             }}
         >
             <div className="space-y-5">
+                {/* Approval notice — matches the Transaction flow, where a record is
+                    saved as Pending and only affects the balance once approved. */}
+                <div className={`flex items-start gap-2 p-3 rounded-lg text-xs border ${isDarkMode
+                    ? 'bg-amber-500/10 border-amber-800/50 text-amber-200'
+                    : 'bg-amber-50 border-amber-200 text-amber-800'}`}
+                >
+                    <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
+                    <span>
+                        <strong className="font-semibold">Requires approval.</strong>{' '}
+                        This record is saved as Pending. The agent&apos;s commission balance
+                        is only updated once it is approved, and the job orders it covers
+                        stay unpaid until then.
+                    </span>
+                </div>
+
                 {/* Agent Selector */}
                 {!agentId && (
                     <SearchableField

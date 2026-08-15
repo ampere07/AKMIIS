@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, List, Router, DollarSign, Receipt, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck } from 'lucide-react';
+import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, List, Router, DollarSign, Receipt, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck, ReceiptText } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
 
@@ -85,6 +85,8 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
 
   const menuItems: MenuItem[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['administrator', 'superadmin'] },
+    // Agent portal landing page — mirrors the mobile app's agent-dashboard tab.
+    { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['agent'] },
     { id: 'live-monitor', label: 'Monitoring', icon: Activity, allowedRoles: ['superadmin'] },
     {
       id: 'billing',
@@ -113,6 +115,13 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     { id: 'lcp-nap-location', label: 'LCP/NAP Location', icon: MapPinned, allowedRoles: ['administrator', 'technician', 'Osp', 'headtech'] },
     { id: 'sms-blast', label: 'SMS Blast', icon: MessageSquare, allowedRoles: ['administrator'] },
     { id: 'reports', label: 'Reports', icon: FileText, allowedRoles: ['administrator', 'superadmin'] },
+    // An agent's own payout/incentive/bonus history. Read-only and scoped server side to
+    // the signed-in agent — same entry the mobile app exposes as "History".
+    { id: 'commission', label: 'History', icon: ReceiptText, allowedRoles: ['agent'] },
+    // An agent's own weekly referral invoices. Scoped server side to their team,
+    // or to themselves when they belong to none, so this entry can never show
+    // another team's documents.
+    { id: 'agent-invoices', label: 'Invoices', icon: FileText, allowedRoles: ['agent'] },
     {
       id: 'agent-group',
       label: 'Agent',
@@ -122,7 +131,11 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
         { id: 'commission', label: 'Pay Out/In', icon: DollarSign, allowedRoles: ['administrator', 'superadmin'] },
         { id: 'team-agent', label: 'Team Agents', icon: Users, allowedRoles: ['administrator', 'superadmin'] },
         { id: 'agent-management', label: 'Agent Management', icon: User, allowedRoles: ['administrator', 'superadmin'] },
-        { id: 'agent-payout', label: 'Agent Payout', icon: DollarSign, allowedRoles: ['administrator', 'superadmin'] }
+        { id: 'agent-payout', label: 'Agent Payout', icon: DollarSign, allowedRoles: ['administrator', 'superadmin'] },
+        // Weekly referral invoices, one per team and one per solo agent. The
+        // page is scoped server side, so an agent reaching it sees only their
+        // own team's invoices.
+        { id: 'agent-invoices', label: 'Invoices', icon: FileText, allowedRoles: ['administrator', 'superadmin'] }
       ]
     },
     {

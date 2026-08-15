@@ -14,12 +14,21 @@ use Throwable;
  *
  * For each agent it counts the agent's COMPLETED ("Done") Job Orders that have
  * not yet been counted, and for every full multiple of the agent's quota it
- * adds the configured `incentives_value` to the agent's `incentives` balance.
+ * pays the configured `incentives_value` for EACH Job Order in that quota:
+ *
+ *     incentive earned = quota x incentives_value
+ *
+ * A quota of 10 with an incentive value of 100 earns 1,000 per completed quota.
  *
  * Each full quota cycle is a "batch". An agent with 20 completed Job Orders and
  * a quota of 10 is awarded 2 batches in one run (10 Job Orders tagged to each),
  * and batch numbers keep incrementing per agent across runs (batch 1, 2, 3, …).
  * Any remainder (< quota) carries over unprocessed to the next run.
+ *
+ * Only Job Orders onboarded on or after `config('agent.start_date')` are in
+ * scope; anything earlier belongs to the period before the scheme and earns
+ * nothing. Achievement progress uses the same date, so the two always agree
+ * about which of an agent's referrals count.
  *
  * Idempotency / no-double-pay is guaranteed two ways:
  *   1. Only Job Orders absent from `agent_incentive_history` are counted.
@@ -40,6 +49,17 @@ use Throwable;
 class AgentIncentiveService
 {
     private string $logName = 'Agent_Incentives';
+
+    /**
+     * The day the agent programme starts counting, or null to count everything.
+     *
+     * Shared with achievement progress, so a referral is either in scope for
+     * both or for neither.
+     */
+    public static function startDate(): ?Carbon
+    {
+        return \App\Support\AgentProgramme::startDate();
+    }
 
     /**
      * Process incentives for every agent.
@@ -166,19 +186,55 @@ class AgentIncentiveService
                 }
             });
 
+        // Referrals onboarded before the programme began earn nothing. Applied
+        // to the base query so they are neither awarded nor reported as skipped
+        // — they are not part of this scheme at all.
+        //
+        // The installation date decides when a referral counts, falling back to
+        // when the job order was raised, exactly as achievement progress decides
+        // it — so an agent's incentive and their achievement count can never
+        // disagree about which referrals are in scope.
+        $startDate = self::startDate();
+        if ($startDate !== null) {
+            $completedBase->whereRaw(
+                \App\Support\AgentProgramme::onboardedAtSql('job_orders') . ' >= ?',
+                [$startDate->format('Y-m-d H:i:s')]
+            );
+            $this->writeLog("  [SCOPE] Counting referrals onboarded on or after {$startDate->format('Y-m-d')}");
+        }
+
         // Total completed (for logging how many are skipped because already processed).
         $totalCompleted = (clone $completedBase)->count();
 
         // Only the COMPLETED job orders NOT yet recorded in history are countable.
-        $jobOrderIds = (clone $completedBase)
+        //
+        // Each carries the incentive value it was approved at. That snapshot is
+        // what the award is built from, so an administrator raising the rate
+        // tomorrow does not restate work already settled at the old one.
+        $countable = (clone $completedBase)
             ->whereNotExists(function ($q) {
                 $q->select(DB::raw(1))
                     ->from('agent_incentive_history as aih')
                     ->whereColumn('aih.job_order_id', 'job_orders.id');
             })
             ->orderBy('job_orders.id', 'asc')
-            ->pluck('job_orders.id')
-            ->all();
+            ->get(['job_orders.id', 'job_orders.incentive_value']);
+
+        $jobOrderIds = [];
+        // job order id => the rate it was approved at.
+        $rateFor = [];
+
+        foreach ($countable as $row) {
+            $id = (int) $row->id;
+            $jobOrderIds[] = $id;
+
+            // A job order approved before the snapshot column existed has no
+            // rate of its own; the agent's current one stands in, which is the
+            // behaviour this cron had before snapshots were introduced.
+            $rateFor[$id] = $row->incentive_value !== null && (float) $row->incentive_value > 0
+                ? (float) $row->incentive_value
+                : $incentiveValue;
+        }
 
         $available        = count($jobOrderIds);
         $alreadyProcessed = max(0, $totalCompleted - $available);
@@ -202,7 +258,28 @@ class AgentIncentiveService
         // Any remainder stays unprocessed and carries over to the next run.
         $processCount  = $cycles * $quota;
         $idsToProcess  = array_slice($jobOrderIds, 0, $processCount);
-        $totalAward    = $cycles * $incentiveValue;
+
+        // The incentive value is what ONE referral earns, so a completed quota
+        // pays for every referral in it: quota x incentive value. A quota of 10
+        // at 100 each earns 1,000, not 100.
+        //
+        // Summed from each job order's own stored rate rather than multiplying
+        // one figure, so a quota made up of referrals approved at different
+        // rates pays what each was actually settled at. Where every job order
+        // carries the same rate this is exactly quota x value.
+        //
+        // This is also what the history records — one row per job order, each
+        // carrying its own value — so the balance agrees with the ledger that
+        // explains it.
+        $awardFor = function (array $ids) use ($rateFor): float {
+            $sum = 0.0;
+            foreach ($ids as $id) {
+                $sum += $rateFor[$id] ?? 0.0;
+            }
+            return round($sum, 2);
+        };
+
+        $totalAward = $awardFor($idsToProcess);
         $awardStr      = number_format($totalAward, 2, '.', ''); // numeric-only, safe for raw SQL
         $now           = Carbon::now();
         $orgId         = $balance->organization_id ?? null;
@@ -216,13 +293,16 @@ class AgentIncentiveService
         $startBatch = $lastBatch + 1;
         $endBatch   = $startBatch + $cycles - 1;
 
-        $this->writeLog("  [CALC] Quota reached x{$cycles} → awarding " . number_format($totalAward, 2) . " (= {$cycles} x " . number_format($incentiveValue, 2) . ") — batch(es) {$startBatch}" . ($cycles > 1 ? "-{$endBatch}" : ""));
+        $this->writeLog("  [CALC] Quota reached x{$cycles} → awarding " . number_format($totalAward, 2)
+            . " (summed from the rate each job order was approved at, {$quota} per batch)"
+            . " — batch(es) {$startBatch}" . ($cycles > 1 ? "-{$endBatch}" : ""));
 
         // Per-cycle detail (auditable, mirrors AutoDisconnect's per-item logging).
         for ($c = 0; $c < $cycles; $c++) {
             $cycleIds     = array_slice($idsToProcess, $c * $quota, $quota);
             $batchNumber  = $startBatch + $c;
-            $this->writeLog("    [BATCH {$batchNumber}] (cycle " . ($c + 1) . "/{$cycles}) +" . number_format($incentiveValue, 2) . " for job order ID(s): " . implode(', ', $cycleIds));
+            $this->writeLog("    [BATCH {$batchNumber}] (cycle " . ($c + 1) . "/{$cycles}) +" . number_format($awardFor($cycleIds), 2)
+                . " (" . count($cycleIds) . " job order(s)) for job order ID(s): " . implode(', ', $cycleIds));
         }
 
         $this->writeLog("  [DB] Recording {$processCount} job order(s) to agent_incentive_history and updating balance...");
@@ -230,7 +310,7 @@ class AgentIncentiveService
         // All-or-nothing per agent: record the ledger rows and bump the balance
         // together. If the history insert collides (UNIQUE job_order_id) the whole
         // award rolls back, so a Job Order can never be paid without being recorded.
-        DB::transaction(function () use ($idsToProcess, $quota, $incentiveValue, $orgId, $now, $balance, $awardStr, $startBatch) {
+        DB::transaction(function () use ($idsToProcess, $quota, $rateFor, $orgId, $now, $balance, $awardStr, $startBatch) {
             $rows = [];
             foreach ($idsToProcess as $index => $jobOrderId) {
                 // Every $quota job orders form one cycle → the next batch number.
@@ -240,7 +320,10 @@ class AgentIncentiveService
                     'job_order_id'    => $jobOrderId,
                     'quota_reached'   => $quota,
                     'batch_number'    => $batchNumber,
-                    'incentive_value' => $incentiveValue,
+                    // The rate this job order was approved at, so the ledger
+                    // explains the amount rather than merely restating today's
+                    // setting.
+                    'incentive_value' => $rateFor[$jobOrderId] ?? 0.0,
                     'organization_id' => $orgId,
                     'processed_at'    => $now,
                     'created_at'      => $now,

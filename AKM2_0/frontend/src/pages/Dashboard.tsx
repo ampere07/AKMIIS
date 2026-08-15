@@ -75,6 +75,9 @@ import TeamAgent from './teamAgent';
 import Roles from './roles';
 import Commission from './Commission';
 import AgentPayout from './AgentPayout';
+import AgentInvoice from './AgentInvoice';
+import DashboardAgent from './DashboardAgent';
+import ApplicationForm from './ApplicationForm';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
 
@@ -102,7 +105,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 if (normalizedRole === 'customer' || String(user.role_id) === '3') {
                     return 'customer-dashboard';
                 }
-                if (normalizedRole === 'technician' || String(user.role_id) === '2' || normalizedRole === 'agent' || String(user.role_id) === '4') {
+                if (normalizedRole === 'agent' || String(user.role_id) === '4') {
+                    return 'agent-dashboard';
+                }
+                if (normalizedRole === 'technician' || String(user.role_id) === '2') {
                     return 'job-order';
                 }
                 if (String(user.role_id) === '7' || normalizedRole === 'superadmin') {
@@ -262,6 +268,16 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                     onNavigate={(section, tab) => handleSectionChange(section, tab)}
                     autoOpenPayModal={customerAutoOpenPayModal}
                 />;
+            // Agent Routes
+            case 'agent-dashboard':
+                return <DashboardAgent onNavigate={handleSectionChange} />;
+            case 'agent-application':
+                return (
+                    <ApplicationForm
+                        onClose={() => handleSectionChange('agent-dashboard')}
+                        onSubmitted={() => handleSectionChange('agent-dashboard')}
+                    />
+                );
             case 'customer-bills':
                 return <Bills initialTab={billsInitialTab} onNavigate={handleSectionChange} />;
             case 'customer-support':
@@ -361,6 +377,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <Commission />;
             case 'agent-payout':
                 return <AgentPayout />;
+            case 'agent-invoices':
+                return <AgentInvoice />;
             // case 'application-visit':
             //     return <ApplicationVisit />;
             case 'location-list':

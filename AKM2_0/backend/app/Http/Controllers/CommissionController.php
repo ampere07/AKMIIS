@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\JobOrder;
 use App\Models\AgentCommissionHistory;
 use App\Models\AgentAchievementClaim;
+use App\Models\AgentAchievementPeriod;
 use App\Models\AgentBonusHistory;
 use App\Models\AgentBalance;
 use App\Models\BillingConfig;
@@ -12,6 +13,7 @@ use App\Models\User;
 use App\Models\AuditTrailLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 
 class CommissionController extends Controller
@@ -173,7 +175,12 @@ class CommissionController extends Controller
                     'commission_id_list' => $item->commission_id_list,
                     'updated_by' => $item->updated_by,
                     'updated_at' => $item->updated_at,
-                    'approved_by' => $item->approved_by,
+                    // Response key stays `approved_by` (the frontend type), but the
+                    // underlying column is `approve_by`.
+                    'approved_by' => $item->approve_by,
+                    // Approval state, matching transactions. Rows written before
+                    // approvals existed are already applied, hence Approved.
+                    'status' => $item->status ?? self::STATUS_APPROVED,
                     'type' => $item->type
                 ];
             });
@@ -186,6 +193,10 @@ class CommissionController extends Controller
                 'data' => $data,
                 'total' => $total,
                 'balance' => $agentBalance ? (float)$agentBalance->balance : 0,
+                // What the agent has earned in commission from approved job
+                // orders. Its own bucket, so the payout screens can cap a
+                // commission cash-out against it.
+                'commission_value' => $agentBalance ? (float)($agentBalance->commission_value ?? 0) : 0,
                 'incentives' => $agentBalance ? (float)$agentBalance->incentives : 0,
                 'bonus' => $agentBalance ? (float)($agentBalance->bonus ?? 0) : 0,
                 'achievement' => $agentBalance ? (float)($agentBalance->achievement ?? 0) : 0,
@@ -236,6 +247,16 @@ class CommissionController extends Controller
             $validated['created_by'] = $user->full_name ?? $user->email_address ?? 'System';
             $validated['organization_id'] = $user->organization_id ?? null;
 
+            // Recorded as Pending, exactly like a transaction. Nothing is applied
+            // to the agent's balance and no job order is marked paid until an
+            // approver accepts it — see approveHistory().
+            $validated['status'] = self::STATUS_PENDING;
+
+            // The job orders this payout covers are stored so approval can mark
+            // them paid later. Re-deriving the set at approval time would risk
+            // covering a different set of referrals than the amount was based on.
+            $validated['job_order_ids'] = $jobOrderIds ? json_encode(array_values($jobOrderIds)) : null;
+
             $history = AgentCommissionHistory::create($validated);
 
             // Audit Trail Log
@@ -251,66 +272,27 @@ class CommissionController extends Controller
                 'updated_by_user' => $userEmail
             ]);
 
-            // Mark all referenced job orders as commission paid
-            if (!empty($jobOrderIds)) {
-                JobOrder::whereIn('id', $jobOrderIds)
-                    ->update(['commission_status' => 'Paid']);
-            }
-
-            // Update the agent's balance (add if incentives, deduct if incentives_payout or commission payout)
-            $agentBalance = AgentBalance::where('agent_id', $validated['agent_id'])->first();
-            if ($agentBalance) {
-                if ($validated['type'] === 'incentives') {
-                    $newBalance = (float)$agentBalance->balance + (float)$validated['total_amount'];
-                    $newIncentives = (float)$agentBalance->incentives + (float)$validated['total_amount'];
-                    $agentBalance->update([
-                        'balance' => $newBalance,
-                        'incentives' => $newIncentives
-                    ]);
-                } elseif ($validated['type'] === 'incentives_payout') {
-                    $newBalance = max(0, (float)$agentBalance->balance - (float)$validated['total_amount']);
-                    $newIncentives = max(0, (float)$agentBalance->incentives - (float)$validated['total_amount']);
-                    $agentBalance->update([
-                        'balance' => $newBalance,
-                        'incentives' => $newIncentives
-                    ]);
-                } elseif ($validated['type'] === 'Bonus') {
-                    $newBalance = (float)$agentBalance->balance + (float)$validated['total_amount'];
-                    $newBonus = (float)($agentBalance->bonus ?? 0) + (float)$validated['total_amount'];
-                    $agentBalance->update([
-                        'balance' => $newBalance,
-                        'bonus' => $newBonus
-                    ]);
-                } elseif ($validated['type'] === 'Bonus_payout') {
-                    $newBalance = max(0, (float)$agentBalance->balance - (float)$validated['total_amount']);
-                    $newBonus = max(0, (float)($agentBalance->bonus ?? 0) - (float)$validated['total_amount']);
-                    $agentBalance->update([
-                        'balance' => $newBalance,
-                        'bonus' => $newBonus
-                    ]);
-                } elseif ($validated['type'] === 'all') {
-                    $newBalance = max(0, (float)$agentBalance->balance - (float)$validated['total_amount']);
-                    $agentBalance->update([
-                        'balance' => $newBalance,
-                        'incentives' => 0,
-                        'bonus' => 0
-                    ]);
-                } else {
-                    $newBalance = max(0, (float)$agentBalance->balance - (float)$validated['total_amount']);
-                    $agentBalance->update(['balance' => $newBalance]);
-                }
-            }
+            // Nothing else happens yet. The agent's balance is untouched and the
+            // job orders stay unpaid until this payout is approved, so a payout
+            // that is never approved leaves no trace on the agent's money.
 
             return response()->json([
                 'success' => true,
-                'message' => $validated['type'] === 'incentives' 
-                    ? 'Incentive recorded successfully' 
-                    : ($validated['type'] === 'incentives_payout' 
-                        ? 'Incentive payout recorded successfully' 
-                        : 'Commission payment recorded successfully'),
+                'message' => $this->pendingMessageFor($validated['type']),
                 'data'    => $history,
-                'updated_job_orders' => count($jobOrderIds),
+                'status'  => self::STATUS_PENDING,
+                'requires_approval'  => true,
+                'updated_job_orders' => 0,
+                'pending_job_orders' => count($jobOrderIds),
             ], 201);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            // ValidationException extends \Exception, so without this it would be
+            // swallowed below and reported as a 500 with no field errors.
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors'  => $e->errors()
+            ], 422);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -377,6 +359,10 @@ class CommissionController extends Controller
                     'updated_by' => $item->updated_by,
                     'updated_at' => $item->updated_at,
                     'approve_by' => $item->approve_by,
+                    // Kept under both spellings so the payout screens can read the
+                    // approver the same way for commission and bonus records.
+                    'approved_by' => $item->approve_by,
+                    'status' => $item->status ?? self::STATUS_APPROVED,
                     'type' => $item->type,
                 ];
             });
@@ -420,6 +406,10 @@ class CommissionController extends Controller
             $validated['created_by'] = $user->full_name ?? $user->email_address ?? 'System';
             $validated['organization_id'] = $user->organization_id ?? null;
 
+            // Recorded as Pending, exactly like a transaction. The agent's bonus
+            // figure is untouched until an approver accepts it — see approveBonus().
+            $validated['status'] = self::STATUS_PENDING;
+
             $history = AgentBonusHistory::create($validated);
 
             // Audit Trail Log
@@ -435,29 +425,24 @@ class CommissionController extends Controller
                 'updated_by_user' => $userEmail
             ]);
 
-            // Update the agent's balance (add if Bonus, deduct if Bonus_payout).
-            $agentBalance = AgentBalance::where('agent_id', $validated['agent_id'])->first();
-            if ($agentBalance) {
-                if ($validated['type'] === 'Bonus') {
-                    $agentBalance->update([
-                        'balance' => (float)$agentBalance->balance + (float)$validated['total_amount'],
-                        'bonus'   => (float)($agentBalance->bonus ?? 0) + (float)$validated['total_amount'],
-                    ]);
-                } elseif ($validated['type'] === 'Bonus_payout') {
-                    $agentBalance->update([
-                        'balance' => max(0, (float)$agentBalance->balance - (float)$validated['total_amount']),
-                        'bonus'   => max(0, (float)($agentBalance->bonus ?? 0) - (float)$validated['total_amount']),
-                    ]);
-                }
-            }
+            // The bonus figure is not moved here. It moves when the record is
+            // approved, so an unapproved bonus never affects the agent's money.
 
             return response()->json([
                 'success' => true,
                 'message' => $validated['type'] === 'Bonus'
-                    ? 'Bonus added successfully'
-                    : 'Bonus payout recorded successfully',
+                    ? 'Bonus submitted successfully. It requires approval before the agent\'s bonus is updated.'
+                    : 'Bonus payout submitted successfully. It requires approval before the agent\'s bonus is updated.',
                 'data'    => $history,
+                'status'  => self::STATUS_PENDING,
+                'requires_approval' => true,
             ], 201);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors'  => $e->errors()
+            ], 422);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -763,30 +748,1238 @@ class CommissionController extends Controller
         }
     }
 
+    /**
+     * Onboarded-referral milestone size and the reward paid out for reaching one.
+     * Kept server side so the reward can never be dictated by the client.
+     */
+    /**
+     * Retired: the single lifetime "30 onboards" milestone, replaced by the
+     * weekly and monthly tiers in config/achievements.php. Kept only so claims
+     * already recorded under it remain readable; nothing awards it any more.
+     */
+    private const ACHIEVEMENT_TARGET = 30;
+    private const ACHIEVEMENT_REWARD = 1500.00;
+
+    /**
+     * Approval states, matching the vocabulary transactions use.
+     *
+     * A payout is recorded as Pending and has no effect on the agent's money.
+     * Approving it applies the movement; rejecting it closes the record without
+     * ever touching a balance. Only a Pending payout can be acted on, so an
+     * approval can never be applied twice.
+     */
+    public const STATUS_PENDING  = 'Pending';
+    public const STATUS_APPROVED = 'Approved';
+    public const STATUS_REJECTED = 'Rejected';
+
+    /** Message shown when a payout has been recorded and is awaiting approval. */
+    private function pendingMessageFor(?string $type): string
+    {
+        $subject = match ($type) {
+            'incentives'        => 'Incentive',
+            'incentives_payout' => 'Incentive payout',
+            'Bonus'             => 'Bonus',
+            'Bonus_payout'      => 'Bonus payout',
+            'all'               => 'Full balance payout',
+            default             => 'Commission payment',
+        };
+
+        return "{$subject} submitted successfully. It requires approval before the agent's balance is updated.";
+    }
+
+    /**
+     * May the signed-in user act on this record?
+     *
+     * Mirrors the transaction rule: a super administrator, or a user without an
+     * organisation of their own, may act on anything; everybody else is confined
+     * to their own organisation.
+     */
+    private function canActOnOrganization($user, $recordOrganizationId): bool
+    {
+        $organizationId = $user->organization_id ?? null;
+        $roleId         = $user->role_id ?? null;
+        $isSuperAdmin   = !$user || $roleId == 7 || !$organizationId;
+
+        if ($isSuperAdmin) {
+            return true;
+        }
+
+        return $recordOrganizationId === null || (int) $recordOrganizationId === (int) $organizationId;
+    }
+
+    /** The identity recorded against an approval or rejection. */
+    private function approverIdentity($user): string
+    {
+        return $user->email_address ?? $user->email ?? 'unknown';
+    }
+
+    /**
+     * Apply a commission-ledger payout to the agent's balances.
+     *
+     * This is the movement that used to happen the moment a payout was saved. It
+     * now runs only when a payout is approved, so an unapproved or rejected
+     * payout never affects the agent's money.
+     *
+     * `balance`, `incentives`, `bonus` and `achievement` are INDEPENDENT columns —
+     * the agent dashboard shows them as separate tiles ("Commission" is the
+     * `balance` column) and adds them up for Total Balance. So each transaction
+     * type only ever moves its own bucket; touching `balance` as well would
+     * double-count the money.
+     */
+    private function applyCommissionMovement(AgentCommissionHistory $history): void
+    {
+        $agentBalance = AgentBalance::where('agent_id', $history->agent_id)->first();
+        if (!$agentBalance) {
+            return;
+        }
+
+        $amount     = (float) $history->total_amount;
+        $balance    = max(0, (float) $agentBalance->balance);
+        // What the agent has earned in commission from approved job orders.
+        // NOT `commission`, which is the rate one referral pays — a setting.
+        $commission = max(0, (float) ($agentBalance->commission_value ?? 0));
+        $incentives = max(0, (float) $agentBalance->incentives);
+        $bonus      = max(0, (float) ($agentBalance->bonus ?? 0));
+
+        if ($history->type === 'incentives') {
+            $agentBalance->update(['incentives' => $incentives + $amount]);
+        } elseif ($history->type === 'incentives_payout') {
+            $agentBalance->update(['incentives' => max(0, $incentives - $amount)]);
+        } elseif ($history->type === 'Bonus') {
+            $agentBalance->update(['bonus' => $bonus + $amount]);
+        } elseif ($history->type === 'Bonus_payout') {
+            $agentBalance->update(['bonus' => max(0, $bonus - $amount)]);
+        } elseif ($history->type === 'balance') {
+            // The spendable balance, kept separate from commission earnings so
+            // each can be paid out on its own.
+            $agentBalance->update(['balance' => max(0, $balance - $amount)]);
+        } elseif ($history->type === 'all') {
+            // Cash out across every bucket: commission first, then balance,
+            // then incentives, then bonus. Paying the full total empties them
+            // all; a partial amount drains them in order rather than wiping the
+            // remainder.
+            $fromCommission = min($amount, $commission);
+            $fromBalance    = min($amount - $fromCommission, $balance);
+            $fromIncentives = min($amount - $fromCommission - $fromBalance, $incentives);
+            $fromBonus      = min($amount - $fromCommission - $fromBalance - $fromIncentives, $bonus);
+
+            $agentBalance->update([
+                'commission_value' => $commission - $fromCommission,
+                'balance'          => $balance - $fromBalance,
+                'incentives'       => $incentives - $fromIncentives,
+                'bonus'            => $bonus - $fromBonus,
+            ]);
+        } else {
+            // 'commission' and anything unrecognised: the commission earnings,
+            // which is where an approved job order credits its payment.
+            $agentBalance->update(['commission_value' => max(0, $commission - $amount)]);
+        }
+    }
+
+    /** The job orders a commission payout settles, as stored when it was raised. */
+    private function jobOrderIdsFor(AgentCommissionHistory $history): array
+    {
+        $stored = $history->job_order_ids;
+
+        if (empty($stored)) {
+            return [];
+        }
+
+        $ids = is_array($stored) ? $stored : json_decode((string) $stored, true);
+
+        return is_array($ids) ? array_values(array_filter(array_map('intval', $ids))) : [];
+    }
+
+    /**
+     * Approve a commission-ledger payout: apply it, and record who approved it.
+     */
+    public function approveHistory(Request $request, $id)
+    {
+        try {
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            DB::beginTransaction();
+
+            $history = AgentCommissionHistory::find($id);
+            if (!$history) {
+                DB::rollBack();
+                return response()->json(['success' => false, 'message' => 'Payout record not found'], 404);
+            }
+
+            if (!$this->canActOnOrganization($user, $history->organization_id)) {
+                DB::rollBack();
+                return response()->json(['success' => false, 'message' => 'Unauthorized access to this payout'], 403);
+            }
+
+            // Only a Pending record can be approved. This is what stops the same
+            // payout being applied to the agent's balance twice.
+            if (($history->status ?? self::STATUS_PENDING) !== self::STATUS_PENDING) {
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Only pending payouts can be approved. This one is ' . strtolower($history->status) . '.'
+                ], 400);
+            }
+
+            $this->applyCommissionMovement($history);
+
+            // The referrals this payout settles are marked paid now, so they can
+            // never be included in a second payout.
+            $jobOrderIds = $this->jobOrderIdsFor($history);
+            if ($jobOrderIds !== []) {
+                JobOrder::whereIn('id', $jobOrderIds)->update(['commission_status' => 'Paid']);
+            }
+
+            $approver = $this->approverIdentity($user);
+
+            $history->forceFill([
+                'status'     => self::STATUS_APPROVED,
+                'approve_by' => $approver,
+                'updated_by' => $approver,
+                'updated_at' => now(),
+            ])->save();
+
+            AuditTrailLog::create([
+                'old_details' => ['status' => self::STATUS_PENDING],
+                'new_details' => [
+                    'type' => 'agent_commission_histories',
+                    'id'   => $history->id,
+                    'data' => $history->toArray(),
+                ],
+                'created_by_user' => $approver,
+                'updated_by_user' => $approver,
+            ]);
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Payout approved successfully',
+                'data'    => $history,
+                'updated_job_orders' => count($jobOrderIds),
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to approve payout',
+                'error'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Reject a commission-ledger payout. No balance is ever touched.
+     */
+    public function rejectHistory(Request $request, $id)
+    {
+        try {
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            $history = AgentCommissionHistory::find($id);
+            if (!$history) {
+                return response()->json(['success' => false, 'message' => 'Payout record not found'], 404);
+            }
+
+            if (!$this->canActOnOrganization($user, $history->organization_id)) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized access to this payout'], 403);
+            }
+
+            if (($history->status ?? self::STATUS_PENDING) !== self::STATUS_PENDING) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Only pending payouts can be rejected. This one is ' . strtolower($history->status) . '.'
+                ], 400);
+            }
+
+            $approver = $this->approverIdentity($user);
+            $reason   = trim((string) $request->input('remarks', ''));
+
+            $history->forceFill([
+                'status'     => self::STATUS_REJECTED,
+                'approve_by' => $approver,
+                'updated_by' => $approver,
+                'updated_at' => now(),
+                'remarks'    => $reason !== ''
+                    ? trim((string) $history->remarks . ' | Rejected: ' . $reason, ' |')
+                    : $history->remarks,
+            ])->save();
+
+            AuditTrailLog::create([
+                'old_details' => ['status' => self::STATUS_PENDING],
+                'new_details' => [
+                    'type' => 'agent_commission_histories',
+                    'id'   => $history->id,
+                    'data' => $history->toArray(),
+                ],
+                'created_by_user' => $approver,
+                'updated_by_user' => $approver,
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Payout rejected. No balance was changed.',
+                'data'    => $history,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to reject payout',
+                'error'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Approve a bonus-ledger record: apply it to the agent's bonus figure.
+     */
+    public function approveBonus(Request $request, $id)
+    {
+        try {
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            DB::beginTransaction();
+
+            $history = AgentBonusHistory::find($id);
+            if (!$history) {
+                DB::rollBack();
+                return response()->json(['success' => false, 'message' => 'Bonus record not found'], 404);
+            }
+
+            if (!$this->canActOnOrganization($user, $history->organization_id)) {
+                DB::rollBack();
+                return response()->json(['success' => false, 'message' => 'Unauthorized access to this bonus record'], 403);
+            }
+
+            if (($history->status ?? self::STATUS_PENDING) !== self::STATUS_PENDING) {
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Only pending bonus records can be approved. This one is ' . strtolower($history->status) . '.'
+                ], 400);
+            }
+
+            // The bonus figure is its own column, independent of the commission
+            // balance — a bonus movement must not touch the commission balance.
+            $agentBalance = AgentBalance::where('agent_id', $history->agent_id)->first();
+            if ($agentBalance) {
+                $amount = (float) $history->total_amount;
+                $bonus  = max(0, (float) ($agentBalance->bonus ?? 0));
+
+                if ($history->type === 'Bonus') {
+                    $agentBalance->update(['bonus' => $bonus + $amount]);
+                } elseif ($history->type === 'Bonus_payout') {
+                    $agentBalance->update(['bonus' => max(0, $bonus - $amount)]);
+                }
+            }
+
+            $approver = $this->approverIdentity($user);
+
+            $history->forceFill([
+                'status'     => self::STATUS_APPROVED,
+                'approve_by' => $approver,
+                'updated_by' => $approver,
+                'updated_at' => now(),
+            ])->save();
+
+            AuditTrailLog::create([
+                'old_details' => ['status' => self::STATUS_PENDING],
+                'new_details' => [
+                    'type' => 'agent_bonus_histories',
+                    'id'   => $history->id,
+                    'data' => $history->toArray(),
+                ],
+                'created_by_user' => $approver,
+                'updated_by_user' => $approver,
+            ]);
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Bonus approved successfully',
+                'data'    => $history,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to approve bonus',
+                'error'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Reject a bonus-ledger record. No balance is ever touched.
+     */
+    public function rejectBonus(Request $request, $id)
+    {
+        try {
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            $history = AgentBonusHistory::find($id);
+            if (!$history) {
+                return response()->json(['success' => false, 'message' => 'Bonus record not found'], 404);
+            }
+
+            if (!$this->canActOnOrganization($user, $history->organization_id)) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized access to this bonus record'], 403);
+            }
+
+            if (($history->status ?? self::STATUS_PENDING) !== self::STATUS_PENDING) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Only pending bonus records can be rejected. This one is ' . strtolower($history->status) . '.'
+                ], 400);
+            }
+
+            $approver = $this->approverIdentity($user);
+            $reason   = trim((string) $request->input('remarks', ''));
+
+            $history->forceFill([
+                'status'     => self::STATUS_REJECTED,
+                'approve_by' => $approver,
+                'updated_by' => $approver,
+                'updated_at' => now(),
+                'remarks'    => $reason !== ''
+                    ? trim((string) $history->remarks . ' | Rejected: ' . $reason, ' |')
+                    : $history->remarks,
+            ])->save();
+
+            AuditTrailLog::create([
+                'old_details' => ['status' => self::STATUS_PENDING],
+                'new_details' => [
+                    'type' => 'agent_bonus_histories',
+                    'id'   => $history->id,
+                    'data' => $history->toArray(),
+                ],
+                'created_by_user' => $approver,
+                'updated_by_user' => $approver,
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Bonus rejected. No balance was changed.',
+                'data'    => $history,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to reject bonus',
+                'error'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /** Roles that may read or act on another agent's records. */
+    private const ADMIN_ROLES = ['admin', 'billing', 'superadmin'];
+
+    private function isAdminUser($user): bool
+    {
+        return in_array(strtolower($user->role->role_name ?? ''), self::ADMIN_ROLES, true);
+    }
+
+    private function ensureAchievementClaimsTable(): void
+    {
+        // Fail-safe for deployed servers that predate the migration.
+        if (\Illuminate\Support\Facades\Schema::hasTable('agent_achievement_claims')) {
+            return;
+        }
+
+        \Illuminate\Support\Facades\Schema::create('agent_achievement_claims', function (\Illuminate\Database\Schema\Blueprint $table) {
+            $table->id();
+            $table->foreignId('agent_id')->constrained('users')->onDelete('cascade');
+            $table->integer('milestone');
+            $table->decimal('amount', 10, 2)->default(1500.00);
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Same tolerant "Referred By" match the web and mobile clients use: an exact email
+     * match, or every word of the agent's name appearing in the referral value.
+     */
+    private function referralBelongsToAgent(?string $referredBy, string $fullName, string $email): bool
+    {
+        // Delegated to the shared rule so incentives, achievements and the
+        // weekly invoices can never disagree about whose referral a customer is.
+        return \App\Support\AgentProgramme::referralBelongsToAgent($referredBy, $fullName, $email);
+    }
+
+    /**
+     * Number of job orders referred by this agent that were successfully onboarded.
+     * "Referred By" lives on the application, so job orders are joined back to it.
+     */
+    /**
+     * The achievement tiers on offer, from config/achievements.php.
+     */
+    public static function achievementTiers(): array
+    {
+        $tiers = config('achievements.tiers', []);
+
+        return is_array($tiers) && $tiers !== [] ? $tiers : [
+            'weekly'  => ['label' => 'Weekly Achievement',  'target' => 25,  'reward' => 1000.0,  'period' => 'weekly'],
+            'monthly' => ['label' => 'Monthly Achievement', 'target' => 100, 'reward' => 15000.0, 'period' => 'monthly'],
+        ];
+    }
+
+    /**
+     * The identifier for the period a date falls in, e.g. "2026-W33" or "2026-08".
+     *
+     * This is what makes a repeating reward claimable once per period: the claim
+     * records the key, so next week's key differs and the tier opens again.
+     */
+    public static function periodKeyFor(string $periodType, ?Carbon $at = null): string
+    {
+        $at = $at ? $at->copy() : Carbon::now();
+
+        return $periodType === 'monthly'
+            ? $at->format('Y-m')
+            : $at->format('o-\WW');   // ISO year + ISO week, so the turn of the year is handled
+    }
+
+    /** The [start, end] dates covered by the period a date falls in. */
+    public static function periodBounds(string $periodType, ?Carbon $at = null): array
+    {
+        $at = $at ? $at->copy() : Carbon::now();
+
+        return $periodType === 'monthly'
+            ? [$at->copy()->startOfMonth(), $at->copy()->endOfMonth()]
+            : [$at->copy()->startOfWeek(), $at->copy()->endOfWeek()];
+    }
+
+    /**
+     * The instant a period rolls over — the moment the tier resets to zero.
+     *
+     * This is the end of the period plus one second: the last second of Sunday
+     * (or of the month) still belongs to the period that is ending. The
+     * dashboards count down to this instant, so the countdown and the figure it
+     * sits beside always change over together.
+     */
+    public static function periodResetsAt(string $periodType, ?Carbon $at = null): Carbon
+    {
+        [, $end] = self::periodBounds($periodType, $at);
+
+        return $end->copy()->addSecond();
+    }
+
+    /** Step back one period from the given moment. */
+    public static function previousPeriodStart(string $periodType, Carbon $at): Carbon
+    {
+        [$start] = self::periodBounds($periodType, $at);
+
+        return $periodType === 'monthly'
+            ? $start->copy()->subMonths(1)
+            : $start->copy()->subWeeks(1);
+    }
+
+    // ── Cycles ──────────────────────────────────────────────────────────────
+    //
+    // A tier normally runs on the calendar: Monday to Sunday, or the 1st to the
+    // end of the month. Claiming a reward ends that cycle on the spot and
+    // starts a fresh one of the same length from the moment of the claim, so an
+    // agent who hits the target on Tuesday carries straight on instead of
+    // waiting out the rest of the week with a full count and nothing to earn.
+    //
+    // The moment of a claim is therefore an ANCHOR, and every cycle after it is
+    // measured from there in whole steps — seven days for weekly, one month for
+    // monthly — until the next claim moves the anchor. An agent who has never
+    // claimed has no anchor and stays on the calendar exactly as before.
+    //
+    // Cycles are identified by where they START, never by where they end. That
+    // is what lets a cycle be cut short by a claim without changing its
+    // identity: the ledger row written when it closes carries the same key it
+    // had while it was running.
+
+    /** Whichever of two moments comes first. */
+    private static function earlier(Carbon $a, Carbon $b): Carbon
+    {
+        return $a->lessThanOrEqualTo($b) ? $a->copy() : $b->copy();
+    }
+
+    /** How far apart two cycles of this tier sit. */
+    private static function advanceCycle(string $periodType, Carbon $from, int $steps): Carbon
+    {
+        return $periodType === 'monthly'
+            // No overflow: a cycle anchored on the 31st lands on the 28th in
+            // February, not on the 3rd of March.
+            ? $from->copy()->addMonthsNoOverflow($steps)
+            : $from->copy()->addDays(7 * $steps);
+    }
+
+    /**
+     * The cycle containing a given moment, honouring any claim that reset the
+     * schedule at or before it.
+     *
+     * A cycle counts from where it starts. Nothing is excluded by the clock:
+     * a referral already paid for is skipped because its id is recorded on the
+     * claim that paid it, which is exact where a time boundary is only a guess.
+     *
+     * @param  array<int, Carbon>  $anchors  claim moments for this tier, ascending
+     * @return array{start: Carbon, end: Carbon, key: string, anchored: bool}
+     */
+    public static function cycleAt(string $periodType, array $anchors, Carbon $at): array
+    {
+        // The most recent claim that had already happened by this moment. Later
+        // claims are ignored, so looking back at an earlier moment reconstructs
+        // the cycle that was actually running then.
+        $anchor = null;
+        foreach ($anchors as $candidate) {
+            if ($candidate->lessThanOrEqualTo($at)) {
+                $anchor = $candidate;
+            } else {
+                break;
+            }
+        }
+
+        if ($anchor === null) {
+            [$start, $end] = self::periodBounds($periodType, $at);
+
+            return [
+                'start'    => $start,
+                'end'      => $end,
+                'key'      => self::periodKeyFor($periodType, $at),
+                'anchored' => false,
+            ];
+        }
+
+        // Step forward from the anchor in whole cycles until one contains $at.
+        // Seeded by arithmetic rather than walked from the start, so an anchor
+        // set long ago costs the same as one set yesterday.
+        if ($periodType === 'monthly') {
+            $steps = max(0, $anchor->diffInMonths($at));
+            while ($steps > 0 && self::advanceCycle($periodType, $anchor, $steps)->greaterThan($at)) {
+                $steps--;
+            }
+            while (self::advanceCycle($periodType, $anchor, $steps + 1)->lessThanOrEqualTo($at)) {
+                $steps++;
+            }
+        } else {
+            $steps = max(0, intdiv($at->getTimestamp() - $anchor->getTimestamp(), 7 * 86400));
+        }
+
+        $start = self::advanceCycle($periodType, $anchor, $steps);
+        $end   = self::advanceCycle($periodType, $anchor, $steps + 1)->subSecond();
+
+        return [
+            'start'    => $start,
+            'end'      => $end,
+            'key'      => self::cycleKey($periodType, $start),
+            'anchored' => true,
+        ];
+    }
+
+    /**
+     * The identifier for a cycle that follows a claim rather than the calendar.
+     *
+     * Distinct from a calendar key ("2026-W33") so the two can never collide,
+     * and built from the cycle's start alone so a cycle cut short by a claim
+     * keeps the identity it had while it was open.
+     */
+    public static function cycleKey(string $periodType, Carbon $start): string
+    {
+        // To the second. Two claims of the same tier inside one minute would
+        // otherwise produce the same key for a cycle and the cycle after it,
+        // leaving the tier looking permanently claimed.
+        return ($periodType === 'monthly' ? 'm@' : 'w@') . $start->format('Ymd-His');
+    }
+
+    /**
+     * Every moment this agent has claimed this tier, ascending — the points at
+     * which their schedule was reset.
+     *
+     * Bounded: only the recent ones matter, since nothing reaches further back
+     * than the closing lookback.
+     *
+     * @return array<int, Carbon>
+     */
+    public function claimAnchors($agent, string $periodType): array
+    {
+        if (!$agent) {
+            return [];
+        }
+
+        try {
+            $rows = AgentAchievementClaim::where('agent_id', $agent->id)
+                ->where('period_type', $periodType)
+                ->whereNotNull('cycle_end')
+                ->orderByDesc('cycle_end')
+                ->limit(self::CLOSE_LOOKBACK_PERIODS * 2)
+                ->pluck('cycle_end');
+        } catch (\Throwable $e) {
+            // A server that predates the cycle columns has no anchors, which
+            // simply leaves every tier on the calendar.
+            return [];
+        }
+
+        $anchors = [];
+        foreach ($rows as $value) {
+            if (!$value) {
+                continue;
+            }
+
+            $anchors[] = $value instanceof Carbon ? $value->copy() : Carbon::parse($value);
+        }
+
+        // Oldest first, as cycleAt expects.
+        usort($anchors, fn (Carbon $a, Carbon $b) => $a->getTimestamp() <=> $b->getTimestamp());
+
+        return $anchors;
+    }
+
+    /** The cycle a tier is counting right now. */
+    public function currentCycle($agent, string $periodType, ?Carbon $at = null): array
+    {
+        return self::cycleAt($periodType, $this->claimAnchors($agent, $periodType), $at ? $at->copy() : Carbon::now());
+    }
+
+    /**
+     * How many elapsed periods to reach back for when closing.
+     *
+     * An agent who has not been looked at for a while still gets their recent
+     * periods recorded, without an unbounded walk back through history the
+     * first time the ledger is written.
+     */
+    private const CLOSE_LOOKBACK_PERIODS = 12;
+
+    /**
+     * How many past claims to read when working out which referrals are spent.
+     *
+     * Deep enough to cover years of weekly claims, so a referral backdated a
+     * long way still meets the claim that already paid for it.
+     */
+    private const CLAIM_HISTORY_LIMIT = 200;
+
+    private function ensureAchievementPeriodsTable(): void
+    {
+        // Fail-safe for deployed servers that predate the migration.
+        if (\Illuminate\Support\Facades\Schema::hasTable('agent_achievement_periods')) {
+            return;
+        }
+
+        \Illuminate\Support\Facades\Schema::create('agent_achievement_periods', function (\Illuminate\Database\Schema\Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('agent_id')->index();
+            $table->string('period_type', 20);
+            $table->string('period_key', 20);
+            $table->date('period_start')->nullable();
+            $table->date('period_end')->nullable();
+            $table->integer('target')->default(0);
+            $table->integer('onboarded')->default(0);
+            $table->boolean('reached')->default(false);
+            $table->boolean('claimed')->default(false);
+            $table->unsignedBigInteger('claim_id')->nullable();
+            $table->decimal('reward_paid', 12, 2)->default(0);
+            $table->integer('carried_over')->default(0);
+            $table->timestamp('closed_at')->nullable();
+            $table->string('closed_by')->nullable();
+            $table->string('closed_reason', 20)->nullable();
+            $table->unsignedBigInteger('organization_id')->nullable()->index();
+            $table->timestamps();
+            $table->unique(['agent_id', 'period_type', 'period_key'], 'agent_period_unique');
+        });
+    }
+
+    /**
+     * Record every achievement period that has ended and is not yet on file.
+     *
+     * A reset is not an event the application performs — the count is derived
+     * from the referrals inside the current period, so it returns to zero on its
+     * own when the period turns. That leaves nothing to audit afterwards, which
+     * is what this closes: as each period ends, its final count is written down
+     * alongside the fact that nothing was carried forward.
+     *
+     * Called whenever an agent's achievements are read, and by the scheduled
+     * command for agents nobody has looked at. Attempting a closure that is
+     * already recorded is normal and does nothing — the unique key decides who
+     * wrote it, so two callers racing cannot produce two audit entries.
+     *
+     * Never allowed to break the caller: a dashboard must still load if the
+     * ledger cannot be written.
+     *
+     * @return array<int, AgentAchievementPeriod> the closures written by this call
+     */
+    public function closeElapsedPeriods($agent, ?Carbon $at = null, string $closedBy = 'System'): array
+    {
+        if (!$agent) {
+            return [];
+        }
+
+        try {
+            $this->ensureAchievementPeriodsTable();
+        } catch (\Throwable $e) {
+            Log::warning('[Achievements] Could not prepare the period ledger: ' . $e->getMessage());
+            return [];
+        }
+
+        $now    = $at ? $at->copy() : Carbon::now();
+        $closed = [];
+
+        foreach (self::achievementTiers() as $key => $tier) {
+            $periodType = $tier['period'] ?? $key;
+            $target     = (int) ($tier['target'] ?? 0);
+            $anchors    = $this->claimAnchors($agent, $periodType);
+
+            // Walk back one cycle at a time from the one currently running. The
+            // current cycle is still open, so it is never closed here.
+            //
+            // Reconstructed through cycleAt rather than by stepping a fixed
+            // period, because a claim may have moved the schedule partway
+            // through: the cycles behind an anchor are calendar cycles and the
+            // ones after it are not.
+            $cursor = $this->currentCycle($agent, $periodType, $now)['start']->copy()->subSecond();
+
+            for ($i = 0; $i < self::CLOSE_LOOKBACK_PERIODS; $i++) {
+                $cycle = self::cycleAt($periodType, $anchors, $cursor);
+
+                // Already recorded — and so is everything before it, since
+                // closures are written newest-first as each cycle ends.
+                $exists = AgentAchievementPeriod::where('agent_id', $agent->id)
+                    ->where('period_type', $periodType)
+                    ->where('period_key', $cycle['key'])
+                    ->exists();
+
+                if ($exists) {
+                    break;
+                }
+
+                $record = $this->closeOnePeriod(
+                    $agent, $periodType, $cycle['key'], $cycle['start'], $cycle['end'],
+                    $target, $closedBy, 'period_ended'
+                );
+
+                if ($record) {
+                    $closed[] = $record;
+                }
+
+                $cursor = $cycle['start']->copy()->subSecond();
+            }
+        }
+
+        return $closed;
+    }
+
+    /**
+     * Write one period's closing record, and the audit entry that goes with it.
+     *
+     * The audit entry is a before-and-after pair: what the period finished on,
+     * and what the period after it opened on. The second is always zero, which
+     * is the point — it shows the count did not follow the agent forward.
+     */
+    /**
+     * Record the closure of a cycle that a claim has just ended.
+     *
+     * Kept apart from the claim's own transaction: the reward is already paid
+     * and the balance already moved, so a ledger or audit failure must not undo
+     * any of that. If this does fail, the next dashboard load closes the cycle
+     * anyway — by then its end has passed, so the ordinary elapsed-period walk
+     * picks it up.
+     */
+    private function closeClaimedCycle($agent, string $periodType, string $periodKey, Carbon $from, Carbon $claimedAt, int $target, string $closedBy, bool $endedEarly): void
+    {
+        try {
+            $this->ensureAchievementPeriodsTable();
+
+            $this->closeOnePeriod(
+                $agent, $periodType, $periodKey, $from, $claimedAt->copy(),
+                $target, $closedBy, $endedEarly ? 'claimed_early' : 'period_ended'
+            );
+        } catch (\Throwable $e) {
+            Log::warning("[Achievements] Claimed {$periodType} {$periodKey} for agent {$agent->id} but could not record the closure: " . $e->getMessage());
+        }
+    }
+
+    private function closeOnePeriod(
+        $agent,
+        string $periodType,
+        string $periodKey,
+        Carbon $from,
+        Carbon $to,
+        int $target,
+        string $closedBy,
+        string $reason = 'period_ended'
+    ): ?AgentAchievementPeriod {
+        try {
+            // Referrals spent on OTHER cycles are skipped; this cycle's own
+            // claim is not, or recounting it would report zero instead of the
+            // figure it was claimed on.
+            $onboarded = $this->countOnboardedReferrals(
+                $agent,
+                $from,
+                $to,
+                $this->claimedJobOrderIds($agent, $periodType, $periodKey)
+            );
+
+            $claim = AgentAchievementClaim::where('agent_id', $agent->id)
+                ->where('period_type', $periodType)
+                ->where('period_key', $periodKey)
+                ->first();
+
+            $record = AgentAchievementPeriod::create([
+                'agent_id'     => $agent->id,
+                'period_type'  => $periodType,
+                'period_key'   => $periodKey,
+                'period_start' => $from->format('Y-m-d'),
+                'period_end'   => $to->format('Y-m-d'),
+                'target'       => $target,
+                'onboarded'    => $onboarded,
+                'reached'      => $target > 0 && $onboarded >= $target,
+                'claimed'      => $claim !== null,
+                'claim_id'     => $claim->id ?? null,
+                'reward_paid'  => $claim ? (float) $claim->amount : 0,
+                // Stated, not implied.
+                'carried_over' => 0,
+                'closed_at'    => Carbon::now(),
+                'closed_by'    => $closedBy,
+                'closed_reason'=> $reason,
+                'organization_id' => $agent->organization_id ?? null,
+            ]);
+        } catch (\Illuminate\Database\QueryException $e) {
+            // Another request closed this period first. That is the expected
+            // outcome of a race, not a failure — the period is on file either way.
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning("[Achievements] Could not close {$periodType} {$periodKey} for agent {$agent->id}: " . $e->getMessage());
+            return null;
+        }
+
+        // The cycle that takes over, resolved the same way the dashboard will
+        // resolve it — so the audit names the period the agent actually sees
+        // next, whether the schedule stayed on the calendar or a claim moved it.
+        $opensAt = $to->copy()->addSecond();
+        $next    = self::cycleAt($periodType, $this->claimAnchors($agent, $periodType), $opensAt);
+
+        $earlyClaim = $reason === 'claimed_early';
+        $note = $earlyClaim
+            ? "{$periodType} reward claimed early on {$to->format('Y-m-d H:i')}, ending {$periodKey} "
+              . "at {$onboarded} onboard(s). A fresh cycle {$next['key']} starts immediately at 0 — "
+              . "nothing was carried over, and the reward just claimed does not apply to it."
+            : "{$periodType} progress reset to 0 for {$next['key']}; "
+              . "{$onboarded} onboard(s) from {$periodKey} were not carried over"
+              . ($record->claimed ? ' and its claimed reward does not carry over either' : '');
+
+        try {
+            AuditTrailLog::create([
+                'old_details' => [
+                    'type'        => 'agent_achievement_periods',
+                    'event'       => 'period_closed',
+                    'reason'      => $reason,
+                    'agent_id'    => $agent->id,
+                    'period_type' => $periodType,
+                    'period_key'  => $periodKey,
+                    'period_start'=> $from->format('Y-m-d H:i:s'),
+                    'period_end'  => $to->format('Y-m-d H:i:s'),
+                    'ended_early' => $earlyClaim,
+                    'target'      => $target,
+                    'onboarded'   => $onboarded,
+                    'reached'     => $record->reached,
+                    'claimed'     => $record->claimed,
+                    'claim_id'    => $record->claim_id,
+                    'reward_paid' => (float) $record->reward_paid,
+                ],
+                'new_details' => [
+                    'type'        => 'agent_achievement_periods',
+                    'event'       => 'period_opened',
+                    'reason'      => $reason,
+                    'agent_id'    => $agent->id,
+                    'period_type' => $periodType,
+                    'period_key'  => $next['key'],
+                    'period_start'=> $next['start']->format('Y-m-d H:i:s'),
+                    'period_end'  => $next['end']->format('Y-m-d H:i:s'),
+                    // Set by a claim rather than by the calendar, which is why
+                    // the new cycle does not begin on a Monday or the 1st.
+                    'anchored'    => $next['anchored'],
+                    // The whole purpose of the record: the new cycle starts from
+                    // nothing, and neither the count nor the claim came with it.
+                    'onboarded'    => 0,
+                    'carried_over' => 0,
+                    'claimed'      => false,
+                    'target'       => $target,
+                    'note'         => $note,
+                ],
+                'created_by_user' => $closedBy,
+                'updated_by_user' => $closedBy,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning("[Achievements] Closed {$periodType} {$periodKey} for agent {$agent->id} but could not write the audit entry: " . $e->getMessage());
+        }
+
+        return $record;
+    }
+
+    private function countOnboardedReferrals($agent, ?Carbon $from = null, ?Carbon $to = null, array $exclude = []): int
+    {
+        return count($this->onboardedReferralIds($agent, $from, $to, $exclude));
+    }
+
+    /**
+     * The job orders this agent onboarded within a span, as their ids.
+     *
+     * Ids rather than a bare total because a reward has to record exactly which
+     * referrals earned it. Progress is worked out from when a referral was
+     * onboarded, so without that record a job order whose installation date is
+     * later edited backwards would drop into a cycle it has already been paid
+     * for and earn its reward a second time. `$exclude` carries the ids that
+     * have already been claimed, and they are skipped whatever their date says.
+     *
+     * @param  array<int, int|string>  $exclude  job order ids already claimed
+     * @return array<int, int>
+     */
+    private function onboardedReferralIds($agent, ?Carbon $from = null, ?Carbon $to = null, array $exclude = []): array
+    {
+        $first = trim((string) ($agent->first_name ?? ''));
+        $last  = trim((string) ($agent->last_name ?? ''));
+        $email = trim((string) ($agent->email_address ?? ''));
+        $fullName = trim($first . ' ' . $last);
+
+        if ($fullName === '' && $email === '') {
+            return [];
+        }
+
+        // Keyed for a straight lookup rather than a scan per candidate row.
+        $skip = [];
+        foreach ($exclude as $id) {
+            $skip[(int) $id] = true;
+        }
+
+        // Narrow the candidate set in SQL, then apply the exact tolerant match in PHP.
+        $query = DB::table('job_orders as jo')
+            ->join('applications as a', 'jo.application_id', '=', 'a.id')
+            ->whereIn(DB::raw('LOWER(TRIM(jo.onsite_status))'), ['done', 'completed'])
+            ->whereNotNull('a.referred_by');
+
+        // Referrals onboarded before the programme began are history: they add
+        // nothing to weekly or monthly progress, however recent the cycle being
+        // counted. Applied unconditionally, so a count with no date bounds is
+        // scoped too — the same date the incentive cron uses, so an agent's
+        // achievement progress and their incentive always agree about which of
+        // their referrals count.
+        $completedAt = \App\Support\AgentProgramme::onboardedAtSql('jo');
+        $startDate   = \App\Support\AgentProgramme::startDate();
+        if ($startDate !== null) {
+            $query->whereRaw("{$completedAt} >= ?", [$startDate->format('Y-m-d H:i:s')]);
+        }
+
+        // Weekly and monthly tiers count only what was onboarded inside the
+        // period. The installation date is the moment the referral counts —
+        // falling back to when the job order was raised where it is not set, so
+        // a completed referral is never silently uncounted.
+        if ($from !== null && $to !== null) {
+            // Bounded to the second, not to the day. A cycle that begins when a
+            // reward is claimed starts partway through a day, and the referrals
+            // that earned the claim must not be counted again in the cycle that
+            // follows it. Calendar cycles are unaffected: they already begin at
+            // 00:00:00 and end at 23:59:59.
+            $query->whereRaw("{$completedAt} >= ?", [$from->format('Y-m-d H:i:s')])
+                  ->whereRaw("{$completedAt} <= ?", [$to->format('Y-m-d H:i:s')]);
+        }
+
+        $rows = $query
+            ->where(function ($q) use ($first, $last, $email) {
+                if ($email !== '') {
+                    $q->orWhere('a.referred_by', $email);
+                }
+                if ($first !== '' || $last !== '') {
+                    $q->orWhere(function ($inner) use ($first, $last) {
+                        if ($first !== '') {
+                            $inner->where('a.referred_by', 'like', '%' . $first . '%');
+                        }
+                        if ($last !== '') {
+                            $inner->where('a.referred_by', 'like', '%' . $last . '%');
+                        }
+                    });
+                }
+            })
+            ->select('jo.id as job_order_id', 'a.referred_by as referred_by')
+            ->get();
+
+        $ids = [];
+        foreach ($rows as $row) {
+            $jobOrderId = (int) (is_array($row) ? ($row['job_order_id'] ?? 0) : ($row->job_order_id ?? 0));
+
+            // Already earned its reward for this tier — its date is irrelevant.
+            if ($jobOrderId > 0 && isset($skip[$jobOrderId])) {
+                continue;
+            }
+
+            $referredBy = is_array($row) ? ($row['referred_by'] ?? null) : ($row->referred_by ?? null);
+            if ($this->referralBelongsToAgent($referredBy, $fullName, $email)) {
+                $ids[] = $jobOrderId;
+            }
+        }
+
+        return $ids;
+    }
+
+    /**
+     * Job orders that have already earned this tier's reward for this agent.
+     *
+     * Scoped to one tier: a referral that earned a weekly reward can still earn
+     * a monthly one, because those are separate achievements. Scoped to one
+     * agent for the same reason a claim is.
+     *
+     * `$exceptPeriodKey` leaves out one cycle's own claim, so recounting the
+     * cycle a reward was taken in still reports the figure it was taken on
+     * rather than zero.
+     *
+     * @return array<int, int>
+     */
+    private function claimedJobOrderIds($agent, string $periodType, ?string $exceptPeriodKey = null): array
+    {
+        if (!$agent) {
+            return [];
+        }
+
+        try {
+            $claims = AgentAchievementClaim::where('agent_id', $agent->id)
+                ->where('period_type', $periodType)
+                ->whereNotNull('job_order_ids')
+                ->orderByDesc('id')
+                ->limit(self::CLAIM_HISTORY_LIMIT)
+                ->get(['period_key', 'job_order_ids']);
+        } catch (\Throwable $e) {
+            // A server that predates the column simply has nothing recorded,
+            // which leaves counting exactly as it was before.
+            return [];
+        }
+
+        $ids = [];
+        foreach ($claims as $claim) {
+            if ($exceptPeriodKey !== null && ($claim->period_key ?? null) === $exceptPeriodKey) {
+                continue;
+            }
+
+            $stored = $claim->job_order_ids;
+            if (is_string($stored)) {
+                $stored = json_decode($stored, true);
+            }
+
+            if (is_array($stored)) {
+                foreach ($stored as $id) {
+                    $ids[] = (int) $id;
+                }
+            }
+        }
+
+        return array_values(array_unique($ids));
+    }
+
     public function getAchievements(Request $request)
     {
         try {
-            // Ensure table exists (temporary fail-safe for deployed server)
-            if (!\Illuminate\Support\Facades\Schema::hasTable('agent_achievement_claims')) {
-                \Illuminate\Support\Facades\Schema::create('agent_achievement_claims', function (\Illuminate\Database\Schema\Blueprint $table) {
-                    $table->id();
-                    $table->foreignId('agent_id')->constrained('users')->onDelete('cascade');
-                    $table->integer('milestone');
-                    $table->decimal('amount', 10, 2)->default(1500.00);
-                    $table->timestamps();
-                });
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
 
-            $agentId = $request->input('agent_id');
+            $this->ensureAchievementClaimsTable();
+
+            // Non-admins can only read their own claims.
+            $agentId = $this->isAdminUser($user) ? $request->input('agent_id') : $user->id;
             if (!$agentId) {
                 return response()->json(['success' => false, 'message' => 'Agent ID required'], 400);
             }
 
             $claims = AgentAchievementClaim::where('agent_id', $agentId)->get();
 
+            // The dashboards render the tiers from this response rather than
+            // hardcoding targets and rewards of their own, so web and mobile can
+            // never drift from the configured figures.
+            $agent  = \App\Models\User::find($agentId);
+            $tiers  = [];
+
+            // One reading of the clock for every tier, so the countdowns the
+            // dashboards render are all measured from the same instant.
+            $now = Carbon::now();
+
+            // Any period that has ended since this agent was last looked at is
+            // written to the ledger now, with the audit entry showing what it
+            // finished on and that the next period opened at zero. Reading the
+            // dashboard is what most often notices a rollover first; the
+            // scheduled command covers agents nobody opens.
+            $this->closeElapsedPeriods($agent, $now);
+
+            foreach (self::achievementTiers() as $key => $tier) {
+                $periodType = $tier['period'] ?? $key;
+
+                // The cycle now running. Normally the calendar week or month;
+                // after an early claim, a fresh cycle of the same length
+                // measured from the moment that reward was taken.
+                $cycle     = $this->currentCycle($agent, $periodType, $now);
+                $periodKey = $cycle['key'];
+                $from      = $cycle['start'];
+                $to        = $cycle['end'];
+                $resetsAt  = $to->copy()->addSecond();
+
+                // Counted only up to now, never to the end of a cycle that is
+                // still running. A referral dated ahead of today would otherwise
+                // be credited before it happened — and, once the reward was
+                // claimed on the strength of it, credited a second time in the
+                // cycle it actually falls in.
+                // Referrals that already earned this tier's reward are skipped,
+                // so one cannot be counted again by being backdated into the
+                // cycle now running.
+                $onboarded = $agent
+                    ? $this->countOnboardedReferrals(
+                        $agent,
+                        $cycle['start'],
+                        self::earlier($to, $now),
+                        $this->claimedJobOrderIds($agent, $periodType, $periodKey)
+                    )
+                    : 0;
+                $target    = (int) ($tier['target'] ?? 0);
+
+                $claimed = $claims->first(fn ($c) =>
+                    ($c->period_type ?? null) === $periodType && ($c->period_key ?? null) === $periodKey
+                );
+
+                $tiers[$key] = [
+                    'key'            => $key,
+                    'label'          => $tier['label'] ?? ucfirst($key) . ' Achievement',
+                    'target'         => $target,
+                    'reward'         => (float) ($tier['reward'] ?? 0),
+                    'period_type'    => $periodType,
+                    'period_key'     => $periodKey,
+                    'period_start'   => $from->format('Y-m-d'),
+                    'period_end'     => $to->format('Y-m-d'),
+                    // True when a claim set this cycle going rather than the
+                    // calendar, so the dashboards can say "this cycle" instead
+                    // of "this week" when the two are no longer the same thing.
+                    'anchored'       => $cycle['anchored'],
+                    // The instant this tier rolls over, as an absolute time with
+                    // an offset, so a device in another timezone still counts
+                    // down to the same moment the server resets on.
+                    'resets_at'      => $resetsAt->toIso8601String(),
+                    'resets_in'      => max(0, $resetsAt->getTimestamp() - $now->getTimestamp()),
+                    'onboarded'      => $onboarded,
+                    'remaining'      => max(0, $target - $onboarded),
+                    'progress'       => $target > 0 ? min(1, $onboarded / $target) : 0,
+                    'reached'        => $target > 0 && $onboarded >= $target,
+                    'claimed'        => $claimed !== null,
+                    'claimable'      => $target > 0 && $onboarded >= $target && $claimed === null,
+                ];
+            }
+
             return response()->json([
-                'success' => true,
-                'data' => $claims
+                'success'     => true,
+                'data'        => $claims,
+                'tiers'       => $tiers,
+                // Lets the dashboards correct for a device clock that is wrong,
+                // so a mis-set phone does not count down to the wrong minute.
+                'server_time' => $now->toIso8601String(),
             ]);
         } catch (\Exception $e) {
             return response()->json([
@@ -805,19 +1998,112 @@ class CommissionController extends Controller
                 return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
 
+            $this->ensureAchievementClaimsTable();
+
             $validated = $request->validate([
-                'agent_id'      => 'required|integer',
-                'milestone'     => 'required|integer',
-                'amount'        => 'required|numeric|min:0',
+                'agent_id' => 'nullable|integer',
+                // Which tier is being claimed. `milestone` is still accepted so an
+                // older client keeps working; it is only used to infer the tier.
+                'type'      => 'nullable|string|max:20',
+                'milestone' => 'nullable|integer|min:1',
             ]);
 
-            // Check if already claimed
+            // Non-admins can only claim for themselves, whatever agent_id they send.
+            $isAdmin = $this->isAdminUser($user);
+            $agentId = $isAdmin ? ($validated['agent_id'] ?? $user->id) : $user->id;
+
+            $agent = \App\Models\User::find($agentId);
+            if (!$agent) {
+                return response()->json(['success' => false, 'message' => 'Agent not found'], 404);
+            }
+
+            $tiers    = self::achievementTiers();
+            $tierKey  = strtolower(trim((string) ($validated['type'] ?? '')));
+
+            // An older client sends only a milestone number; match it to the tier
+            // with that target so it still claims the right reward.
+            if (!isset($tiers[$tierKey]) && !empty($validated['milestone'])) {
+                foreach ($tiers as $key => $tier) {
+                    if ((int) ($tier['target'] ?? 0) === (int) $validated['milestone']) {
+                        $tierKey = $key;
+                        break;
+                    }
+                }
+            }
+
+            if (!isset($tiers[$tierKey])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unknown achievement. Available: ' . implode(', ', array_keys($tiers)) . '.'
+                ], 422);
+            }
+
+            $tier       = $tiers[$tierKey];
+            $target     = (int) ($tier['target'] ?? 0);
+            $reward     = (float) ($tier['reward'] ?? 0);
+            $periodType = $tier['period'] ?? $tierKey;
+
+            // The cycle now running for this agent, which is the calendar week
+            // or month unless an earlier claim moved their schedule.
+            $claimedAt  = Carbon::now();
+            $cycle      = $this->currentCycle($agent, $periodType, $claimedAt);
+            $periodKey  = $cycle['key'];
+            $from       = $cycle['start'];
+            $to         = $cycle['end'];
+
+            // Only what was onboarded inside this cycle, and only up to now —
+            // a referral dated later in the cycle has not happened yet and must
+            // not earn a reward before it does.
+            $countTo = self::earlier($to, $claimedAt);
+
+            // The exact job orders this claim would be paid for — recorded on
+            // the claim below so none of them can earn this tier again.
+            $earnedBy  = $this->onboardedReferralIds(
+                $agent,
+                $cycle['start'],
+                $countTo,
+                $this->claimedJobOrderIds($agent, $periodType, $periodKey)
+            );
+            $onboarded = count($earnedBy);
+            if ($onboarded < $target) {
+                return response()->json([
+                    'success' => false,
+                    'message' => "{$tier['label']} not reached yet ({$onboarded} of {$target} onboarded "
+                        . "between {$from->format('M j')} and {$to->format('M j')})."
+                ], 422);
+            }
+
+            // The reward is fixed server side — never taken from the request.
+            //
+            // The claim also carries the span it was earned over. `cycle_end` is
+            // this moment: claiming ends the cycle here rather than at the end
+            // of the calendar week, and it is the anchor the next cycle — and
+            // every cycle after it — is measured from.
+            $validated = [
+                'agent_id'    => $agentId,
+                'milestone'   => $target,
+                'amount'      => $reward,
+                'period_type' => $periodType,
+                'period_key'  => $periodKey,
+                'cycle_start' => $from,
+                'cycle_end'   => $claimedAt,
+                // Stored the same way a commission payout stores the job orders
+                // it covered, so a referral can never earn this tier twice.
+                'job_order_ids' => json_encode(array_values($earnedBy)),
+            ];
+
+            // Claimed once per period, not once ever: the same tier opens again
+            // when the week or month rolls over and the period key changes.
             $exists = AgentAchievementClaim::where('agent_id', $validated['agent_id'])
-                ->where('milestone', $validated['milestone'])
+                ->where('period_type', $periodType)
+                ->where('period_key', $periodKey)
                 ->exists();
 
             if ($exists) {
-                return response()->json(['success' => false, 'message' => 'Milestone already claimed'], 400);
+                return response()->json([
+                    'success' => false,
+                    'message' => "{$tier['label']} has already been claimed for this period."
+                ], 400);
             }
 
             // Start transaction
@@ -829,40 +2115,96 @@ class CommissionController extends Controller
             // 2. Add to agent balance via AgentCommissionHistory logic
             $historyPayload = [
                 'agent_id'      => $validated['agent_id'],
-                'ref_number'    => 'ACHIEVEMENT-ONBOARD-' . $validated['milestone'],
+                'ref_number'    => 'ACHIEVEMENT-' . strtoupper($periodType) . '-' . $periodKey,
                 'total_amount'  => $validated['amount'],
-                'remarks'       => "Achievement Reward for {$validated['milestone']} Onboards",
+                'remarks'       => "{$tier['label']} reward for {$target} onboards ({$periodKey})",
                 'proof_of_payment' => 'System Auto Reward',
                 'type'          => 'achievement',
                 'created_by'    => $user->full_name ?? $user->email_address ?? 'System',
-                'organization_id' => $user->organization_id ?? null,
+                // Credit the record to the agent's organization, not the actor's.
+                'organization_id' => $agent->organization_id ?? null,
+                // A milestone reward is granted by the system the moment the
+                // agent claims it — the entitlement is re-checked server side
+                // just above. It is therefore recorded as already approved, so
+                // it is never queued for an approval that would double-credit it.
+                'status'        => self::STATUS_APPROVED,
+                'approve_by'    => 'System',
             ];
 
             $history = AgentCommissionHistory::create($historyPayload);
 
-            // Update agent balance (credit the achievement column)
+            // Pay the reward straight into `balance` — the spendable commission bucket —
+            // so a claimed milestone can actually be cashed out through the payout modal.
+            // `achievement` is ALSO credited, but purely as a lifetime "rewards earned"
+            // figure behind the dashboard tile; it is deliberately NOT part of the
+            // agent's Total Balance, otherwise this reward would be counted twice.
             $agentBalance = AgentBalance::where('agent_id', $validated['agent_id'])->first();
             if ($agentBalance) {
                 $agentBalance->update([
-                    'achievement' => (float)($agentBalance->achievement ?? 0) + (float)$validated['amount'],
+                    'balance'     => max(0, (float)$agentBalance->balance) + (float)$validated['amount'],
+                    'achievement' => max(0, (float)($agentBalance->achievement ?? 0)) + (float)$validated['amount'],
                 ]);
             } else {
                 AgentBalance::create([
                     'agent_id' => $validated['agent_id'],
-                    'balance' => 0,
+                    'balance' => (float)$validated['amount'],
                     'commission' => 0,
                     'achievement' => (float)$validated['amount'],
                 ]);
             }
 
-            // Audit Trail
+            // Audit Trail.
+            //
+            // A repeating reward is claimable once per period, so the entry has
+            // to say which period was claimed, not just that a claim happened.
+            // Without the period on the record, two claims of the same tier are
+            // indistinguishable from a double payment. `next_period_claimable`
+            // states the other half: taking this reward does not consume the
+            // next period's, and does not carry into it either.
             $userEmail = $user->email_address ?? $user->email ?? 'System';
+
+            // The cycle that starts the moment this claim lands. Resolved from
+            // the claim just written, so it is the same cycle the dashboard will
+            // show when it reloads a second from now.
+            $nextCycle     = self::cycleAt($periodType, [$claimedAt->copy()], $claimedAt->copy()->addSecond());
+            $nextPeriodKey = $nextCycle['key'];
+            $endedEarly    = $claimedAt->lessThan($to);
+
             AuditTrailLog::create([
                 'old_details' => null,
                 'new_details' => [
                     'type' => 'agent_achievement_claims',
                     'id' => $claim->id,
-                    'data' => $claim->toArray()
+                    'data' => $claim->toArray(),
+                    'event'        => 'achievement_claimed',
+                    'agent_id'     => $validated['agent_id'],
+                    'period_type'  => $periodType,
+                    'period_key'   => $periodKey,
+                    'period_start' => $from->format('Y-m-d H:i:s'),
+                    'period_end'   => $to->format('Y-m-d H:i:s'),
+                    'claimed_at'   => $claimedAt->format('Y-m-d H:i:s'),
+                    // Claimed before the cycle was due to end, which cuts the
+                    // cycle short and starts the next one immediately.
+                    'claimed_early'=> $endedEarly,
+                    'target'       => $target,
+                    'onboarded'    => $onboarded,
+                    'reward_paid'  => (float) $validated['amount'],
+                    // Exactly which referrals earned this reward. They are
+                    // spent for this tier from here on, so the same onboards
+                    // cannot be presented again — by a backdated installation
+                    // date or otherwise.
+                    'job_order_ids'         => array_values($earnedBy),
+                    'commission_history_id' => $history->id,
+                    'next_period_key'       => $nextPeriodKey,
+                    'next_period_start'     => $nextCycle['start']->format('Y-m-d H:i:s'),
+                    'next_period_end'       => $nextCycle['end']->format('Y-m-d H:i:s'),
+                    'next_period_claimable' => true,
+                    'note' => "{$tier['label']} claimed for {$periodKey} ({$onboarded} of {$target} onboarded). "
+                        . ($endedEarly
+                            ? "Claimed early, so {$periodKey} ends now and {$nextPeriodKey} starts immediately at 0 "
+                              . "instead of the agent waiting for the calendar to turn. "
+                            : '')
+                        . "This claim applies to {$periodKey} only and does not carry into {$nextPeriodKey}.",
                 ],
                 'created_by_user' => $userEmail,
                 'updated_by_user' => $userEmail
@@ -870,12 +2212,29 @@ class CommissionController extends Controller
 
             DB::commit();
 
+            // The claim has ended this cycle, so record its closure — the same
+            // ledger row and before/after audit pair a cycle gets when its time
+            // simply runs out, marked as ended by a claim rather than by the
+            // clock. Deliberately outside the transaction: the reward is already
+            // paid and must not be rolled back if the bookkeeping fails.
+            $this->closeClaimedCycle(
+                $agent, $periodType, $periodKey, $from, $claimedAt,
+                $target, $userEmail, $endedEarly
+            );
+
             return response()->json([
                 'success' => true,
                 'message' => 'Achievement claimed successfully',
                 'data' => $claim
             ]);
 
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            DB::rollBack();
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors'  => $e->errors()
+            ], 422);
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json([

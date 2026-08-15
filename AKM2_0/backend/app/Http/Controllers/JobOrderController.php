@@ -1013,6 +1013,65 @@ class JobOrderController extends Controller
         }
     }
 
+    /**
+     * Settle the referring agent for a job order being approved, if there is one
+     * and if the settlement service is available.
+     *
+     * Three outcomes, deliberately treated differently:
+     *
+     *   • No referral recorded — a job order nobody referred is a perfectly
+     *     ordinary approval (walk-ins and direct sign-ups). Skipped without
+     *     reaching for the service at all.
+     *   • The service cannot be resolved — that means the class is missing from
+     *     THIS deployment, not that anything is wrong with the job order. Nothing
+     *     has been written at that point, so the approval carries on and the gap
+     *     is logged as an error for whoever deploys. The row keeps a null
+     *     agent_paid_at, so it stays eligible to be settled once the deployment
+     *     catches up; blocking every approval instead would be far worse.
+     *   • A failure INSIDE settle() stays fatal on purpose: it runs in the
+     *     approval's transaction, and a half-applied credit must roll back with
+     *     it rather than leave an agent's balance wrong.
+     *
+     * @return array{paid: bool, reason: string, agent_id: ?int,
+     *               commission: float, incentive_value: float}
+     */
+    private function settleReferringAgent(JobOrder $jobOrder, ?string $actionBy): array
+    {
+        $skipped = static fn (string $reason): array => [
+            'paid'            => false,
+            'reason'          => $reason,
+            'agent_id'        => null,
+            'commission'      => 0.0,
+            'incentive_value' => 0.0,
+        ];
+
+        // Resolved exactly the way JobOrderAgentPaymentService::referringAgent()
+        // does, including the fallback read, so this pre-check cannot disagree
+        // with the service about whether a referral exists.
+        $referredBy = optional($jobOrder->application)->referred_by;
+        if (!$referredBy && $jobOrder->application_id) {
+            $referredBy = DB::table('applications')->where('id', $jobOrder->application_id)->value('referred_by');
+        }
+
+        if (trim((string) $referredBy) === '') {
+            return $skipped('no referred_by on the application');
+        }
+
+        try {
+            $service = app(\App\Services\JobOrderAgentPaymentService::class);
+        } catch (\Throwable $e) {
+            \Log::error('Job Order Approval - agent settlement unavailable, approving without it', [
+                'job_order_id' => $jobOrder->getKey(),
+                'exception'    => get_class($e),
+                'error'        => $e->getMessage(),
+            ]);
+
+            return $skipped('settlement service unavailable');
+        }
+
+        return $service->settle($jobOrder, $actionBy);
+    }
+
     public function approve($id): JsonResponse
     {
         try {
@@ -1307,7 +1366,34 @@ class JobOrderController extends Controller
                 ]);
             }
 
+            // Settle the referring agent: mark the job order Paid, credit the
+            // commission, and record the rates it was settled at so a later
+            // change to either setting cannot restate it.
+            //
+            // Inside the transaction deliberately — if anything after this
+            // fails, the credit rolls back with the approval rather than
+            // leaving an agent paid for a job order that was never approved.
+            // A job order already carrying agent_paid_at is left alone, so
+            // approving twice cannot pay twice.
+            $agentPayment = $this->settleReferringAgent($jobOrder, $actionUserEmail);
+
             DB::commit();
+
+            if ($agentPayment['paid']) {
+                \Log::info('Job Order Approval - agent settled', [
+                    'job_order_id'    => $id,
+                    'agent_id'        => $agentPayment['agent_id'],
+                    'commission'      => $agentPayment['commission'],
+                    'incentive_value' => $agentPayment['incentive_value'],
+                ]);
+            } elseif ($agentPayment['reason'] !== '') {
+                // Not an error: a job order with no identifiable referring
+                // agent is still a valid approval.
+                \Log::info('Job Order Approval - agent not settled', [
+                    'job_order_id' => $id,
+                    'reason'       => $agentPayment['reason'],
+                ]);
+            }
 
             // Create Activity Log using helper
             ActivityLog::log(

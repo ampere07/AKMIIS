@@ -410,3 +410,44 @@ export const getVillages = getLocations;
 export const createVillage = createLocation;
 export const deleteVillage = deleteLocation;
 export type Village = LocationDetail;
+
+// Get cities for a single region (lazy-loaded so the agent application form
+// does not have to fetch every city in the country up front).
+export const getCitiesByRegionId = async (regionId: number): Promise<City[]> => {
+  try {
+    const response = await apiClient.get(`/locations/regions/${regionId}/cities`);
+    const data = response.data as any;
+
+    if (Array.isArray(data)) {
+      return data;
+    }
+
+    if (data.success && Array.isArray(data.data)) {
+      return data.data;
+    }
+
+    return [];
+  } catch (error: any) {
+    return [];
+  }
+};
+
+// Get barangays for a single city (lazy-loaded to avoid fetching every barangay in the country)
+export const getBarangaysByCityId = async (cityId: number): Promise<Borough[]> => {
+  try {
+    const response = await apiClient.get(`/locations/cities/${cityId}/barangays`);
+    const data = response.data as any;
+
+    if (Array.isArray(data)) {
+      return data;
+    }
+
+    if (data.success && Array.isArray(data.data)) {
+      return data.data;
+    }
+
+    return [];
+  } catch (error: any) {
+    return [];
+  }
+};
