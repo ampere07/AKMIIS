@@ -16,6 +16,10 @@ class Kernel extends HttpKernel
     protected $middleware = [
         // \App\Http\Middleware\TrustHosts::class,
         \App\Http\Middleware\TrustProxies::class,
+        // First in the stack so its RESPONSE half runs last, after every cookie
+        // has been added. Sanctum forces session.same_site back to 'lax' on
+        // every API request, so the cookies can only be corrected here.
+        \App\Http\Middleware\ConfigureCrossSiteCookies::class,
         \App\Http\Middleware\HandleCorsManually::class,  // Use custom CORS handler
         \App\Http\Middleware\PreventRequestsDuringMaintenance::class,
         \Illuminate\Foundation\Http\Middleware\ValidatePostSize::class,

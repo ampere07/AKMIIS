@@ -17,7 +17,9 @@ return [
 
     'stateful' => explode(',', env('SANCTUM_STATEFUL_DOMAINS', sprintf(
         '%s%s',
-        'backend1.atssfiber.ph,apply.atssfiber.ph',
+        // This project's own hosts. They were the ATSS ones, carried over when
+        // the project was forked.
+        'backend1.akmiis.com,apply.akmiis.com,localhost:3000',
         Sanctum::currentApplicationUrlWithPort()
     ))),
 

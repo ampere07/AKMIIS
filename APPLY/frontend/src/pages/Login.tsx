@@ -39,7 +39,11 @@ const Login: React.FC = () => {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
         },
-        credentials: 'include',
+        // No `credentials: 'include'`. Login returns its token in the response
+        // body and sets no cookie, so there is nothing for credentialed CORS
+        // to carry — only the stricter rules an in-app browser is most likely
+        // to refuse. The token is kept in localStorage and sent back as an
+        // Authorization header, which needs no cookie support at all.
         body: JSON.stringify({
           username: formData.username,
           password: formData.password

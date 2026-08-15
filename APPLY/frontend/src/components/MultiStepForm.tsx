@@ -698,10 +698,14 @@ const MultiStepForm = forwardRef<MultiStepFormRef, MultiStepFormProps>(({ showEd
     try {
       setIsSubmitting(true);
 
+      // No `credentials: 'include'` on purpose. This endpoint is stateless —
+      // it reads no cookie and no session — so sending credentials achieved
+      // nothing except to promote the request to credentialed CORS, which is
+      // the stricter mode and the first thing an in-app browser (Messenger's
+      // above all) restricts. Plain CORS is what the request actually needs.
       const response = await fetch(`${apiBaseUrl}/api/application/store`, {
         method: 'POST',
         body: submissionData,
-        credentials: 'include',
         headers: {
           'Accept': 'application/json'
         }
