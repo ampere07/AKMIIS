@@ -365,7 +365,9 @@ class EnhancedBillingGenerationServiceWithNotifications
             $prorateAmount = $this->calculateProrateAmount($account, $plan->price, $adjustedDate);
             $reconProrate = $this->calculateReconnectionProrate($account, $statementDate, $plan->price);
             
-            $effectiveProrateAmount = $prorateAmount + $reconProrate['total_prorate'];
+            $effectiveProrateAmount = ($reconProrate['total_prorate'] > 0)
+                ? $reconProrate['total_prorate']
+                : $prorateAmount;
             $monthlyFeeGross = $effectiveProrateAmount / (1 + self::VAT_RATE);
             $vat = $monthlyFeeGross * self::VAT_RATE;
             $monthlyServiceFee = $effectiveProrateAmount - $vat;
@@ -542,7 +544,9 @@ class EnhancedBillingGenerationServiceWithNotifications
             $prorateAmount = $this->calculateProrateAmount($account, $plan->price, $adjustedDate);
             $reconProrate = $this->calculateReconnectionProrate($account, $invoiceDate, $plan->price);
             
-            $effectiveProrateAmount = $prorateAmount + $reconProrate['total_prorate'];
+            $effectiveProrateAmount = ($reconProrate['total_prorate'] > 0)
+                ? $reconProrate['total_prorate']
+                : $prorateAmount;
 
             $charges = $this->calculateChargesAndDeductions(
                 $account, 
@@ -942,17 +946,18 @@ class EnhancedBillingGenerationServiceWithNotifications
 
             $dcDate = Carbon::parse($disconnection->created_at)->startOfDay();
             $daysDisconnected = $dcDate->diffInDays($reconDate);
+            $reconDay = $reconDate->day;
 
-            // 7-day grace rule: short outages are absorbed, the full plan price stands.
-            if ($daysDisconnected < self::RECONNECTION_GRACE_DAYS) {
-                $this->log('info', 'Disconnection shorter than the grace threshold; charging full plan price without proration', [
+            // Reconnected between Day 15 and Day 21 (or short disconnection): balance remains as-is (full monthly fee stands, no extra pro-rate added)
+            if (($reconDay >= 15 && $reconDay <= 21) || $daysDisconnected < self::RECONNECTION_GRACE_DAYS) {
+                $this->log('info', 'Reconnection is within Day 15-21 window or grace threshold; keeping balance as-is without adding extra pro-rate', [
                     'account_no' => $account->account_no,
                     'reconnection_log_id' => $log->id,
                     'disconnected_log_id' => $disconnection->id,
                     'disconnection_date' => $dcDate->format('Y-m-d'),
                     'reconnection_date' => $reconDate->format('Y-m-d'),
                     'days_disconnected' => $daysDisconnected,
-                    'grace_days' => self::RECONNECTION_GRACE_DAYS
+                    'recon_day' => $reconDay
                 ]);
                 continue;
             }
