@@ -78,6 +78,9 @@ import AgentPayout from './AgentPayout';
 import AgentInvoice from './AgentInvoice';
 import DashboardAgent from './DashboardAgent';
 import ApplicationForm from './ApplicationForm';
+import SmartOltTool from './SmartOltTool';
+import MikrotikRadiusTool from './MikrotikRadiusTool';
+import XenditReconcileTool from './XenditReconcileTool';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
 
@@ -417,6 +420,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <Logs />;
             case 'soa-generation':
                 return <SOAGeneration />;
+            case 'smartolt-tool':
+                return <SmartOltTool isDarkMode={isDarkMode} />;
+            case 'mikrotik-radius-tool':
+                return <MikrotikRadiusTool isDarkMode={isDarkMode} />;
+            case 'xendit-reconcile-tool':
+                return <XenditReconcileTool isDarkMode={isDarkMode} />;
             case 'settings':
                 return <Settings />;
             case 'dashboard':

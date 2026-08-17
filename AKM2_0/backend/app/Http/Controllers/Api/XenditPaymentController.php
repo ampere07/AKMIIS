@@ -3,15 +3,21 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\PaymentWorkerService;
+use App\Services\XenditReconciliationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Exception;
 use App\Events\PaymentUpdated;
 
 class XenditPaymentController extends Controller
 {
+    /** SuperAdmin sees every organization; everyone else is scoped to their own. */
+    private const SUPERADMIN_ROLE_ID = 7;
+
     private $xenditApiKey;
     private $xenditCallbackToken;
     private $portalLink;
@@ -217,7 +223,7 @@ class XenditPaymentController extends Controller
             }
 
             // Store payment in pending_payments table
-            DB::table('pending_payments')->insert([
+            $paymentRow = [
                 'account_no' => $accountNo,
                 'reference_no' => $referenceNo,
                 'amount' => $amount,
@@ -233,7 +239,18 @@ class XenditPaymentController extends Controller
                 'reconnect_status' => null,
                 'last_attempt_at' => null,
                 'updated_at' => now()
-            ]);
+            ];
+
+            // Enter the reconciliation ladder immediately when columns exist. If the webhook
+            // arrives first it moves this row off PENDING and the sweep never looks at it; if it
+            // does not, cron:reconcile-xendit-payments asks Xendit directly in two minutes.
+            if (Schema::hasColumn('pending_payments', 'currency')) {
+                $paymentRow['currency'] = $payload['currency'] ?? 'PHP';
+                $paymentRow['reconciliation_attempts'] = 0;
+                $paymentRow['next_reconciliation_at'] = now()->addMinutes(2);
+            }
+
+            DB::table('pending_payments')->insert($paymentRow);
 
             Log::info('Payment created successfully', [
                 'reference_no' => $referenceNo,
@@ -581,6 +598,106 @@ class XenditPaymentController extends Controller
                 'message' => 'Failed to cancel payment'
             ], 500);
         }
+    }
+
+    // =====================================================================
+    // Reconciliation tool — Sanctum-guarded operator surface
+    //
+    // The public payment endpoints above are what a subscriber's checkout
+    // hits. Everything below is the staff-facing reconciliation screen and
+    // sits behind auth:sanctum in routes/api.php. All of it validates and
+    // delegates; the rules live in XenditReconciliationService.
+    // =====================================================================
+
+    /**
+     * GET /api/xendit-reconciliation/audit
+     */
+    public function reconciliationAudit(Request $request, XenditReconciliationService $service)
+    {
+        $validated = $request->validate([
+            'filter'   => ['nullable', 'string', 'in:' . implode(',', array_keys(XenditReconciliationService::FILTER_STATUSES))],
+            'search'   => ['nullable', 'string', 'max:191'],
+            'days'     => ['nullable', 'integer', 'min:1', 'max:365'],
+            'page'     => ['nullable', 'integer', 'min:1'],
+            'per_page' => ['nullable', 'integer', 'min:10', 'max:200'],
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'data'    => $service->getAuditList($validated, $this->reconciliationOrganizationId($request)),
+        ]);
+    }
+
+    /**
+     * POST /api/xendit-reconciliation/verify
+     *
+     * Live lookup against Xendit. Confirmed payments are moved to QUEUED for the
+     * payment worker — this endpoint never posts one itself.
+     */
+    public function reconciliationVerify(Request $request, XenditReconciliationService $service)
+    {
+        $validated = $request->validate([
+            'id' => ['required', 'integer', 'min:1'],
+        ]);
+
+        $result = $service->verifyPayment($validated['id'], $this->reconciliationOrganizationId($request));
+
+        return response()->json($result, $result['success'] ? 200 : 422);
+    }
+
+    /**
+     * POST /api/xendit-reconciliation/force-post
+     *
+     * Posts a gateway-confirmed but unposted payment through the payment worker's
+     * own claim-and-post path, so balance, invoice settlement and receipt all run
+     * exactly once.
+     */
+    public function reconciliationForcePost(
+        Request $request,
+        XenditReconciliationService $service,
+        PaymentWorkerService $worker
+    ) {
+        $validated = $request->validate([
+            'id' => ['required', 'integer', 'min:1'],
+        ]);
+
+        $result = $service->forcePost($validated['id'], $worker, $this->reconciliationOrganizationId($request));
+
+        return response()->json($result, $result['success'] ? 200 : 422);
+    }
+
+    /**
+     * POST /api/xendit-reconciliation/mark-expired
+     */
+    public function reconciliationMarkExpired(Request $request, XenditReconciliationService $service)
+    {
+        $validated = $request->validate([
+            'id'     => ['required', 'integer', 'min:1'],
+            'reason' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $result = $service->markExpired(
+            $validated['id'],
+            $validated['reason'] ?? null,
+            $this->reconciliationOrganizationId($request)
+        );
+
+        return response()->json($result, $result['success'] ? 200 : 422);
+    }
+
+    /**
+     * The organization a reconciliation request is confined to, or null for
+     * SuperAdmin. Mirrors the scoping the other two tool controllers apply.
+     */
+    private function reconciliationOrganizationId(Request $request): ?int
+    {
+        $user = $request->user();
+
+        if ($user === null || (int) ($user->role_id ?? 0) === self::SUPERADMIN_ROLE_ID) {
+            return null;
+        }
+
+        return $user->organization_id !== null ? (int) $user->organization_id : null;
     }
 }
 

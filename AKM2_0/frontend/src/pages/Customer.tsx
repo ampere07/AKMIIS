@@ -105,6 +105,7 @@ const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): B
     techUpdatedAt: customerData.technicalDetails?.updatedAt || '',
     sessionGroup: (customerData as any).session_group || '',
     sessionIp: (customerData as any).session_ip || customerData.technicalDetails?.ipAddress || '',
+    pppoePassword: (customerData as any).pppoePassword || customerData.technicalDetails?.pppoePassword || '',
     sessionIP: (customerData as any).session_ip || customerData.technicalDetails?.ipAddress || '',
     vip_expiration: customerData.billingAccount?.vip_expiration || '',
     vip_remarks: customerData.billingAccount?.vip_remarks || '',

@@ -72,7 +72,10 @@ const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): B
     referralContactNo: '',
     groupName: customerData.groupName || '',
     mikrotikId: '',
-    sessionIp: customerData.technicalDetails?.ipAddress || '',
+    // Prefer the live RADIUS session address over the provisioned one: it is
+    // where the subscriber's router is actually reachable right now.
+    sessionIp: (customerData as any).session_ip || customerData.technicalDetails?.ipAddress || '',
+    pppoePassword: (customerData as any).pppoePassword || customerData.technicalDetails?.pppoePassword || '',
     houseFrontPicture: customerData.houseFrontPictureUrl || '',
     accountBalance: customerData.billingAccount?.accountBalance || 0,
     housingStatus: customerData.housingStatus || '',

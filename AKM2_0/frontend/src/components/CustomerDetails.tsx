@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, Suspense, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronRight, Plus, Trash2, Paperclip, Wrench, Edit, ChevronLeft, ChevronRight as ChevronRightNav, Maximize2, X, ExternalLink, Settings, Circle, CircleArrowRight, Loader2, Download } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -432,6 +433,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
       'usageType',
       'dateInstalled',
       'username',
+      'pppoePassword',
       'connectionType',
       'routerModel',
       'routerModemSN',
@@ -496,6 +498,39 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
 
   const [draggedItem, setDraggedItem] = useState<{ section: string; index: number } | null>(null);
   const [expandedSection, setExpandedSection] = useState<string | null>(null);
+
+  // The scheme picker hanging off the session IP.
+  //
+  // Position is captured in viewport coordinates when the chevron is clicked
+  // and the menu is portalled to document.body, because this panel is a stack
+  // of overflow-hidden scroll containers — rendered in place, the menu is
+  // clipped by whichever ancestor is shortest. Portalling escapes that, at the
+  // cost of the menu no longer moving with the content, which is why any scroll
+  // or resize dismisses it rather than trying to follow.
+  const [ipSchemeMenu, setIpSchemeMenu] = useState<{ x: number; y: number; ip: string } | null>(null);
+
+  useEffect(() => {
+    if (!ipSchemeMenu) return;
+
+    const dismiss = () => setIpSchemeMenu(null);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') dismiss();
+    };
+
+    // Capture phase on scroll so a scroll inside any nested container closes
+    // the menu, not just one on window.
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', dismiss);
+    window.addEventListener('scroll', dismiss, true);
+    window.addEventListener('resize', dismiss);
+
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', dismiss);
+      window.removeEventListener('scroll', dismiss, true);
+      window.removeEventListener('resize', dismiss);
+    };
+  }, [ipSchemeMenu]);
 
   useEffect(() => {
     const checkDarkMode = () => {
@@ -721,6 +756,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
       usageType: 'Usage Type',
       dateInstalled: 'Date Installed',
       username: 'PPPOE Username',
+      pppoePassword: 'PPPOE Password',
       connectionType: 'Connection Type',
       routerModel: 'Router Model',
       routerModemSN: 'Router Serial Number',
@@ -1157,14 +1193,64 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
             }`} title={billingRecord.vlan}>{billingRecord.vlan}</span>
         </div>
       ) : null,
-      sessionIp: () => (billingRecord.sessionIp || billingRecord.sessionIP) ? (
+      sessionIp: () => {
+        const ip = billingRecord.sessionIp || billingRecord.sessionIP;
+        if (!ip) return null;
+
+        const isOpen = ipSchemeMenu?.ip === ip;
+
+        return (
+          <div className="flex justify-between items-center gap-4">
+            <span className={`text-sm flex-shrink-0 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+              }`}>IP</span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isOpen) {
+                  setIpSchemeMenu(null);
+                  return;
+                }
+                // Anchor to the button's own box so the menu opens under it
+                // wherever the panel happens to be scrolled to.
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setIpSchemeMenu({ x: rect.right, y: rect.bottom + 4, ip });
+              }}
+              // mousedown on document closes the menu; without this the same
+              // press that opens it would immediately close it again.
+              onMouseDown={(e) => e.stopPropagation()}
+              title={`Open ${ip} in a browser`}
+              className={`flex items-center gap-1 font-medium min-w-0 rounded px-1 -mr-1 transition-colors ${isDarkMode ? 'text-white hover:bg-gray-700' : 'text-gray-900 hover:bg-gray-100'
+                }`}
+            >
+              <span className="truncate">{ip}</span>
+              <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
+        );
+      },
+      pppoePassword: () => (
+        // Always rendered, unlike the other technical fields. A blank here is
+        // information — it tells a technician the credential was never captured,
+        // which is exactly when they need to know. Hiding the row would read as
+        // "this subscriber has no password" instead.
         <div className="flex justify-between items-center gap-4">
           <span className={`text-sm flex-shrink-0 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-            }`}>IP</span>
-          <span className={`font-medium truncate text-right min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-            }`} title={billingRecord.sessionIp || billingRecord.sessionIP}>{billingRecord.sessionIp || billingRecord.sessionIP}</span>
+            }`}>PPPOE Password</span>
+          {billingRecord.pppoePassword ? (
+            <span
+              className={`font-mono text-sm truncate text-right min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}
+              title={billingRecord.pppoePassword}
+            >
+              {billingRecord.pppoePassword}
+            </span>
+          ) : (
+            <span className={`font-mono text-sm italic ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+              Not Set
+            </span>
+          )}
         </div>
-      ) : null,
+      ),
       accountNumber: () => billingRecord.applicationId ? (
         <div className="flex justify-between items-center gap-4">
           <span className={`text-sm flex-shrink-0 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
@@ -2455,6 +2541,45 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
             other_isp_bill_url: billingRecord.otherIspBillUrl
           }}
         />
+      )}
+
+      {/* Session IP scheme picker.
+          Portalled to document.body so the surrounding overflow-hidden scroll
+          containers cannot clip it. Right-aligned to the anchor because the
+          field itself is right-aligned, and clamped to the viewport so it stays
+          reachable for a row near the bottom of the panel. */}
+      {ipSchemeMenu && createPortal(
+        <div
+          className={`fixed z-[2000] min-w-[168px] rounded-lg shadow-xl border overflow-hidden ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'
+            }`}
+          style={{
+            left: Math.max(8, ipSchemeMenu.x - 168),
+            top: Math.min(ipSchemeMenu.y, window.innerHeight - 96)
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className={`px-3 py-2 text-[10px] font-semibold uppercase tracking-wide border-b ${isDarkMode ? 'text-gray-400 border-gray-700' : 'text-gray-500 border-gray-200'
+            }`}>
+            Open {ipSchemeMenu.ip}
+          </div>
+          {(['https', 'http'] as const).map(scheme => (
+            <a
+              key={scheme}
+              href={`${scheme}://${ipSchemeMenu.ip}`}
+              target="_blank"
+              // noopener is what stops the opened device page reaching back
+              // into this tab through window.opener.
+              rel="noopener noreferrer"
+              onClick={() => setIpSchemeMenu(null)}
+              className={`flex items-center justify-between px-3 py-2 text-sm transition-colors ${isDarkMode ? 'text-gray-200 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-100'
+                }`}
+            >
+              <span className="font-mono">{scheme}://</span>
+              <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+            </a>
+          ))}
+        </div>,
+        document.body
       )}
     </div>
   );

@@ -35,6 +35,24 @@ return [
         'api_key' => env('RESEND_API_KEY'),
     ],
 
+    /*
+     * Xendit. `XenditPaymentController` already reads these keys via config();
+     * without this block that lookup resolved to null on every request and the
+     * controller fell back to parsing .env by hand. Declaring them here is what
+     * makes the documented config path actually work — and lets config:cache
+     * apply to it like every other credential.
+     *
+     * `reconciliation_base_url` and `api_version` exist so the sweep in
+     * XenditReconciliationService can be pointed at a sandbox without a code
+     * change. Never log any value from this block.
+     */
+    'xendit' => [
+        'api_key' => env('XENDIT_API_KEY'),
+        'callback_token' => env('XENDIT_CALLBACK_TOKEN'),
+        'base_url' => env('XENDIT_BASE_URL', 'https://api.xendit.co'),
+        'api_version' => env('XENDIT_API_VERSION', '2024-11-11'),
+    ],
+
     'google' => [
         'drive' => [
             'folder_id' => env('GOOGLE_DRIVE_FOLDER_ID'),

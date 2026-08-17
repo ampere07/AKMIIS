@@ -1,7 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Bell, Menu, X, Sun, Moon } from 'lucide-react';
 import pusher from '../services/pusherService';
-import { notificationService, type Notification as AppNotification } from '../services/notificationService';
+import {
+  notificationService,
+  NOTIFICATION_TARGET_SECTION,
+  type Notification as AppNotification,
+  type NotificationKind
+} from '../services/notificationService';
+import { navBadgeService, EMPTY_NAV_BADGES, type NavBadgeCounts } from '../services/navBadgeService';
 import { userSettingsService } from '../services/userSettingsService';
 import NotificationToast from '../components/NotificationToast';
 import { formUIService } from '../services/formUIService';
@@ -10,16 +16,48 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 interface HeaderProps {
   onToggleSidebar?: () => void;
   onSearch?: (query: string) => void;
-  onNavigate?: (section: string) => void;
+  // The second argument is the existing "extra" channel Dashboard already
+  // understands; notifications pass the id of the record that was clicked.
+  onNavigate?: (section: string, extra?: string) => void;
   onLogout?: () => void;
   activeSection?: string;
 }
+
+/** How each notification kind is labelled and tinted in the dropdown. */
+const NOTIFICATION_STYLES: Record<NotificationKind, { label: string; className: string }> = {
+  application: {
+    label: 'Application',
+    className: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-400'
+  },
+  job_order_done: {
+    label: 'Job Done',
+    className: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+  },
+  service_order_done: {
+    label: 'Service Done',
+    className: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400'
+  },
+  transaction_revert: {
+    label: 'Revert',
+    className: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400'
+  }
+};
+
+/** The "Needs Attention" breakdown, in the order it reads best. */
+const ATTENTION_ROWS: Array<{ key: keyof NavBadgeCounts; label: string; section: string }> = [
+  { key: 'application', label: 'Applications', section: 'application-management' },
+  { key: 'job_order', label: 'Job Orders', section: 'job-order' },
+  { key: 'service_order', label: 'Service Orders', section: 'service-order' },
+  { key: 'work_order', label: 'Work Orders', section: 'work-order' },
+  { key: 'transaction', label: 'Transactions', section: 'transaction-list' }
+];
 
 const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, onLogout, activeSection }) => {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [navBadges, setNavBadges] = useState<NavBadgeCounts>(EMPTY_NAV_BADGES);
   const [loading, setLoading] = useState(false);
   const [isTogglingDarkMode, setIsTogglingDarkMode] = useState(false);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
@@ -248,6 +286,21 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
     };
   }, []);
 
+  // Open-task counters. Deliberately folded into the same 10s cycle as the
+  // notification poll below rather than given a timer of its own — two
+  // independent intervals against the same backend, per signed-in
+  // administrator, for two numbers rendered side by side in one button.
+  const refreshNavBadges = React.useCallback(async () => {
+    try {
+      const counts = await navBadgeService.getCounts();
+      if (mountedRef.current) {
+        setNavBadges(counts);
+      }
+    } catch (error) {
+      console.error('[NavBadges] Failed to refresh badge counts:', error);
+    }
+  }, []);
+
   useEffect(() => {
     const fetchInitialData = async () => {
       if (!mountedRef.current) return;
@@ -255,6 +308,7 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
       try {
         const data = await notificationService.getConsolidatedStream(10);
         const count = await notificationService.getUnreadCount();
+        await refreshNavBadges();
 
         if (mountedRef.current) {
           const lastClearedId = parseInt(localStorage.getItem('notifications_last_cleared_id') || '0');
@@ -285,6 +339,7 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
       try {
         const data = await notificationService.getConsolidatedStream(10);
         const count = await notificationService.getUnreadCount();
+        await refreshNavBadges();
 
         if (mountedRef.current) {
           const lastClearedId = parseInt(localStorage.getItem('notifications_last_cleared_id') || '0');
@@ -402,6 +457,47 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
         }
       }
     }
+  };
+
+  /**
+   * Send the operator to the record the notification is about.
+   *
+   * Two things happen, because two different consumers need them. onNavigate
+   * switches the section — that is what makes the click visibly do something
+   * today. The CustomEvent publishes which record was clicked, so a list page
+   * that wants to select or open that row can listen for it without Header
+   * needing a reference to the page. sessionStorage carries the same payload
+   * for a page that mounts after the event has already fired.
+   */
+  const handleNotificationClick = (notification: AppNotification) => {
+    const kind = (notification.type || 'application') as NotificationKind;
+    const section = NOTIFICATION_TARGET_SECTION[kind];
+
+    if (!section) return;
+
+    const target = {
+      section,
+      type: kind,
+      id: notification.id,
+      at: Date.now()
+    };
+
+    try {
+      sessionStorage.setItem('notification_target', JSON.stringify(target));
+    } catch (e) {
+      // Private-browsing quota. Navigation still works without it.
+    }
+
+    window.dispatchEvent(new CustomEvent('notification-navigate', { detail: target }));
+
+    setShowNotifications(false);
+    onNavigate?.(section, String(notification.id));
+  };
+
+  /** A "Needs Attention" row jumps to that section, with nothing to select. */
+  const handleAttentionClick = (section: string) => {
+    setShowNotifications(false);
+    onNavigate?.(section);
   };
 
   const handleClearAll = () => {
@@ -579,6 +675,12 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
     );
   }
 
+  // What the bell shows: open tasks plus unread notifications, because they are
+  // two different reasons to look and an operator wants one number for "is
+  // there anything for me". Capped so a backlog cannot widen the header.
+  const bellCount = navBadges.total + unreadCount;
+  const bellLabel = bellCount > 99 ? '99+' : String(bellCount);
+
   // Admin/Staff Header (Original)
   return (
     <header className={`${isDarkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-300'
@@ -638,8 +740,13 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
               } transition-colors`}
           >
             <Bell className="h-5 w-5" />
-            {unreadCount > 0 && (
-              <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
+            {bellCount > 0 && (
+              <span
+                className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center bg-red-500 text-white text-[10px] font-bold rounded-full leading-none"
+                title={`${navBadges.total} needing attention, ${unreadCount} unread`}
+              >
+                {bellLabel}
+              </span>
             )}
           </button>
 
@@ -662,6 +769,29 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
                   </button>
                 )}
               </div>
+              {navBadges.total > 0 && (
+                <div className={`px-4 py-3 border-b ${isDarkMode ? 'border-gray-700 bg-gray-850' : 'border-gray-200 bg-gray-50'}`}>
+                  <div className={`text-[11px] font-semibold uppercase tracking-wide mb-2 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                    Needs Attention ({navBadges.total})
+                  </div>
+                  <div className="space-y-1">
+                    {ATTENTION_ROWS.filter(row => navBadges[row.key] > 0).map(row => (
+                      <button
+                        key={row.key}
+                        onClick={() => handleAttentionClick(row.section)}
+                        className={`w-full flex items-center justify-between px-2 py-1 rounded text-sm transition-colors ${isDarkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-100'
+                          }`}
+                      >
+                        <span>{row.label}</span>
+                        <span className="min-w-[20px] px-1.5 py-0.5 bg-red-500 text-white text-[10px] font-bold rounded-full leading-none">
+                          {navBadges[row.key] > 99 ? '99+' : navBadges[row.key]}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="max-h-96 overflow-y-auto">
                 {loading ? (
                   <div className={`p-4 text-center ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
@@ -674,37 +804,51 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
                     No new applications
                   </div>
                 ) : (
-                  notifications.map((notification) => (
-                    <div
-                      key={`${notification.type}-${notification.id}`}
-                      className={`p-4 border-b ${isDarkMode ? 'border-gray-700 hover:bg-gray-750' : 'border-gray-200 hover:bg-gray-50'
-                        } transition-colors cursor-pointer`}
-                    >
-                      <div className="flex justify-between items-start mb-1">
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${notification.type === 'job_order_done'
-                          ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
-                          : 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-400'
-                          }`}
-                          style={notification.type === 'job_order_done' ? {} : {
-                            backgroundColor: colorPalette?.primary ? `${colorPalette.primary}33` : 'rgba(124, 58, 237, 0.2)',
-                            color: colorPalette?.primary || '#7c3aed'
-                          }}>
-                          {notification.type === 'job_order_done' ? 'Job Done' : 'Application'}
-                        </span>
-                        <span className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-gray-500'}`}>
-                          {notification.formatted_date}
-                        </span>
+                  notifications.map((notification) => {
+                    const kind = (notification.type || 'application') as NotificationKind;
+                    const style = NOTIFICATION_STYLES[kind] || NOTIFICATION_STYLES.application;
+
+                    return (
+                      <div
+                        key={`${notification.type}-${notification.id}`}
+                        onClick={() => handleNotificationClick(notification)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            handleNotificationClick(notification);
+                          }
+                        }}
+                        className={`p-4 border-b ${isDarkMode ? 'border-gray-700 hover:bg-gray-750' : 'border-gray-200 hover:bg-gray-50'
+                          } transition-colors cursor-pointer`}
+                      >
+                        <div className="flex justify-between items-start mb-1">
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${style.className}`}
+                            // Applications keep the tenant accent they have always
+                            // used; the other kinds carry their own semantic colour
+                            // so the four are distinguishable at a glance.
+                            style={kind === 'application' ? {
+                              backgroundColor: colorPalette?.primary ? `${colorPalette.primary}33` : 'rgba(124, 58, 237, 0.2)',
+                              color: colorPalette?.primary || '#7c3aed'
+                            } : {}}>
+                            {style.label}
+                          </span>
+                          <span className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                            {notification.formatted_date}
+                          </span>
+                        </div>
+                        <div className={`font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'
+                          }`}>
+                          {notification.customer_name}
+                        </div>
+                        <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+                          }`}>
+                          {notification.message || `Plan: ${notification.plan_name}`}
+                        </div>
                       </div>
-                      <div className={`font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'
-                        }`}>
-                        {notification.customer_name}
-                      </div>
-                      <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-                        }`}>
-                        {notification.type === 'job_order_done' ? 'Completed onsite work' : `Plan: ${notification.plan_name}`}
-                      </div>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -716,11 +860,20 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
           isVisible={true}
           title={toastNotification.title || (toastNotification.type === 'job_order_done' ? 'Job Order Completed' : 'New Application Received')}
           message={toastNotification.message || `${toastNotification.customer_name} - ${toastNotification.plan_name}`}
-          type={toastNotification.type === 'job_order_done' ? 'success' : 'info'}
+          // A pending revert is money waiting on a decision, so it is flagged
+          // rather than merely reported.
+          type={toastNotification.type === 'transaction_revert'
+            ? 'warning'
+            : (toastNotification.type === 'job_order_done' || toastNotification.type === 'service_order_done')
+              ? 'success'
+              : 'info'}
           onClose={() => setToastNotification(null)}
           onClick={() => {
+            // The toast is about one specific record, so clicking it goes
+            // there directly rather than opening the list of everything.
+            const target = toastNotification;
             setToastNotification(null);
-            if (!showNotifications) toggleNotifications();
+            handleNotificationClick(target);
           }}
         />
       )}

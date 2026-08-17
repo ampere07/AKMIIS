@@ -531,6 +531,10 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
           if (s !== 'inprogress' && s !== 'in progress' && s !== 'in-progress') return false;
         } else if (statusFilter === 'done') {
           if (s !== 'done' && s !== 'completed') return false;
+        } else if (statusFilter === 'reschedule') {
+          // The column is free text and all three spellings are in the data;
+          // matching only 'reschedule' would hide the rest of the same status.
+          if (s !== 'reschedule' && s !== 'rescheduled' && s !== 're-schedule') return false;
         } else if (statusFilter === 'cancelled') {
           if (s !== 'cancelled') return false;
         } else if (statusFilter === 'failed') {
@@ -926,6 +930,7 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
               { label: 'Pending', value: 'pending' },
               { label: 'In Progress', value: 'inprogress' },
               { label: 'Done', value: 'done' },
+              { label: 'Rescheduled', value: 'reschedule' },
               { label: 'Cancelled', value: 'cancelled' },
               { label: 'Failed', value: 'failed' }
             ].map((item) => (

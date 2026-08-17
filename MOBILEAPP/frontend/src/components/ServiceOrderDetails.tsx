@@ -5,6 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import ServiceOrderEditModal from '../modals/ServiceOrderEditModal';
 import ConfirmationModal from '../modals/MoveToJoModal';
 import StartTimerModal from '../modals/StartTimerModal';
+import ContactActions from './common/ContactActions';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { useServiceOrderContext } from '../contexts/ServiceOrderContext';
 import { useJobOrderContext } from '../contexts/JobOrderContext';
@@ -695,7 +696,10 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({
     endTime: () => <Text style={valStyle} selectable={true}>{formatDate((serviceOrder as any).end_time)}</Text>,
     duration: () => <Text style={valStyle} selectable={true}>{getDurationString((serviceOrder as any).start_time, (serviceOrder as any).end_time)}</Text>,
     fullName: () => <Text style={valStyle} selectable={true}>{serviceOrder.fullName}</Text>,
-    contactNumber: () => <Text style={valStyle} selectable={true}>{serviceOrder.contactNumber}</Text>,
+    // Same quick actions as the job order view: a service visit starts with the
+    // same "are you home?" call, and the technician should not have to leave the
+    // app to make it.
+    contactNumber: () => <ContactActions value={serviceOrder.contactNumber} valueStyle={valStyle} />,
     fullAddress: () => <Text style={valStyle} selectable={true}>{serviceOrder.fullAddress}</Text>,
     addressCoordinates: () => {
       const coords = customerDetail?.addressCoordinates;

@@ -73,6 +73,24 @@ class CustomerDetailController extends Controller
                 'total_paid' => $totalPaid
             ]);
             
+            // The PPPoE password lives on technical_details going forward, but
+            // every subscriber onboarded before that column existed has it only
+            // on the job order that provisioned them. Read the current record
+            // first and fall back to the most recent job order that actually
+            // carries one — ordered by id, because a line re-provisioned after a
+            // transfer has more than one job order and the latest is the live
+            // credential. Never logged.
+            $pppoePassword = $technicalDetail->pppoe_password ?? null;
+
+            if (empty($pppoePassword)) {
+                $pppoePassword = \DB::table('job_orders')
+                    ->where('account_id', $billingAccount->id)
+                    ->whereNotNull('pppoe_password')
+                    ->where('pppoe_password', '!=', '')
+                    ->orderByDesc('id')
+                    ->value('pppoe_password');
+            }
+
             $data = [
                 'id' => $customer->id,
                 'firstName' => $customer->first_name,
@@ -130,6 +148,7 @@ class CustomerDetailController extends Controller
                     'routerModel' => $technicalDetail->router_model,
                     'routerModemSn' => $technicalDetail->router_modem_sn,
                     'ipAddress' => $technicalDetail->ip_address,
+                    'pppoePassword' => $pppoePassword,
                     'lcp' => $lcpNapLocation ? $lcpNapLocation->lcp : $technicalDetail->lcp,
                     'nap' => $lcpNapLocation ? $lcpNapLocation->nap : $technicalDetail->nap,
                     'port' => $technicalDetail->port,
@@ -147,6 +166,11 @@ class CustomerDetailController extends Controller
                 'onlineSessionStatus' => $billingAccount->onlineStatus ? $billingAccount->onlineStatus->session_status : null,
                 'session_group' => $billingAccount->onlineStatus ? $billingAccount->onlineStatus->session_group : null,
                 'session_ip' => $billingAccount->onlineStatus ? $billingAccount->onlineStatus->ip_address : null,
+                // Also exposed at the top level, alongside session_ip: an
+                // account with no technical_details row still has a password on
+                // its job order, and nesting it would hide exactly the case
+                // support most often needs it for.
+                'pppoePassword' => $pppoePassword,
                 'onlineStatusData' => $billingAccount->onlineStatus ? $billingAccount->onlineStatus->toArray() : null,
             ];
             

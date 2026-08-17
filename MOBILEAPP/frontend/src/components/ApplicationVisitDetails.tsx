@@ -16,6 +16,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getApplication } from '../services/applicationService';
 import { updateApplicationVisit } from '../services/applicationVisitService';
 import ConfirmationModal from '../modals/MoveToJoModal';
+import ContactActions from './common/ContactActions';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 
 interface ApplicationVisitDetailsProps {
@@ -388,6 +389,20 @@ const ApplicationVisitDetails: React.FC<ApplicationVisitDetailsProps> = ({
     </View>
   );
 
+  /**
+   * A phone-number row with Call and SMS beside it.
+   *
+   * Separate from renderFieldRow because that one renders a bare string; this
+   * screen's rows are built by a switch rather than the renderer map the job
+   * order view uses, so the contact rows opt in explicitly.
+   */
+  const renderContactRow = (label: string, value?: string | null) => (
+    <View style={styles.fieldRow}>
+      <Text style={styles.fieldLabel}>{label}:</Text>
+      <ContactActions value={value} valueStyle={styles.fieldValue} />
+    </View>
+  );
+
   const renderImageRow = (label: string, url?: string) => (
     <View style={styles.fieldRow}>
       <Text style={styles.fieldLabel}>{label}:</Text>
@@ -415,9 +430,9 @@ const ApplicationVisitDetails: React.FC<ApplicationVisitDetailsProps> = ({
       case 'fullName':
         return renderFieldRow('Full Name', getFullName());
       case 'contactNumber':
-        return renderFieldRow('Contact Number', applicationDetails?.mobile_number || 'Not provided');
+        return renderContactRow('Contact Number', applicationDetails?.mobile_number);
       case 'secondContactNumber':
-        return renderFieldRow('Second Contact Number', applicationDetails?.secondary_mobile_number || 'Not provided');
+        return renderContactRow('Second Contact Number', applicationDetails?.secondary_mobile_number);
       case 'emailAddress':
         return renderFieldRow('Email Address', applicationDetails?.email_address || 'Not provided');
       case 'address':

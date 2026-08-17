@@ -556,6 +556,16 @@ class ServiceOrderController extends Controller
             $customerUpdateData = [];
             $technicalUpdateData = [];
 
+            // Staged rather than written where they are computed, so every table this
+            // save touches lands in one transaction further down. A router swap that
+            // updates technical_details but not service_orders leaves the account
+            // pointing at hardware it does not have, with no old SN recorded to undo it.
+            $pendingJobOrderSync = null;
+
+            // Captured here, applied only after that transaction commits: SmartOLT is
+            // an external HTTP API and must never be called with a transaction open.
+            $smartOltSync = null;
+
             if ($request->has('date_installed')) {
                 $billingUpdateData['date_installed'] = $request->date_installed;
             }
@@ -658,24 +668,28 @@ class ServiceOrderController extends Controller
                         ->first();
 
                     if ($billingAccountForJobOrder) {
-                        $jobOrderSyncData = array_filter([
-                            'lcpnap' => $newLcpNap ?: null,
-                            'port' => $newPort ?: null,
-                            'vlan' => $newVlan ?: null,
-                            'updated_at' => now(),
-                        ], fn($v) => !is_null($v));
-
-                        $joAffected = DB::table('job_orders')
-                            ->where('account_id', $billingAccountForJobOrder->id)
-                            ->update($jobOrderSyncData);
-
-                        Log::info('[SERVICE ORDER] Synced job_orders lcpnap/port/vlan for account_id ' . $billingAccountForJobOrder->id, [
-                            'rows_affected' => $joAffected,
+                        // Staged, not executed — see $pendingJobOrderSync above.
+                        $pendingJobOrderSync = [
+                            'account_id' => $billingAccountForJobOrder->id,
+                            'data' => array_filter([
+                                'lcpnap' => $newLcpNap ?: null,
+                                'port' => $newPort ?: null,
+                                'vlan' => $newVlan ?: null,
+                                'updated_at' => now(),
+                            ], fn($v) => !is_null($v)),
                             'lcpnap' => $newLcpNap,
                             'port' => $newPort,
                             'vlan' => $newVlan,
-                        ]);
+                        ];
                     }
+
+                    // A replaced router is the SN actually changing. Comparing the
+                    // stored SN against the new one is what keeps a re-saved order
+                    // from unbinding an ONU that is already correctly assigned.
+                    $smartOltSync = [
+                        'old_sn' => trim((string) $technicalDetails->router_modem_sn),
+                        'new_sn' => trim((string) $newSN),
+                    ];
                 }
             }
 
@@ -851,112 +865,185 @@ class ServiceOrderController extends Controller
 
             $updateData['updated_at'] = now();
 
-            if (!empty($updateData)) {
-                $sets = [];
-                $params = [];
-                foreach ($updateData as $key => $value) {
-                    $sets[] = "{$key} = ?";
-                    $params[] = $value;
-                }
-                $params[] = $id;
-                $query = "UPDATE service_orders SET " . implode(', ', $sets) . " WHERE id = ?";
-                
-                Log::info('Executing update on service_orders', [
+            // A service order coming back from Failed or Reschedule is a NEW visit, so the
+            // timings the previous attempt left on the row are cleared. Folded into
+            // $updateData so the reset lands in the same UPDATE as the status change and is
+            // picked up by the change log — see VisitTimerResetService for why a stale
+            // start_time is worse than none.
+            //
+            // Runs AFTER the availability guard above, and the two never collide: the guard
+            // only stamps an end_time when a visit LEAVES In Progress, this only clears when
+            // one comes BACK to it. Each is inert exactly where the other acts.
+            $updateData = app(\App\Services\VisitTimerResetService::class)->applyTo(
+                $updateData,
+                $order->visit_status ?? null,
+                $updateData['visit_status'] ?? null,
+                [
+                    'entity' => 'service_order',
                     'id' => $id,
-                    'query' => $query,
-                    'params' => $params
-                ]);
-                
-                DB::update($query, $params);
-                Log::info('Updated service_orders table');
+                    'ticket_id' => $order->ticket_id ?? null,
+                    'actor' => $updatedByUser,
+                ]
+            );
 
-                // --- START CHANGE LOGGING ---
-                try {
-                    $newOrder = DB::selectOne("SELECT * FROM service_orders WHERE id = ?", [$id]);
-                    // Resolve billing account for logging (may be null for orphaned service orders)
-                    $billingAccountForLog = DB::selectOne("SELECT id FROM billing_accounts WHERE account_no = ?", [$order->account_no]);
+            // One transaction for the whole save. The service order row, the billing and
+            // customer rows it touches, and the technical_details / job_orders sync are a
+            // single change: a router swap that writes technical_details but not
+            // service_orders leaves the account on hardware it does not have, with no old
+            // SN recorded to undo it.
+            //
+            // Kept narrow on purpose — the SmartOLT, RADIUS and reconnection work below
+            // is outbound HTTP, and holding row locks across a network round trip is
+            // exactly what this transaction must not do.
+            $joAffected = null;
 
-                    if ($newOrder) {
-                        $changedOld = [];
-                        $changedNew = [];
-
-                        // We only log fields that were actually in the updateData and changed
-                        foreach ($updateData as $key => $newValue) {
-                            if ($key === 'updated_at') continue;
-
-                            $oldValue = $order->$key ?? null;
-
-                            // Compare values
-                            if ((string)$oldValue !== (string)$newValue) {
-                                $changedOld[$key] = $oldValue;
-                                $changedNew[$key] = $newValue;
-                            }
-                        }
-
-                        if (!empty($changedOld) || !empty($changedNew)) {
-                            $logUserId = auth()->id();
-                            if (!$logUserId) {
-                                // Try to resolve from updated_by_user
-                                $user = DB::selectOne("SELECT id FROM users WHERE email = ? OR username = ?", [$updatedByUser, $updatedByUser]);
-                                if ($user) $logUserId = $user->id;
-                            }
-
-                            DB::table('details_update_logs')->insert([
-                                'account_id'         => $billingAccountForLog->id ?? null,
-                                'old_details'        => json_encode(['type' => 'service_order_details', 'service_order_id' => $id, 'account_no' => $order->account_no, 'data' => $changedOld]),
-                                'new_details'        => json_encode(['type' => 'service_order_details', 'service_order_id' => $id, 'account_no' => $order->account_no, 'data' => $changedNew]),
-                                'created_at'         => now(),
-                                'created_by_user_id' => $logUserId,
-                                'updated_at'         => now(),
-                                'updated_by_user_id' => $logUserId,
-                            ]);
-                        }
+            DB::transaction(function () use (
+                $id,
+                $order,
+                $updateData,
+                $billingUpdateData,
+                $customerUpdateData,
+                $technicalUpdateData,
+                $pendingJobOrderSync,
+                $updatedByUser,
+                &$joAffected
+            ) {
+                if (!empty($updateData)) {
+                    $sets = [];
+                    $params = [];
+                    foreach ($updateData as $key => $value) {
+                        $sets[] = "{$key} = ?";
+                        $params[] = $value;
                     }
-                } catch (\Exception $logEx) {
-                    Log::warning('Failed to log service order changes in ServiceOrderController: ' . $logEx->getMessage());
+                    $params[] = $id;
+                    $query = "UPDATE service_orders SET " . implode(', ', $sets) . " WHERE id = ?";
+
+                    Log::info('Executing update on service_orders', [
+                        'id' => $id,
+                        'query' => $query,
+                        'params' => $params
+                    ]);
+
+                    DB::update($query, $params);
+                    Log::info('Updated service_orders table');
+
+                    // --- START CHANGE LOGGING ---
+                    try {
+                        $newOrder = DB::selectOne("SELECT * FROM service_orders WHERE id = ?", [$id]);
+                        // Resolve billing account for logging (may be null for orphaned service orders)
+                        $billingAccountForLog = DB::selectOne("SELECT id FROM billing_accounts WHERE account_no = ?", [$order->account_no]);
+
+                        if ($newOrder) {
+                            $changedOld = [];
+                            $changedNew = [];
+
+                            // We only log fields that were actually in the updateData and changed
+                            foreach ($updateData as $key => $newValue) {
+                                if ($key === 'updated_at') continue;
+
+                                $oldValue = $order->$key ?? null;
+
+                                // Compare values
+                                if ((string)$oldValue !== (string)$newValue) {
+                                    $changedOld[$key] = $oldValue;
+                                    $changedNew[$key] = $newValue;
+                                }
+                            }
+
+                            if (!empty($changedOld) || !empty($changedNew)) {
+                                $logUserId = auth()->id();
+                                if (!$logUserId) {
+                                    // Try to resolve from updated_by_user
+                                    $user = DB::selectOne("SELECT id FROM users WHERE email = ? OR username = ?", [$updatedByUser, $updatedByUser]);
+                                    if ($user) $logUserId = $user->id;
+                                }
+
+                                DB::table('details_update_logs')->insert([
+                                    'account_id'         => $billingAccountForLog->id ?? null,
+                                    'old_details'        => json_encode(['type' => 'service_order_details', 'service_order_id' => $id, 'account_no' => $order->account_no, 'data' => $changedOld]),
+                                    'new_details'        => json_encode(['type' => 'service_order_details', 'service_order_id' => $id, 'account_no' => $order->account_no, 'data' => $changedNew]),
+                                    'created_at'         => now(),
+                                    'created_by_user_id' => $logUserId,
+                                    'updated_at'         => now(),
+                                    'updated_by_user_id' => $logUserId,
+                                ]);
+                            }
+                        }
+                    } catch (\Exception $logEx) {
+                        Log::warning('Failed to log service order changes in ServiceOrderController: ' . $logEx->getMessage());
+                    }
+                    // --- END CHANGE LOGGING ---
                 }
-                // --- END CHANGE LOGGING ---
+
+                if (!empty($billingUpdateData)) {
+                    $billingUpdateData['updated_at'] = now();
+                    $sets = [];
+                    $params = [];
+                    foreach ($billingUpdateData as $key => $value) {
+                        $sets[] = "{$key} = ?";
+                        $params[] = $value;
+                    }
+                    $params[] = $order->account_no;
+                    $query = "UPDATE billing_accounts SET " . implode(', ', $sets) . " WHERE account_no = ?";
+                    DB::update($query, $params);
+                    Log::info('Updated billing_accounts table');
+                }
+
+                if (!empty($customerUpdateData)) {
+                    $customerUpdateData['updated_at'] = now();
+                    $sets = [];
+                    $params = [];
+                    foreach ($customerUpdateData as $key => $value) {
+                        $sets[] = "{$key} = ?";
+                        $params[] = $value;
+                    }
+                    $params[] = $order->account_no;
+                    $query = "UPDATE customers SET " . implode(', ', $sets) . " WHERE account_no = ?";
+                    DB::update($query, $params);
+                    Log::info('Updated customers table');
+                }
+
+                if (!empty($technicalUpdateData)) {
+                    $sets = [];
+                    $params = [];
+                    foreach ($technicalUpdateData as $key => $value) {
+                        $sets[] = "{$key} = ?";
+                        $params[] = $value;
+                    }
+                    $params[] = $order->account_no;
+                    $query = "UPDATE technical_details SET " . implode(', ', $sets) . " WHERE account_no = ?";
+                    DB::update($query, $params);
+                    Log::info('Updated technical_details table');
+                }
+
+                if ($pendingJobOrderSync !== null) {
+                    $joAffected = DB::table('job_orders')
+                        ->where('account_id', $pendingJobOrderSync['account_id'])
+                        ->update($pendingJobOrderSync['data']);
+                }
+            });
+
+            // Logged after commit so the line never claims a sync that rolled back.
+            if ($joAffected !== null) {
+                Log::info('[SERVICE ORDER] Synced job_orders lcpnap/port/vlan for account_id ' . $pendingJobOrderSync['account_id'], [
+                    'rows_affected' => $joAffected,
+                    'lcpnap' => $pendingJobOrderSync['lcpnap'],
+                    'port' => $pendingJobOrderSync['port'],
+                    'vlan' => $pendingJobOrderSync['vlan'],
+                ]);
             }
 
-            if (!empty($billingUpdateData)) {
-                $billingUpdateData['updated_at'] = now();
-                $sets = [];
-                $params = [];
-                foreach ($billingUpdateData as $key => $value) {
-                    $sets[] = "{$key} = ?";
-                    $params[] = $value;
-                }
-                $params[] = $order->account_no;
-                $query = "UPDATE billing_accounts SET " . implode(', ', $sets) . " WHERE account_no = ?";
-                DB::update($query, $params);
-                Log::info('Updated billing_accounts table');
-            }
-
-            if (!empty($customerUpdateData)) {
-                $customerUpdateData['updated_at'] = now();
-                $sets = [];
-                $params = [];
-                foreach ($customerUpdateData as $key => $value) {
-                    $sets[] = "{$key} = ?";
-                    $params[] = $value;
-                }
-                $params[] = $order->account_no;
-                $query = "UPDATE customers SET " . implode(', ', $sets) . " WHERE account_no = ?";
-                DB::update($query, $params);
-                Log::info('Updated customers table');
-            }
-
-            if (!empty($technicalUpdateData)) {
-                $sets = [];
-                $params = [];
-                foreach ($technicalUpdateData as $key => $value) {
-                    $sets[] = "{$key} = ?";
-                    $params[] = $value;
-                }
-                $params[] = $order->account_no;
-                $query = "UPDATE technical_details SET " . implode(', ', $sets) . " WHERE account_no = ?";
-                DB::update($query, $params);
-                Log::info('Updated technical_details table');
+            // Hand the ONU over in SmartOLT: unbind the router that came out, name the
+            // one that went in. Post-commit and best-effort by design — a SmartOLT
+            // outage must never fail a visit the technician already saved, so the
+            // service swallows and logs every failure to the smartoltrelated channel.
+            if ($smartOltSync !== null) {
+                app(\App\Services\SmartOltService::class)->syncOnuForRouterReplacement(
+                    $order->account_no,
+                    $smartOltSync['old_sn'],
+                    $smartOltSync['new_sn'],
+                    '[SERVICE ORDER REPLACE ROUTER]'
+                );
             }
 
             if ($request->has('item_name_1') && !empty($request->item_name_1)) {

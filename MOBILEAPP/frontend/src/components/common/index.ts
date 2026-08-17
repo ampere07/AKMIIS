@@ -12,4 +12,5 @@ export { default as StatusText } from './StatusText';
 export type { StatusTextProps } from './StatusText';
 export { default as StatusFilterModal } from './StatusFilterModal';
 export type { StatusOption } from './StatusFilterModal';
+export { default as ContactActions, toDialable } from './ContactActions';
 export { standardPageStyles, STANDARD_COLORS } from './standardPageStyles';

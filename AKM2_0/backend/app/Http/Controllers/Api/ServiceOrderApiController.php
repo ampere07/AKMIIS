@@ -608,6 +608,16 @@ class ServiceOrderApiController extends Controller
                 $request->filled('new_vlan') ||
                 $request->filled('new_router_modem_sn');
 
+            // Deferred rather than written here so the technical_details change lands
+            // in the same transaction as the service_orders row further down. A router
+            // swap that updates one and not the other leaves the account pointing at
+            // hardware it does not have, with no record of the previous SN to undo it.
+            $pendingTechnicalUpdate = null;
+
+            // Captured here, applied only after that transaction commits: SmartOLT is
+            // an external HTTP API and must never be called with a transaction open.
+            $smartOltSync = null;
+
             if ($hasNewTechnicalDetails) {
                 Log::info('New technical details detected, updating technical_details table');
 
@@ -685,35 +695,36 @@ class ServiceOrderApiController extends Controller
                         $techUpdateData['connection_type'] = 'Fiber';
                     }
 
-                    // Update technical_details table
-                    DB::table('technical_details')
-                        ->where('account_no', $serviceOrder->account_no)
-                        ->update($techUpdateData);
-
-                    // Also update job_orders table to keep lcpnap/port/vlan in sync
+                    // Also keep job_orders' lcpnap/port/vlan in sync
                     $billingAccountForJobOrder = DB::table('billing_accounts')
                         ->where('account_no', $serviceOrder->account_no)
                         ->first();
 
-                    if ($billingAccountForJobOrder) {
-                        $jobOrderSyncData = array_filter([
-                            'lcpnap' => $newLcpNap ?: null,
-                            'port' => $newPort ?: null,
-                            'vlan' => $newVlan ?: null,
-                            'updated_at' => now(),
-                        ], fn($v) => !is_null($v));
+                    $jobOrderSyncData = array_filter([
+                        'lcpnap' => $newLcpNap ?: null,
+                        'port' => $newPort ?: null,
+                        'vlan' => $newVlan ?: null,
+                        'updated_at' => now(),
+                    ], fn($v) => !is_null($v));
 
-                        $joAffected = DB::table('job_orders')
-                            ->where('account_id', $billingAccountForJobOrder->id)
-                            ->update($jobOrderSyncData);
+                    // Staged, not executed — see $pendingTechnicalUpdate above.
+                    $pendingTechnicalUpdate = [
+                        'account_no' => $serviceOrder->account_no,
+                        'technical' => $techUpdateData,
+                        'job_order_account_id' => $billingAccountForJobOrder->id ?? null,
+                        'job_order' => $jobOrderSyncData,
+                        'lcpnap' => $newLcpNap,
+                        'port' => $newPort,
+                        'vlan' => $newVlan,
+                    ];
 
-                        Log::info('[API SERVICE ORDER] Synced job_orders lcpnap/port/vlan for account_id ' . $billingAccountForJobOrder->id, [
-                            'rows_affected' => $joAffected,
-                            'lcpnap' => $newLcpNap,
-                            'port' => $newPort,
-                            'vlan' => $newVlan,
-                        ]);
-                    }
+                    // A replaced router is the SN actually changing. Comparing the
+                    // stored SN against the new one is what keeps a re-saved order
+                    // from unbinding an ONU that is already correctly assigned.
+                    $smartOltSync = [
+                        'old_sn' => trim((string) $technicalDetails->router_modem_sn),
+                        'new_sn' => trim((string) $newSN),
+                    ];
                 }
             }
 
@@ -846,7 +857,75 @@ class ServiceOrderApiController extends Controller
             }
             // ──────────────────────────────────────────────────────────────────
 
-            DB::table('service_orders')->where('id', $id)->update($data);
+            // A service order coming back from Failed or Reschedule is a NEW visit, so the
+            // timings the previous attempt left on the row are cleared. Folded into $data so
+            // the reset lands in the same UPDATE as the status change and is picked up by the
+            // change log below — see VisitTimerResetService for why a stale start_time is
+            // worse than none.
+            //
+            // Runs AFTER the availability guard above, and the two never collide: the guard
+            // only stamps an end_time when a visit LEAVES In Progress, this only clears when
+            // one comes BACK to it. Each is inert exactly where the other acts.
+            $data = app(\App\Services\VisitTimerResetService::class)->applyTo(
+                $data,
+                $serviceOrder->visit_status ?? null,
+                $data['visit_status'] ?? null,
+                [
+                    'entity' => 'service_order',
+                    'id' => $id,
+                    'ticket_id' => $serviceOrder->ticket_id ?? null,
+                    'actor' => $updatedByUser,
+                ]
+            );
+
+            // One transaction for the row and the technical_details / job_orders sync it
+            // implies: a router or LCP-NAP swap is one change across three tables — the
+            // new SN on the account, the old SN recorded on the order, and the port sync
+            // — and any subset of those landing alone is a wrong record.
+            //
+            // Kept narrow on purpose: the SmartOLT, RADIUS and reconnection work below
+            // makes outbound HTTP calls, and holding a transaction open across those
+            // would pin row locks for the length of a network round trip.
+            $joAffected = null;
+
+            DB::transaction(function () use ($id, $data, $pendingTechnicalUpdate, &$joAffected) {
+                if ($pendingTechnicalUpdate !== null) {
+                    DB::table('technical_details')
+                        ->where('account_no', $pendingTechnicalUpdate['account_no'])
+                        ->update($pendingTechnicalUpdate['technical']);
+
+                    if ($pendingTechnicalUpdate['job_order_account_id'] !== null) {
+                        $joAffected = DB::table('job_orders')
+                            ->where('account_id', $pendingTechnicalUpdate['job_order_account_id'])
+                            ->update($pendingTechnicalUpdate['job_order']);
+                    }
+                }
+
+                DB::table('service_orders')->where('id', $id)->update($data);
+            });
+
+            // Logged after commit so the line never claims a sync that rolled back.
+            if ($joAffected !== null) {
+                Log::info('[API SERVICE ORDER] Synced job_orders lcpnap/port/vlan for account_id ' . $pendingTechnicalUpdate['job_order_account_id'], [
+                    'rows_affected' => $joAffected,
+                    'lcpnap' => $pendingTechnicalUpdate['lcpnap'],
+                    'port' => $pendingTechnicalUpdate['port'],
+                    'vlan' => $pendingTechnicalUpdate['vlan'],
+                ]);
+            }
+
+            // Hand the ONU over in SmartOLT: unbind the router that came out, name the
+            // one that went in. Post-commit and best-effort by design — a SmartOLT
+            // outage must never fail a visit the technician already saved, so the
+            // service swallows and logs every failure to the smartoltrelated channel.
+            if ($smartOltSync !== null) {
+                app(\App\Services\SmartOltService::class)->syncOnuForRouterReplacement(
+                    $serviceOrder->account_no,
+                    $smartOltSync['old_sn'],
+                    $smartOltSync['new_sn'],
+                    '[API SERVICE ORDER REPLACE ROUTER]'
+                );
+            }
 
             if (isset($data['assigned_email']) && $data['assigned_email'] !== ($serviceOrder->assigned_email ?? null)) {
                 try {

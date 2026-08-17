@@ -2,6 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, List, Router, DollarSign, Receipt, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck, ReceiptText } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
+import {
+  navBadgeService,
+  NAV_BADGE_SECTIONS,
+  EMPTY_NAV_BADGES,
+  type NavBadgeCounts
+} from '../services/navBadgeService';
 
 // Locked role IDs (1-8) use hardcoded allowedRoles; custom roles (9+) use permissions array
 const LOCKED_ROLE_IDS = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -33,12 +39,40 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
   const [currentDateTime, setCurrentDateTime] = useState('');
   const [tooltipItem, setTooltipItem] = useState<{ id: string; label: string; y: number } | null>(null);
   const [fetchedPermissions, setFetchedPermissions] = useState<string[] | null>(null);
+  const [navBadges, setNavBadges] = useState<NavBadgeCounts>(EMPTY_NAV_BADGES);
   const mountedRef = useRef(true);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+
+  // Open-task counts for the pills.
+  //
+  // Fetched here rather than passed down from Dashboard so the sidebar stays
+  // self-contained. This is the same 10s cycle the header runs, and the service
+  // caches for 5s, so the two together do not double the request rate.
+  useEffect(() => {
+    const loadBadges = async () => {
+      if (!mountedRef.current) return;
+      try {
+        const counts = await navBadgeService.getCounts();
+        if (mountedRef.current) setNavBadges(counts);
+      } catch (err) {
+        console.error('Failed to fetch nav badge counts:', err);
+      }
+    };
+
+    loadBadges();
+    const interval = setInterval(loadBadges, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  /** The count decorating a menu entry, or 0 when it has none. */
+  const badgeFor = (itemId: string): number => {
+    const key = NAV_BADGE_SECTIONS[itemId];
+    return key ? (navBadges[key] || 0) : 0;
+  };
 
   useEffect(() => {
     const updateDateTime = () => {
@@ -87,7 +121,10 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['administrator', 'superadmin'] },
     // Agent portal landing page — mirrors the mobile app's agent-dashboard tab.
     { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['agent'] },
-    { id: 'live-monitor', label: 'Monitoring', icon: Activity, allowedRoles: ['superadmin'] },
+    // Administrators reach Monitoring too, but LiveMonitor restricts them to the
+    // four operational widgets — see ADMIN_WIDGET_IDS there. The financial
+    // widgets stay SuperAdmin-only.
+    { id: 'live-monitor', label: 'Monitoring', icon: Activity, allowedRoles: ['superadmin', 'administrator'] },
     {
       id: 'billing',
       label: 'Billing',
@@ -200,6 +237,19 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
         { id: 'smart-olt-logs', label: 'Smart OLT Logs', icon: Network, allowedRoles: ['superadmin'] },
         { id: 'radius-logs', label: 'Radius Logs', icon: Activity, allowedRoles: ['superadmin'] },
         { id: 'system-logs', label: 'System Logs', icon: FileText, allowedRoles: ['superadmin'] }
+      ]
+    },
+    {
+      id: 'tools-group',
+      label: 'Tools',
+      icon: Wrench,
+      allowedRoles: ['superadmin', 'administrator', 'headtech'],
+      children: [
+        { id: 'smartolt-tool', label: 'SmartOLT Tool', icon: Network, allowedRoles: ['superadmin', 'administrator', 'headtech'] },
+        { id: 'mikrotik-radius-tool', label: 'Mikrotik Radius Tool', icon: Router, allowedRoles: ['superadmin', 'administrator', 'headtech'] },
+        // Payment reconciliation settles real money against real accounts, so it is
+        // deliberately not offered to HeadTechnician the way the network tools are.
+        { id: 'xendit-reconcile-tool', label: 'Xendit Reconciliation', icon: CreditCard, allowedRoles: ['superadmin', 'administrator'] }
       ]
     },
     { id: 'settings', label: 'Settings', icon: Settings, allowedRoles: ['superadmin'] },
@@ -352,15 +402,32 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     );
   };
 
-  // Flatten menu items for collapsed icon-only view
+  // Flatten menu items for collapsed icon-only view.
+  //
+  // Deduplicated by id, which is what keeps this list renderable: the same destination can sit
+  // under two groups — 'team-agent' is a child of both Agent and Users — and once the group
+  // headers are dropped, both copies land in ONE list keyed by item.id. Duplicate keys in a single
+  // list are undefined behaviour in React: it warns, then reconciles unpredictably, orphaning
+  // rendered nodes and silently dropping the entries that follow. Collapsing and reopening the
+  // sidebar was leaving stray label-less icons behind and losing the tail of the menu because of
+  // exactly that. Showing one icon per destination is also the right thing on its own — two
+  // identical icons pointing at the same section tell the user nothing.
   const flattenForCollapsed = (items: MenuItem[]): MenuItem[] => {
     const result: MenuItem[] = [];
+    const seen = new Set<string>();
+
+    const push = (item: MenuItem) => {
+      if (seen.has(item.id)) return;
+      seen.add(item.id);
+      result.push(item);
+    };
+
     items.forEach(item => {
       if (item.children && item.children.length > 0) {
         // Push children directly (skip the parent group header)
-        item.children.forEach(child => result.push(child));
+        item.children.forEach(push);
       } else {
-        result.push(item);
+        push(item);
       }
     });
     return result;
@@ -380,7 +447,12 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
   // ---- COLLAPSED MODE ----
   if (isCollapsed) {
     return (
+      // Keyed per mode so toggling remounts the tree instead of reconciling the icon-only list
+      // against the labelled one. Both modes return div > nav > keyed rows, so without this React
+      // matches them position-by-position and carries collapsed rows over into the expanded view.
+      // Only the DOM is remounted — this component's own state (expandedItems) is untouched.
       <div
+        key="sidebar-collapsed"
         className={`w-14 h-full flex flex-col border-r transition-all duration-300 ease-in-out overflow-visible ${isDarkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-300'
           }`}
         style={{ position: 'relative' }}
@@ -389,6 +461,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
           {collapsedItems.map(item => {
             const IconComponent = item.icon;
             const isActive = activeSection === item.id;
+            const badgeCount = badgeFor(item.id);
             return (
               <div key={item.id} className="relative group">
                 <button
@@ -396,7 +469,13 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
                   onMouseEnter={e => {
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                     const parentRect = (e.currentTarget as HTMLElement).closest('.h-full')?.getBoundingClientRect();
-                    setTooltipItem({ id: item.id, label: item.label, y: rect.top - (parentRect?.top ?? 0) });
+                    // The count goes into the tooltip too — collapsed, the pill
+                    // is the only signal, and a bare dot does not say how many.
+                    setTooltipItem({
+                      id: item.id,
+                      label: badgeCount > 0 ? `${item.label} (${badgeCount})` : item.label,
+                      y: rect.top - (parentRect?.top ?? 0)
+                    });
                   }}
                   onMouseLeave={() => setTooltipItem(null)}
                   className={`w-full flex items-center justify-center py-3 transition-colors ${isActive
@@ -408,10 +487,17 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
                   style={isActive ? activeStyle : {}}
                   title=""
                 >
-                  <IconComponent
-                    className={`h-5 w-5 ${isActive ? '' : isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}
-                    style={isActive ? { color: colorPalette?.primary || '#7c3aed' } : {}}
-                  />
+                  <div className="relative">
+                    <IconComponent
+                      className={`h-5 w-5 ${isActive ? '' : isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}
+                      style={isActive ? { color: colorPalette?.primary || '#7c3aed' } : {}}
+                    />
+                    {badgeCount > 0 && (
+                      <span className="absolute -top-1.5 -right-2 min-w-[16px] h-[16px] px-1 flex items-center justify-center bg-red-500 text-white text-[9px] font-bold rounded-full leading-none">
+                        {badgeCount > 99 ? '99+' : badgeCount}
+                      </span>
+                    )}
+                  </div>
                 </button>
 
                 {/* Floating tooltip */}
@@ -468,6 +554,11 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     const isExpanded = expandedItems.includes(item.id);
     const isCurrentItemActive = activeSection === item.id;
     const IconComponent = item.icon;
+    // A collapsed parent shows the sum of what its children are hiding, so a
+    // backlog inside Billing is visible without expanding it.
+    const badgeCount = hasChildren
+      ? item.children!.reduce((sum, child) => sum + badgeFor(child.id), 0)
+      : badgeFor(item.id);
 
     return (
       <div key={item.id}>
@@ -489,15 +580,24 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
             }`}
           style={isCurrentItemActive ? activeStyle : {}}
         >
-          <div className="flex items-center">
-            <IconComponent className={`h-5 w-5 mr-3 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`} />
-            <span>{item.label}</span>
+          <div className="flex items-center min-w-0">
+            <IconComponent className={`h-5 w-5 mr-3 flex-shrink-0 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`} />
+            <span className="truncate">{item.label}</span>
           </div>
-          {hasChildren && (
-            <ChevronRight
-              className={`h-4 w-4 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'} transition-transform ${isExpanded ? 'rotate-90' : ''}`}
-            />
-          )}
+          <div className="flex items-center gap-2">
+            {/* An expanded parent's children carry their own pills; showing the
+                rolled-up total as well would double-count it on screen. */}
+            {badgeCount > 0 && !(hasChildren && isExpanded) && (
+              <span className="min-w-[18px] h-[18px] px-1.5 flex items-center justify-center bg-red-500 text-white text-[10px] font-bold rounded-full leading-none">
+                {badgeCount > 99 ? '99+' : badgeCount}
+              </span>
+            )}
+            {hasChildren && (
+              <ChevronRight
+                className={`h-4 w-4 flex-shrink-0 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'} transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+              />
+            )}
+          </div>
         </button>
 
         {hasChildren && isExpanded && (
@@ -510,7 +610,11 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
   };
 
   return (
-    <div className={`w-64 border-r h-full ${isDarkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-300'} flex flex-col transition-all duration-300 ease-in-out overflow-hidden`}>
+    // See the collapsed branch: distinct key so the two modes never share reconciled DOM.
+    <div
+      key="sidebar-expanded"
+      className={`w-64 border-r h-full ${isDarkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-300'} flex flex-col transition-all duration-300 ease-in-out overflow-hidden`}
+    >
       <nav className="flex-1 py-4 overflow-y-auto overflow-x-hidden scrollbar-none">
         {filteredMenuItems.map(item => renderMenuItem(item))}
       </nav>

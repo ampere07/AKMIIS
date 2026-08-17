@@ -82,6 +82,10 @@ export interface BillingDetailRecord extends BillingRecord {
   groupName?: string;
   mikrotikId?: string;
   sessionIp?: string;
+  // The subscriber's PPPoE password, shown in plain text in Technical Details.
+  // Sourced from technical_details, falling back to the job order that
+  // provisioned the line for subscribers onboarded before that column existed.
+  pppoePassword?: string;
   houseFrontPicture?: string;
   accountBalance?: number;
   email?: string;

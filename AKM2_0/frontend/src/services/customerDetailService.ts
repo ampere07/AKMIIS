@@ -53,6 +53,9 @@ export interface CustomerDetailData {
     routerModel?: string;
     routerModemSn?: string;
     ipAddress?: string;
+    // Falls back server-side to the job order that provisioned the line, so
+    // this is populated for subscribers onboarded before the column existed.
+    pppoePassword?: string;
     lcp?: string;
     nap?: string;
     port?: string;

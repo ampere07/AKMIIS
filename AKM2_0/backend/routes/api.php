@@ -3362,6 +3362,11 @@ Route::prefix('notifications')->group(function () {
     Route::get('/unread-count', [\App\Http\Controllers\NotificationController::class , 'getUnreadCount']);
     Route::get('/debug-timezone', [\App\Http\Controllers\NotificationController::class , 'debugTimezone']);
     Route::get('/consolidated', [ConsolidatedNotificationController::class , 'index']);
+
+    // Open-task counters behind the sidebar pills and the header bell.
+    // Authenticated, because the counts are scoped to the caller's
+    // organization and there is nothing sensible to return without a user.
+    Route::middleware('auth:sanctum')->get('/nav-badges', [\App\Http\Controllers\Api\NavBadgeCountController::class , 'index']);
 });
 
 Route::post('/debug/verify-password', function (Request $request) {
@@ -3801,3 +3806,90 @@ Route::prefix('cron-test')->group(function () {
             }
         }
         );    });
+
+/*
+|--------------------------------------------------------------------------
+| Tools — Mikrotik Radius Tool & SmartOLT Tool
+|--------------------------------------------------------------------------
+|
+| Reconciliation utilities ported from the standalone syncradius.php and
+| smartolt.php operator tools. Both mutate live subscriber state, so every
+| route sits behind Sanctum; the controllers scope each request to the
+| caller's organization unless they are SuperAdmin.
+|
+*/
+
+Route::middleware('auth:sanctum')->prefix('radius-reconciliation')->group(function () {
+    Route::get('/servers', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'servers']);
+    // The tool opens on /snapshot (cached, no device contact); /data is the
+    // explicit "Sync & Reconcile Now" action and is the only read that goes to
+    // hardware. Keeping them separate is what stops a page load sweeping the estate.
+    Route::get('/snapshot', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'snapshot']);
+    Route::get('/data', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'data']);
+    Route::get('/logs', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'logs']);
+    Route::get('/export', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'export']);
+
+    Route::post('/sync-password', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'syncPassword']);
+    Route::post('/sync-group-mikrotik', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'syncGroupMikrotik']);
+    Route::post('/sync-group-billing', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'syncGroupBilling']);
+    Route::post('/restrict', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'restrict']);
+    Route::post('/disconnect', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'disconnect']);
+    Route::post('/add-user', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'addUser']);
+    Route::post('/delete-user', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'deleteUser']);
+    Route::post('/resolve-duplicate', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'resolveDuplicate']);
+    Route::post('/bulk', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'bulk']);
+    Route::post('/undo', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'undo']);
+
+    // Aliases. Same handlers, alternative names, so an integration written against
+    // the generic verbs works without the specific ones being renamed out from
+    // under the shipped UI.
+    //
+    // /update-group maps to the Mikrotik direction deliberately: "update the group
+    // to match the DB plan" is the push. The opposite direction — adopting the
+    // device's group as the plan — stays on /sync-group-billing, because the two
+    // change different systems and must never be reachable through one ambiguous
+    // endpoint.
+    Route::post('/update-credentials', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'syncPassword']);
+    Route::post('/update-group', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'syncGroupMikrotik']);
+});
+
+Route::middleware('auth:sanctum')->prefix('smartolt-reconciliation')->group(function () {
+    Route::get('/state', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'state']);
+    Route::get('/optical-power', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'opticalPower']);
+    Route::get('/alignment-preview', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'alignmentPreview']);
+    Route::get('/mac-alignment', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'macAlignment']);
+    Route::get('/profile-preview', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'profilePreview']);
+    Route::get('/cleanup-preview', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'cleanupPreview']);
+    Route::get('/logs', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'logs']);
+    Route::get('/export', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'export']);
+
+    Route::post('/start-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'startJob']);
+    Route::post('/process-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'processJob']);
+    Route::post('/abort-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'abortJob']);
+    Route::post('/undo', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'undo']);
+});
+
+/*
+|--------------------------------------------------------------------------
+| Tools — Xendit Payment Reconciliation
+|--------------------------------------------------------------------------
+|
+| The staff-facing counterpart to the public checkout endpoints registered
+| further up this file. These read and settle real money against real
+| accounts, so every one of them sits behind Sanctum and is scoped to the
+| caller's organization unless they are SuperAdmin.
+|
+| Posting still happens in exactly one place. /force-post hands the row to
+| PaymentWorkerService::postPayment(), whose lockForUpdate() claim is what
+| prevents a payment being credited twice — there is no second posting path
+| here and no transaction wrapped around a gateway call.
+|
+*/
+
+Route::middleware('auth:sanctum')->prefix('xendit-reconciliation')->group(function () {
+    Route::get('/audit', [\App\Http\Controllers\Api\XenditPaymentController::class, 'reconciliationAudit']);
+
+    Route::post('/verify', [\App\Http\Controllers\Api\XenditPaymentController::class, 'reconciliationVerify']);
+    Route::post('/force-post', [\App\Http\Controllers\Api\XenditPaymentController::class, 'reconciliationForcePost']);
+    Route::post('/mark-expired', [\App\Http\Controllers\Api\XenditPaymentController::class, 'reconciliationMarkExpired']);
+});

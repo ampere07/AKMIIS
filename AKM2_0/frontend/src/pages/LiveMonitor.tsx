@@ -75,6 +75,16 @@ ChartJS.register(
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL;
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/**
+ * The only widgets an administrator sees on this page.
+ *
+ * Monitoring was SuperAdmin-only because most of these widgets are revenue —
+ * invoices, transactions, portal takings, payment methods. Administrators are
+ * given the four operational ones, which answer "who is working and what is
+ * queued" without exposing what the business earned.
+ */
+const ADMIN_WIDGET_IDS = ['tech_availability', 'team_detailed_queue', 'agent_detailed_queue', 'tech_live_location'];
+
 const LiveMonitor: React.FC = () => {
   const [widgets, setWidgets] = useState<Record<string, any>>({});
   const [widgetStates, setWidgetStates] = useState<Record<string, WidgetState>>({});
@@ -96,6 +106,22 @@ const LiveMonitor: React.FC = () => {
   const authData = JSON.parse(localStorage.getItem('authData') || '{}');
   const userOrgId = authData.organization_id;
   const isSuperAdmin = userOrgId === null || userOrgId === undefined;
+
+  // Administrators now reach this page, but only for the operational widgets.
+  //
+  // `role` is not consistently shaped across the places that write authData —
+  // sometimes a string, sometimes the role object — so it is read defensively
+  // and role_id is accepted as the fallback.
+  //
+  // Note this is a presentation restriction, not an access control: every
+  // widget is served by the same /monitor/handle endpoint, which authorises the
+  // request but does not scope it by role. An administrator who knows a widget
+  // id can still query it directly. Making that a real boundary belongs on the
+  // backend and is not attempted here.
+  const roleRaw: any = authData.role;
+  const userRoleName = (typeof roleRaw === 'string' ? roleRaw : (roleRaw?.role_name || roleRaw?.name || authData.role_name || '')).toString().toLowerCase();
+  const isAdministrator = userRoleName === 'administrator' || String(authData.role_id ?? '') === '1';
+  const isWidgetAllowed = (id: string) => !isAdministrator || ADMIN_WIDGET_IDS.includes(id);
 
   // React Grid Layout state
 
@@ -251,8 +277,11 @@ const LiveMonitor: React.FC = () => {
 
     const currentStates = states || widgetStates;
 
-    // Only fetch visible widgets — hidden ones are skipped to avoid wasting requests
-    const visibleIds = Object.keys(WIDGETS).filter(id => currentStates[id]?.visible);
+    // Only fetch visible widgets — hidden ones are skipped to avoid wasting requests.
+    // The allowed-widget check is repeated here rather than trusted from the
+    // visibility flag: /monitor/handle does not scope by role, so this is what
+    // stops an administrator's browser requesting revenue data at all.
+    const visibleIds = Object.keys(WIDGETS).filter(id => isWidgetAllowed(id) && currentStates[id]?.visible);
 
     // Batch requests in groups of 4 to avoid flooding the server with 20+ simultaneous requests.
     // The 6 heavy yearly widgets (invoice/transactions/portal amount+count) each do a
@@ -343,6 +372,17 @@ const LiveMonitor: React.FC = () => {
       }
     });
 
+    // Administrators are held to the four operational widgets regardless of
+    // what was restored above. This runs after the localStorage merge on
+    // purpose: a user who was a SuperAdmin on this browser, or who was shown
+    // everything before this restriction existed, has saved states marking the
+    // financial widgets visible, and those must not survive the role change.
+    if (isAdministrator) {
+      Object.keys(initialStates).forEach(id => {
+        initialStates[id].visible = ADMIN_WIDGET_IDS.includes(id);
+      });
+    }
+
     // Initialize layout from saved state or default
     const savedLayouts = localStorage.getItem('dashboard_layouts');
     let initialLayouts: any = { lg: [] };
@@ -351,7 +391,9 @@ const LiveMonitor: React.FC = () => {
       initialLayouts = JSON.parse(savedLayouts);
     } else {
       // Create default layout - ONLY for visible widgets to ensure they file left-to-right
-      const visibleIds = Object.keys(WIDGETS).filter(id => DEFAULT_VISIBLE_WIDGETS.includes(id));
+      // Allowed-filtered so an administrator on a fresh browser does not get a
+      // default layout reserving grid slots for widgets that never render.
+      const visibleIds = Object.keys(WIDGETS).filter(id => isWidgetAllowed(id) && DEFAULT_VISIBLE_WIDGETS.includes(id));
       const defaultLayout = visibleIds.map((id, i) => {
         const config = WIDGETS[id];
         return {
@@ -517,6 +559,11 @@ const LiveMonitor: React.FC = () => {
   };
 
   const toggleWidgetVisibility = (id: string) => {
+    // Nothing in the UI offers a disallowed widget to an administrator, but the
+    // guard is here rather than only at the call sites so a future caller
+    // cannot reintroduce one by accident.
+    if (!isWidgetAllowed(id)) return;
+
     setWidgetStates(prev => {
       const isVisible = !prev[id]?.visible;
       const nextStates = {
@@ -1384,6 +1431,18 @@ const LiveMonitor: React.FC = () => {
           ? JSON.parse(template.style_data)
           : template.style_data || {};
 
+        // A template saved by a SuperAdmin carries the financial widgets marked
+        // visible. Re-apply the restriction on load so applying one cannot put
+        // an administrator's dashboard into a state the rest of this page is
+        // filtering against.
+        if (isAdministrator) {
+          Object.keys(layoutData).forEach(id => {
+            if (layoutData[id]) {
+              layoutData[id].visible = ADMIN_WIDGET_IDS.includes(id);
+            }
+          });
+        }
+
         setWidgetStates(layoutData);
 
         if (styleData.darkMode !== undefined) {
@@ -1627,7 +1686,9 @@ const LiveMonitor: React.FC = () => {
               <div className="flex gap-2">
                 <button
                   onClick={() => {
-                    const ids = Object.keys(WIDGETS);
+                    // "All" means all the caller is allowed to see, so this
+                    // cannot be used to restore the financial widgets.
+                    const ids = Object.keys(WIDGETS).filter(id => isWidgetAllowed(id));
                     const nextStates = { ...widgetStates };
                     ids.forEach(id => {
                       nextStates[id] = { ...nextStates[id], visible: true };
@@ -1671,7 +1732,7 @@ const LiveMonitor: React.FC = () => {
                 </button>
                 <button
                   onClick={() => {
-                    const ids = Object.keys(WIDGETS);
+                    const ids = Object.keys(WIDGETS).filter(id => isWidgetAllowed(id));
                     setWidgetStates(prev => {
                       const nextStates = { ...prev };
                       ids.forEach(id => {
@@ -1690,7 +1751,7 @@ const LiveMonitor: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-              {Object.entries(WIDGETS).map(([id, config]) => (
+              {Object.entries(WIDGETS).filter(([id]) => isWidgetAllowed(id)).map(([id, config]) => (
                 <label
                   key={id}
                   className={`flex items-center gap-2 p-2 rounded cursor-pointer ${isDarkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
@@ -1728,7 +1789,7 @@ const LiveMonitor: React.FC = () => {
           }}
           draggableHandle=".drag-handle"
         >
-          {Object.keys(WIDGETS).filter(id => widgetStates[id]?.visible).map((id, visibleIdx) => {
+          {Object.keys(WIDGETS).filter(id => isWidgetAllowed(id) && widgetStates[id]?.visible).map((id, visibleIdx) => {
             const config = WIDGETS[id];
             const itemsPerRow = Math.max(1, Math.floor(12 / (config.w || 4)));
 

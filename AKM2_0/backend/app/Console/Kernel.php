@@ -221,6 +221,95 @@ class Kernel extends ConsoleKernel
                      \Illuminate\Support\Facades\Log::error('Failed payments retry failed');
                  });
 
+        // Reconcile pending Xendit payments every 5 minutes
+        // Uses: XenditReconciliationService
+        // Dependencies: Xendit API
+        //
+        // The safety net under the webhook. Asks Xendit directly about every
+        // payment we created but never saw settle, so a dropped callback no
+        // longer strands a paying customer at PENDING. It only ever moves a row
+        // to QUEUED — 'payments:process' still does the posting — so this
+        // cannot double-credit an account no matter how often it runs.
+        //
+        // Every 5 minutes rather than every 2: the per-row backoff inside the
+        // service is what controls how often any given payment is actually
+        // looked up, and the tightest tier there is 2 minutes.
+        $schedule->command('cron:reconcile-xendit-payments')
+                 ->everyFiveMinutes()
+                 ->withoutOverlapping()
+                 ->runInBackground()
+                 ->onSuccess(function () {
+                     \Illuminate\Support\Facades\Log::info('Xendit reconciliation completed successfully');
+                 })
+                 ->onFailure(function () {
+                     \Illuminate\Support\Facades\Log::error('Xendit reconciliation failed');
+                 });
+
+        // ===================================================================
+        // RECONCILIATION TOOLS — NIGHTLY UNATTENDED PASSES
+        // ===================================================================
+
+        // SmartOLT: align ONU names to RADIUS usernames, retire long-dark ONUs.
+        //
+        // Uses: SmartOltReconciliationService (+ RadiusReconciliationService for
+        //       live session state)
+        // Dependencies: SmartOLT API, MikroTik User Manager REST
+        // Logs: storage/logs/smartolt/daily-automation.log
+        //
+        // 02:00 — after the billing generators and the disconnect sweep have
+        // settled, so an account terminated overnight is already terminated in
+        // the database by the time the cleanup phase reads it.
+        //
+        // Safe if it runs late, twice, or is cut short. Every phase recomputes
+        // what is left to do from current state rather than replaying a cursor:
+        // an ONU already named for its subscriber is skipped and a deleted ONU
+        // is gone from the inventory, so a second run applies nothing. A run
+        // stopped by a SmartOLT quota limit checkpoints in `tool_jobs` and the
+        // next run resumes from there. Deletion additionally requires the ONU to
+        // be dark past the threshold, its account Terminated, no open job order,
+        // and no live RADIUS session — and refuses to run at all when billing or
+        // session state cannot be read.
+        $schedule->command('cron:smartolt-daily-automation')
+                 ->dailyAt('02:00')
+                 ->timezone(config('app.timezone'))
+                 ->withoutOverlapping()
+                 ->runInBackground()
+                 ->onSuccess(function () {
+                     \Illuminate\Support\Facades\Log::info('SmartOLT daily automation completed successfully');
+                 })
+                 ->onFailure(function () {
+                     \Illuminate\Support\Facades\Log::error('SmartOLT daily automation failed');
+                 });
+
+        // MikroTik RADIUS: adopt missing PPPoE passwords, settle plan groups,
+        // enforce restriction on accounts billing has written off.
+        //
+        // Uses: RadiusReconciliationService
+        // Dependencies: MikroTik User Manager REST
+        // Logs: storage/logs/radiusreconcile/daily-reconcile.log
+        //
+        // 03:15 — an hour after the SmartOLT pass so the two never contend for
+        // the same RouterOS devices, and after the disconnect sweep so the
+        // restriction phase acts on settled billing statuses.
+        //
+        // Safe if it runs late or twice: every mutation compares current state
+        // first and skips when both sides already agree, so a re-run applies
+        // nothing. It creates no records and enqueues nothing, so there is
+        // nothing a repeat run could duplicate. Account creation, deletion and
+        // duplicate resolution are deliberately NOT automated — they stay in the
+        // operator's tool.
+        $schedule->command('cron:radius-reconcile-daily')
+                 ->dailyAt('03:15')
+                 ->timezone(config('app.timezone'))
+                 ->withoutOverlapping()
+                 ->runInBackground()
+                 ->onSuccess(function () {
+                     \Illuminate\Support\Facades\Log::info('RADIUS daily reconciliation completed successfully');
+                 })
+                 ->onFailure(function () {
+                     \Illuminate\Support\Facades\Log::error('RADIUS daily reconciliation failed');
+                 });
+
         // ===================================================================
         // MAINTENANCE & CLEANUP
         // ===================================================================

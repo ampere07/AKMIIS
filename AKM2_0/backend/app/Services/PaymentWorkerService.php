@@ -98,6 +98,69 @@ class PaymentWorkerService
     }
 
     /**
+     * Post one payment on demand, by id.
+     *
+     * The operator-facing counterpart to processPayments(): the Xendit reconciliation
+     * screen uses it to settle a single confirmed-but-unposted transaction without
+     * waiting for the next worker pass. It is a thin entry point on purpose — the
+     * posting itself is still processPayment(), so ledger distribution, invoice
+     * settlement, the receipt SMS and email and the RADIUS reconnect all keep running
+     * through exactly one implementation, and double-posting keeps being prevented in
+     * exactly one place (the lockForUpdate() claim inside processPayment()).
+     *
+     * Safe to call twice: the second call finds the row already PROCESSING or PAID
+     * and returns skipped without touching a balance.
+     *
+     * @return array{success: bool, skipped: bool, message: string, status: string|null}
+     */
+    public function postPayment(int $pendingPaymentId): array
+    {
+        $payment = DB::table('pending_payments')->where('id', $pendingPaymentId)->first();
+
+        if (!$payment) {
+            return ['success' => false, 'skipped' => false, 'message' => "Payment #{$pendingPaymentId} does not exist.", 'status' => null];
+        }
+
+        if (in_array($payment->status, ['PROCESSING', 'PAID'], true)) {
+            return [
+                'success' => true,
+                'skipped' => true,
+                'message' => "Payment {$payment->reference_no} has already been posted (status {$payment->status}).",
+                'status'  => $payment->status,
+            ];
+        }
+
+        $this->workerLog("Manual post requested for Ref {$payment->reference_no} (id {$pendingPaymentId})");
+
+        try {
+            $this->processPayment($payment);
+        } catch (Exception $e) {
+            Log::error('Manual payment post failed', [
+                'pending_payment_id' => $pendingPaymentId,
+                'reference_no'       => $payment->reference_no,
+                'error'              => $e->getMessage(),
+            ]);
+
+            return ['success' => false, 'skipped' => false, 'message' => 'Posting failed: ' . $e->getMessage(), 'status' => null];
+        }
+
+        // processPayment() reports its outcome through the row, not a return value.
+        $after  = DB::table('pending_payments')->where('id', $pendingPaymentId)->first();
+        $status = $after->status ?? null;
+
+        if ($status === 'PAID') {
+            return ['success' => true, 'skipped' => false, 'message' => "Payment {$payment->reference_no} posted.", 'status' => $status];
+        }
+
+        return [
+            'success' => false,
+            'skipped' => false,
+            'message' => "Payment {$payment->reference_no} was not posted (status {$status}). Check the payment worker log for the reason.",
+            'status'  => $status,
+        ];
+    }
+
+    /**
      * Process individual payment
      */
     private function processPayment($payment)
@@ -109,28 +172,54 @@ class PaymentWorkerService
             $ref = $payment->reference_no;
             $accountNo = $payment->account_no;
             $amount = floatval($payment->amount);
-            $rawPayload = $payment->callback_payload;
 
-            // Validate payment status from callback
+            // Claim the record atomically, before anything else touches it.
+            //
+            // The rows this worker picks up are selected outside the transaction,
+            // and since reconciliation (cron:reconcile-xendit-payments) can move a
+            // payment to QUEUED at the same moment the webhook does, two passes can
+            // legitimately hold the same row in their result set. Re-reading the
+            // status under lockForUpdate() and proceeding only if it is still
+            // claimable is what stops both of them distributing the same payment to
+            // the same invoices twice.
+            //
+            // A plain UPDATE here would not do it: both workers would "succeed" and
+            // both would go on to credit the account.
+            $claimed = DB::table('pending_payments')
+                ->where('id', $id)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$claimed || in_array($claimed->status, ['PROCESSING', 'PAID'], true)) {
+                $this->workerLog("Skipped: Ref $ref already claimed or posted (status: " . ($claimed->status ?? 'missing') . ")");
+                DB::commit();
+                return;
+            }
+
+            // Audit the payload as it stands under the lock, not the copy read
+            // when the batch was selected. Reconciliation may have written a
+            // confirmed-paid payload onto this row in between, and judging it on
+            // the stale copy would mark a genuinely settled payment FAILED.
+            $rawPayload = $claimed->callback_payload;
+
             if ($rawPayload) {
                 $json = json_decode($rawPayload, true);
                 $gwStatus = strtoupper($json['status'] ?? '');
-                
+
                 $isLegitPaid = in_array($gwStatus, ['PAID', 'COMPLETED', 'SETTLED', 'PAYMENT_SUCCESS']);
 
                 if (!$isLegitPaid) {
                     $this->workerLog("AUDIT FAIL: Ref $ref has payload but status is $gwStatus. Marking FAILED.");
-                    
+
                     DB::table('pending_payments')
                         ->where('id', $id)
                         ->update(['status' => 'FAILED', 'updated_at' => now()]);
-                    
+
                     DB::commit();
                     return;
                 }
             }
 
-            // Lock record for processing
             DB::table('pending_payments')
                 ->where('id', $id)
                 ->update([

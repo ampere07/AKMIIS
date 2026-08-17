@@ -13,6 +13,8 @@ import {
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import NavBadge from '../components/NavBadge';
+import { useNavBadgeCounts } from '../hooks/useNavBadgeCounts';
 
 interface SidebarProps {
   activeSection: string;
@@ -45,6 +47,17 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
   const [isMenuExpanded, setIsMenuExpanded] = useState(false);
   const [measuredHeight, setMeasuredHeight] = useState(300);
   const { width } = useWindowDimensions();
+  // Technician-only, and derived from lists already in memory — this adds no
+  // request to the app's startup or to any navigation.
+  const badgeCounts = useNavBadgeCounts(userRole, roleId);
+
+  /** The outstanding count for a tab, or 0 for tabs that do not carry one. */
+  const badgeFor = (itemId: string): number => {
+    if (itemId === 'job-order') return badgeCounts.jobOrder;
+    if (itemId === 'service-order') return badgeCounts.serviceOrder;
+    return 0;
+  };
+
   const glideAnim = useRef(new Animated.Value(0)).current;
   const expandAnim = useRef(new Animated.Value(0)).current;
   const containerHeightAnim = useRef(new Animated.Value(68)).current;
@@ -168,6 +181,13 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
   const expandedItems = [...navigationItems, ...(menuPageItem ? [menuPageItem] : [])];
   const bottomBarItemCount = needsExpandableMenu ? visibleItems.length + 1 : bottomBarItems.length;
 
+  // Badged work sitting behind "More" rather than on the bar itself.
+  const hiddenBadgeCount = needsExpandableMenu
+    ? expandedItems
+        .filter(item => !visibleItems.some(visible => visible.id === item.id))
+        .reduce((sum, item) => sum + badgeFor(item.id), 0)
+    : 0;
+
   const isActiveInOverflow = needsExpandableMenu &&
     !visibleItems.some(item => item.id === activeSection) &&
     expandedItems.some(item => item.id === activeSection);
@@ -268,6 +288,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
           justifyContent: 'center',
           alignItems: 'center',
           marginBottom: 6,
+          // relative by default in RN, which is what NavBadge anchors to.
           ...(isActive ? {} : {
             shadowColor: '#000',
             shadowOffset: { width: 0, height: 1 },
@@ -277,6 +298,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
           }),
         }}>
           <IconComponent size={22} color={isActive ? primaryColor : '#6b7280'} />
+          <NavBadge count={badgeFor(item.id)} />
         </View>
         <Text
           style={{
@@ -500,7 +522,13 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
                   zIndex: 10,
                 }}
               >
-                <IconComponent size={22} color={isActive ? primaryColor : '#4b5563'} />
+                {/* Wrapper exists purely to give the badge something the size
+                    of the icon to anchor to — on the Pressable itself it would
+                    offset from the full-height tab instead. */}
+                <View>
+                  <IconComponent size={22} color={isActive ? primaryColor : '#4b5563'} />
+                  <NavBadge count={badgeFor(item.id)} compact />
+                </View>
                 <Text style={{
                   width: '100%',
                   textAlign: 'center',
@@ -527,20 +555,32 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
                 zIndex: 10,
               }}
             >
-              <Animated.View style={{
-                transform: [{
-                  rotate: expandAnim.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: ['0deg', '180deg'],
-                  })
-                }]
-              }}>
-                {isMenuExpanded ? (
-                  <X size={22} color={isActiveInOverflow || activeSection === 'menu' ? primaryColor : '#4b5563'} />
-                ) : (
-                  <ChevronUp size={22} color={isActiveInOverflow || activeSection === 'menu' ? primaryColor : '#4b5563'} />
+              <View>
+                <Animated.View style={{
+                  transform: [{
+                    rotate: expandAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: ['0deg', '180deg'],
+                    })
+                  }]
+                }}>
+                  {isMenuExpanded ? (
+                    <X size={22} color={isActiveInOverflow || activeSection === 'menu' ? primaryColor : '#4b5563'} />
+                  ) : (
+                    <ChevronUp size={22} color={isActiveInOverflow || activeSection === 'menu' ? primaryColor : '#4b5563'} />
+                  )}
+                </Animated.View>
+                {/* Whatever is badged but folded into the overflow. Without
+                    this, a technician whose Job Order tab did not fit on the
+                    bottom bar would have no indication there is work waiting.
+                    Hidden while the panel is open, where the real badges show. */}
+                {!isMenuExpanded && (
+                  <NavBadge
+                    count={hiddenBadgeCount}
+                    compact
+                  />
                 )}
-              </Animated.View>
+              </View>
               <Text style={{
                 width: '100%',
                 textAlign: 'center',

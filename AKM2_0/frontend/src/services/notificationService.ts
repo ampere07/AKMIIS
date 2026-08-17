@@ -1,6 +1,14 @@
 import apiClient from '../config/api';
 import { requestCache } from '../utils/requestCache';
 
+// Not named NotificationType: this module already exports that name as an
+// alias of the Notification interface, and something may still import it.
+export type NotificationKind =
+  | 'application'
+  | 'job_order_done'
+  | 'service_order_done'
+  | 'transaction_revert';
+
 export interface Notification {
   id: number;
   customer_name: string;
@@ -9,11 +17,26 @@ export interface Notification {
   created_at?: string;
   formatted_date: string;
   // Consolidated fields
-  type?: 'application' | 'job_order_done';
+  type?: NotificationKind;
   title?: string;
   message?: string;
   timestamp?: number;
+  raw_date?: string;
 }
+
+/**
+ * Where a click on each kind of notification goes.
+ *
+ * The id on every entry is the id of the underlying record, so the section and
+ * the id together are enough to open the right row. Kept here rather than in
+ * Header so the mapping has one home if another surface starts routing them.
+ */
+export const NOTIFICATION_TARGET_SECTION: Record<NotificationKind, string> = {
+  application: 'application-management',
+  job_order_done: 'job-order',
+  service_order_done: 'service-order',
+  transaction_revert: 'transactions-revert',
+};
 
 export interface NotificationResponse {
   success: boolean;

@@ -20,6 +20,7 @@ class TechnicalDetail extends Model
         'router_model',
         'router_modem_sn',
         'ip_address',
+        'pppoe_password',
         'lcp',
         'nap',
         'port',

@@ -14,6 +14,7 @@ import ConfirmationModal from '../modals/MoveToJoModal';
 import StartTimerModal from '../modals/StartTimerModal';
 import SpeedtestUploadModal from '../modals/SpeedtestUploadModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import ContactActions from './common/ContactActions';
 import { getApplication } from '../services/applicationService';
 import { Application } from '../types/application';
 import { getJobOrderItems, JobOrderItem } from '../services/jobOrderItemService';
@@ -896,8 +897,23 @@ const JobOrderDetails: React.FC<JobOrderDetailsPropsExtended> = ({ jobOrder, onC
     jobOrderNumber: () => <Text style={valStyle} selectable={true}>{jobOrder.id || jobOrder.JobOrder_ID || (applicationData ? 'App-' + applicationData.id : 'N/A')}</Text>,
     referredBy: () => <Text style={valStyle} selectable={true}>{jobOrder.Referred_By || jobOrder.referred_by || (applicationData?.referred_by) || 'None'}</Text>,
     fullName: () => <Text style={valStyle} selectable={true}>{getClientFullName()}</Text>,
-    contactNumber: () => <Text style={valStyle} selectable={true}>{jobOrder.Contact_Number || jobOrder.mobile_number || (applicationData?.mobile_number) || 'Not provided'}</Text>,
-    secondContactNumber: () => <Text style={valStyle} selectable={true}>{jobOrder.Second_Contact_Number || jobOrder.secondary_mobile_number || (applicationData?.secondary_mobile_number) || 'Not provided'}</Text>,
+    // Call and SMS sit on the number itself. A technician confirming an install
+    // is the single most repeated action in this screen, and it used to mean
+    // copying the number out and leaving the app. The SMS button prefills the
+    // agreed spiel; it does not send — the device's composer opens and the
+    // technician presses send.
+    contactNumber: () => (
+      <ContactActions
+        value={jobOrder.Contact_Number || jobOrder.mobile_number || (applicationData?.mobile_number)}
+        valueStyle={valStyle}
+      />
+    ),
+    secondContactNumber: () => (
+      <ContactActions
+        value={jobOrder.Second_Contact_Number || jobOrder.secondary_mobile_number || (applicationData?.secondary_mobile_number)}
+        valueStyle={valStyle}
+      />
+    ),
     emailAddress: () => <Text style={valStyle} selectable={true}>{jobOrder.Email_Address || jobOrder.email_address || (applicationData?.email_address) || 'Not provided'}</Text>,
     fullAddress: () => <Text style={valStyle} selectable={true}>{getClientFullAddress()}</Text>,
     addressCoordinates: () => {
