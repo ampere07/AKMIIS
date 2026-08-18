@@ -37,17 +37,17 @@ class SmartOltReconciliationService
     public const RESOURCE_TYPE = 'smartolt_tool';
 
     // ---- Optical power thresholds, in dBm ----------------------------------
-    public const RX_OPTIMAL_ABOVE  = -24.0;
+    public const RX_OPTIMAL_ABOVE = -24.0;
     public const RX_CRITICAL_BELOW = -27.0;
 
-    public const SIGNAL_OPTIMAL  = 'optimal';
-    public const SIGNAL_WARNING  = 'warning';
+    public const SIGNAL_OPTIMAL = 'optimal';
+    public const SIGNAL_WARNING = 'warning';
     public const SIGNAL_CRITICAL = 'critical';
-    public const SIGNAL_OFFLINE  = 'offline';
+    public const SIGNAL_OFFLINE = 'offline';
 
     // ---- Background job types ----------------------------------------------
     public const JOB_SMARTOLT_SYNC = 'smartolt_sync';
-    public const JOB_RADIUS_SCAN   = 'radius_scan';
+    public const JOB_RADIUS_SCAN = 'radius_scan';
 
     /**
      * Per-ONU optical power and bridge-MAC crawl.
@@ -60,12 +60,23 @@ class SmartOltReconciliationService
      * accepted alias: it is what already-deployed frontends post and what any job
      * row still sitting in `tool_jobs` carries. Both resolve to the same step.
      */
-    public const JOB_OPTICAL_SCAN  = 'optical_scan';
+    public const JOB_OPTICAL_SCAN = 'optical_scan';
     public const JOB_MAC_DISCOVERY = 'mac_discovery';
 
-    public const JOB_RENAME        = 'rename';
-    public const JOB_PROFILE_SYNC  = 'profile_sync';
-    public const JOB_DELETE        = 'delete';
+    public const JOB_RENAME = 'rename';
+    public const JOB_PROFILE_SYNC = 'profile_sync';
+    public const JOB_DELETE = 'delete';
+
+    /**
+     * Adopt the ONU's SmartOLT serial as the subscriber's router/modem SN.
+     *
+     * The only job in this service that writes a billing row rather than calling
+     * SmartOLT: it copies the hardware serial the OLT reports into
+     * `technical_details.router_modem_sn`. Direction is deliberately one-way —
+     * SmartOLT is where the serial is read off the device, so it is the source of
+     * truth and billing is the copy.
+     */
+    public const JOB_SN_ALIGNMENT = 'sn_alignment';
 
     public const JOB_TYPES = [
         self::JOB_SMARTOLT_SYNC,
@@ -74,15 +85,16 @@ class SmartOltReconciliationService
         self::JOB_MAC_DISCOVERY,
         self::JOB_RENAME,
         self::JOB_PROFILE_SYNC,
+        self::JOB_SN_ALIGNMENT,
         self::JOB_DELETE,
     ];
 
-    public const STATUS_PENDING   = 'pending';
-    public const STATUS_RUNNING   = 'running';
-    public const STATUS_PAUSED    = 'paused';
+    public const STATUS_PENDING = 'pending';
+    public const STATUS_RUNNING = 'running';
+    public const STATUS_PAUSED = 'paused';
     public const STATUS_COMPLETED = 'completed';
-    public const STATUS_FAILED    = 'failed';
-    public const STATUS_ABORTED   = 'aborted';
+    public const STATUS_FAILED = 'failed';
+    public const STATUS_ABORTED = 'aborted';
 
     /** Statuses that still own the single active-job slot. */
     public const LIVE_STATUSES = [self::STATUS_PENDING, self::STATUS_RUNNING, self::STATUS_PAUSED];
@@ -108,11 +120,11 @@ class SmartOltReconciliationService
      */
     public const AUTOMATION_OFFLINE_DAYS = 3;
 
-    private const LOG_CHANNEL     = 'smartoltrelated';
-    private const LOG_PREFIX      = 'SmartOLT_Reconciliation';
-    private const CACHE_PREFIX    = 'smartolt_tool:';
-    private const CACHE_TTL       = 21600; // 6h — inventory is re-synced by an explicit job
-    private const INVENTORY_PAGE  = 100;
+    private const LOG_CHANNEL = 'smartoltrelated';
+    private const LOG_PREFIX = 'SmartOLT_Reconciliation';
+    private const CACHE_PREFIX = 'smartolt_tool:';
+    private const CACHE_TTL = 21600; // 6h — inventory is re-synced by an explicit job
+    private const INVENTORY_PAGE = 100;
     private const REQUEST_TIMEOUT = 45;
     private const SUBSCRIBER_CHUNK = 500;
 
@@ -125,8 +137,27 @@ class SmartOltReconciliationService
      * slice of 50 per-ONU API calls would outlive an HTTP timeout on a slow OLT, so
      * the loop also stops once it has spent its time budget, whichever comes first.
      */
-    private const SLICE_SIZE            = 50;
-    private const SLICE_BUDGET_SECONDS  = 20;
+    private const SLICE_SIZE = 50;
+    private const SLICE_BUDGET_SECONDS = 20;
+
+    /**
+     * How long a driver's claim on a job stays valid.
+     *
+     * A driver killed mid-slice — a worker restart, a PHP fatal, a closed tab — never
+     * releases its claim. Anything older than this is treated as abandoned and may be
+     * taken over, so a job cannot be stranded by a driver that went away. It is well
+     * clear of SLICE_BUDGET_SECONDS so a slow slice is never mistaken for a dead one.
+     */
+    private const CLAIM_TTL_MINUTES = 5;
+
+    /**
+     * Wall-clock budget for one `cron:tool-jobs-drain` pass.
+     *
+     * Sized to finish inside a one-minute schedule so consecutive passes do not queue
+     * up behind each other. A job that needs longer is simply resumed next minute
+     * from the checkpoint this pass left.
+     */
+    private const DRIVE_BUDGET_SECONDS = 50;
 
     // ---- Rate limiting ------------------------------------------------------
 
@@ -170,6 +201,31 @@ class SmartOltReconciliationService
     /** No MAC has been discovered for this ONU yet — run MAC discovery first. */
     public const ALIGN_NO_MAC = 'no_mac';
 
+    // ---- SN alignment row states --------------------------------------------
+    //
+    // Matching is MAC-only, exactly as the name-alignment pass is: the bridge MAC
+    // behind the ONU is matched to a live PPPoE calling-station-id, and the session's
+    // username locates the billing record. Nothing here matches on the ONU's *name*,
+    // because a misnamed ONU would then write its serial onto somebody else's account.
+
+    /** Billing already carries this ONU's serial. */
+    public const SN_ALIGNED = 'sn_aligned';
+
+    /** Matched, and the billing record has no serial at all — filling a blank. */
+    public const SN_MISSING = 'sn_missing';
+
+    /** Matched, but billing carries a different serial — this one overwrites a value. */
+    public const SN_MISMATCH = 'sn_mismatch';
+
+    /** Matched to a session whose username has no technical_details row. */
+    public const SN_NO_SUBSCRIBER = 'sn_no_subscriber';
+
+    /** The ONU has a discovered MAC, but no live RADIUS session carries it. */
+    public const SN_UNMATCHED = 'sn_unmatched';
+
+    /** No MAC discovered for this ONU yet, or SmartOLT reports no serial for it. */
+    public const SN_NO_MAC = 'sn_no_mac';
+
     private ?SmartOlt $config = null;
 
     /**
@@ -201,15 +257,15 @@ class SmartOltReconciliationService
     public function getState(bool $includeRows = false, ?int $organizationId = null): array
     {
         $configured = $this->smartOltConfig() !== null;
-        $inventory  = $this->cachedInventory();
-        $statuses   = $this->cachedStatuses();
-        $optical    = $this->cachedOptical();
+        $inventory = $this->cachedInventory();
+        $statuses = $this->cachedStatuses();
+        $optical = $this->cachedOptical();
 
         $signal = [
-            self::SIGNAL_OPTIMAL  => 0,
-            self::SIGNAL_WARNING  => 0,
+            self::SIGNAL_OPTIMAL => 0,
+            self::SIGNAL_WARNING => 0,
             self::SIGNAL_CRITICAL => 0,
-            self::SIGNAL_OFFLINE  => 0,
+            self::SIGNAL_OFFLINE => 0,
         ];
 
         $statusCounts = [];
@@ -220,47 +276,51 @@ class SmartOltReconciliationService
             $statusCounts[$status] = ($statusCounts[$status] ?? 0) + 1;
 
             $reading = $optical['items'][$externalId] ?? null;
-            $band    = $this->classifySignal($reading['rx_power'] ?? null, $status);
+            $band = $this->classifySignal($reading['rx_power'] ?? null, $status);
             $signal[$band]++;
 
             if ($includeRows) {
                 $rows[] = [
-                    'external_id'        => (string) $externalId,
-                    'sn'                 => $onu['sn'] ?? '',
-                    'name'               => $onu['name'] ?? '',
-                    'olt_name'           => $onu['olt_name'] ?? '',
-                    'board'              => $onu['board'] ?? '',
-                    'port'               => $onu['port'] ?? '',
-                    'zone_name'          => $onu['zone_name'] ?? '',
-                    'odb_name'           => $onu['odb_name'] ?? '',
-                    'address'            => $onu['address'] ?? '',
-                    'contact'            => $onu['contact'] ?? '',
-                    'status'             => $status,
+                    'external_id' => (string) $externalId,
+                    'sn' => $onu['sn'] ?? '',
+                    'name' => $onu['name'] ?? '',
+                    'olt_name' => $onu['olt_name'] ?? '',
+                    'board' => $onu['board'] ?? '',
+                    'port' => $onu['port'] ?? '',
+                    'zone_name' => $onu['zone_name'] ?? '',
+                    'odb_name' => $onu['odb_name'] ?? '',
+                    'address' => $onu['address'] ?? '',
+                    'contact' => $onu['contact'] ?? '',
+                    'status' => $status,
                     'last_status_change' => $onu['last_status_change'] ?? '',
-                    'days_offline'       => $this->daysOffline($onu, $statuses),
-                    'rx_power'           => $reading['rx_power'] ?? null,
-                    'tx_power'           => $reading['tx_power'] ?? null,
-                    'signal'             => $band,
-                    'signal_checked_at'  => $reading['checked_at'] ?? null,
+                    'days_offline' => $this->daysOffline($onu, $statuses),
+                    // Both legs of the PON link. `rx_power` stays the ONU-side alias
+                    // it has always been, so existing readers are unaffected.
+                    'onu_rx' => $reading['onu_rx'] ?? ($reading['rx_power'] ?? null),
+                    'olt_rx' => $reading['olt_rx'] ?? null,
+                    'rx_power' => $reading['rx_power'] ?? null,
+                    'tx_power' => $reading['tx_power'] ?? null,
+                    'signal' => $band,
+                    'signal_checked_at' => $reading['checked_at'] ?? null,
                 ];
             }
         }
 
         return [
-            'configured'      => $configured,
-            'sub_domain'      => $configured ? $this->smartOltConfig()->sub_domain : null,
+            'configured' => $configured,
+            'sub_domain' => $configured ? $this->smartOltConfig()->sub_domain : null,
             'inventory_count' => count($inventory['items']),
             'inventory_synced_at' => $inventory['updated_at'],
-            'status_synced_at'    => $statuses['updated_at'],
-            'optical_checked'     => count($optical['items']),
-            'status_counts'   => $statusCounts,
-            'signal_counts'   => $signal,
-            'thresholds'      => [
-                'optimal_above'  => self::RX_OPTIMAL_ABOVE,
+            'status_synced_at' => $statuses['updated_at'],
+            'optical_checked' => count($optical['items']),
+            'status_counts' => $statusCounts,
+            'signal_counts' => $signal,
+            'thresholds' => [
+                'optimal_above' => self::RX_OPTIMAL_ABOVE,
                 'critical_below' => self::RX_CRITICAL_BELOW,
             ],
-            'active_job'      => $this->activeJob($organizationId),
-            'rows'            => $rows,
+            'active_job' => $this->activeJob($organizationId),
+            'rows' => $rows,
         ];
     }
 
@@ -283,17 +343,17 @@ class SmartOltReconciliationService
         }
 
         $inventory = $this->cachedInventory();
-        $optical   = $this->cachedOptical();
-        $statuses  = $this->cachedStatuses();
+        $optical = $this->cachedOptical();
+        $statuses = $this->cachedStatuses();
 
         $targets = $externalIds !== []
             ? array_values(array_intersect($externalIds, array_keys($inventory['items'])))
             : array_values(array_diff(array_keys($inventory['items']), array_keys($optical['items'])));
 
         $remaining = max(0, count($targets) - $limit);
-        $targets   = array_slice($targets, 0, max(1, $limit));
+        $targets = array_slice($targets, 0, max(1, $limit));
 
-        $errors  = [];
+        $errors = [];
         $checked = 0;
 
         foreach ($targets as $externalId) {
@@ -309,9 +369,12 @@ class SmartOltReconciliationService
                 $reading = $this->extractOptical($payload);
 
                 $optical['items'][$externalId] = [
-                    'rx_power'   => $reading['rx_power'],
-                    'tx_power'   => $reading['tx_power'],
-                    'macs'       => $reading['macs'],
+                    'onu_rx' => $reading['onu_rx'],
+                    'olt_rx' => $reading['olt_rx'],
+                    // Alias of onu_rx, kept for readers written before olt_rx existed.
+                    'rx_power' => $reading['rx_power'],
+                    'tx_power' => $reading['tx_power'],
+                    'macs' => $reading['macs'],
                     'checked_at' => now()->toIso8601String(),
                 ];
                 $checked++;
@@ -326,28 +389,32 @@ class SmartOltReconciliationService
 
         $items = [];
         foreach ($targets as $externalId) {
-            $onu     = $inventory['items'][$externalId] ?? [];
+            $onu = $inventory['items'][$externalId] ?? [];
             $reading = $optical['items'][$externalId] ?? null;
-            $status  = $this->resolveStatus($onu, $statuses);
+            $status = $this->resolveStatus($onu, $statuses);
 
             $items[] = [
                 'external_id' => (string) $externalId,
-                'sn'          => $onu['sn'] ?? '',
-                'name'        => $onu['name'] ?? '',
-                'status'      => $status,
-                'rx_power'    => $reading['rx_power'] ?? null,
-                'tx_power'    => $reading['tx_power'] ?? null,
-                'signal'      => $this->classifySignal($reading['rx_power'] ?? null, $status),
-                'checked_at'  => $reading['checked_at'] ?? null,
+                'sn' => $onu['sn'] ?? '',
+                'name' => $onu['name'] ?? '',
+                'status' => $status,
+                'onu_rx' => $reading['onu_rx'] ?? ($reading['rx_power'] ?? null),
+                'olt_rx' => $reading['olt_rx'] ?? null,
+                'rx_power' => $reading['rx_power'] ?? null,
+                'tx_power' => $reading['tx_power'] ?? null,
+                // Banding stays on the ONU-side reading: it is the leg that tells a
+                // technician what the subscriber's own equipment is receiving.
+                'signal' => $this->classifySignal($reading['rx_power'] ?? null, $status),
+                'checked_at' => $reading['checked_at'] ?? null,
             ];
         }
 
         return [
-            'success'   => true,
-            'checked'   => $checked,
+            'success' => true,
+            'checked' => $checked,
             'remaining' => $remaining,
-            'items'     => $items,
-            'errors'    => $errors,
+            'items' => $items,
+            'errors' => $errors,
         ];
     }
 
@@ -366,16 +433,16 @@ class SmartOltReconciliationService
      */
     public function getAlignmentPreview(?int $organizationId = null): array
     {
-        $inventory  = $this->cachedInventory();
-        $optical    = $this->cachedOptical();
-        $statuses   = $this->cachedStatuses();
+        $inventory = $this->cachedInventory();
+        $optical = $this->cachedOptical();
+        $statuses = $this->cachedStatuses();
         $subscribers = $this->loadSubscribers($organizationId);
 
         // Hoisted lookup indexes — built once, not per ONU.
-        $bySerial   = [];
+        $bySerial = [];
         $byUsername = [];
-        $byAccount  = [];
-        $byMac      = [];
+        $byAccount = [];
+        $byMac = [];
 
         foreach ($subscribers as $sub) {
             if ($sub['sn'] !== '') {
@@ -393,25 +460,25 @@ class SmartOltReconciliationService
         }
 
         $summary = ['total' => 0, 'matched' => 0, 'rename_needed' => 0, 'aligned' => 0, 'unmatched' => 0, 'placeholder' => 0];
-        $rows    = [];
+        $rows = [];
 
         foreach ($inventory['items'] as $externalId => $onu) {
             $summary['total']++;
 
-            $serial   = $this->normalizeSerial((string) ($onu['sn'] ?? ''));
-            $name     = trim((string) ($onu['name'] ?? ''));
-            $matched  = null;
+            $serial = $this->normalizeSerial((string) ($onu['sn'] ?? ''));
+            $name = trim((string) ($onu['name'] ?? ''));
+            $matched = null;
             $matchedBy = null;
 
             if ($serial !== '' && isset($bySerial[$serial])) {
-                $matched   = $bySerial[$serial];
+                $matched = $bySerial[$serial];
                 $matchedBy = 'serial_number';
             } else {
                 // The ONU name often already carries the username or account number.
                 $needle = strtolower($name);
                 foreach ($byUsername as $username => $sub) {
                     if ($needle !== '' && str_contains($needle, $username)) {
-                        $matched   = $sub;
+                        $matched = $sub;
                         $matchedBy = 'pppoe_username';
                         break;
                     }
@@ -420,7 +487,7 @@ class SmartOltReconciliationService
                 if ($matched === null) {
                     foreach ($byAccount as $accountNo => $sub) {
                         if ($needle !== '' && str_contains($needle, $accountNo)) {
-                            $matched   = $sub;
+                            $matched = $sub;
                             $matchedBy = 'account_no';
                             break;
                         }
@@ -431,7 +498,7 @@ class SmartOltReconciliationService
                     foreach (($optical['items'][$externalId]['macs'] ?? []) as $mac) {
                         $key = $this->normalizeMac($mac);
                         if ($key !== '' && isset($byMac[$key])) {
-                            $matched   = $byMac[$key];
+                            $matched = $byMac[$key];
                             $matchedBy = 'mac_address';
                             break;
                         }
@@ -442,25 +509,25 @@ class SmartOltReconciliationService
             if ($matched === null) {
                 $summary['unmatched']++;
                 $rows[] = [
-                    'external_id'   => (string) $externalId,
-                    'sn'            => $onu['sn'] ?? '',
-                    'current_name'  => $name !== '' ? $name : 'not set',
+                    'external_id' => (string) $externalId,
+                    'sn' => $onu['sn'] ?? '',
+                    'current_name' => $name !== '' ? $name : 'not set',
                     'proposed_name' => '',
-                    'matched_by'    => null,
-                    'account_no'    => null,
+                    'matched_by' => null,
+                    'account_no' => null,
                     'customer_name' => null,
-                    'plan'          => null,
-                    'status'        => $this->resolveStatus($onu, $statuses),
+                    'plan' => null,
+                    'status' => $this->resolveStatus($onu, $statuses),
                     'rename_needed' => false,
-                    'eligible'      => false,
-                    'reason'        => 'No subscriber matched this ONU by serial, username, account number or MAC.',
+                    'eligible' => false,
+                    'reason' => 'No subscriber matched this ONU by serial, username, account number or MAC.',
                 ];
                 continue;
             }
 
             $summary['matched']++;
 
-            $proposed      = $this->proposedName($matched);
+            $proposed = $this->proposedName($matched);
             $isPlaceholder = $this->isPlaceholderName($name);
             if ($isPlaceholder) {
                 $summary['placeholder']++;
@@ -477,18 +544,18 @@ class SmartOltReconciliationService
             }
 
             $rows[] = [
-                'external_id'   => (string) $externalId,
-                'sn'            => $onu['sn'] ?? '',
-                'current_name'  => $name !== '' ? $name : 'not set',
+                'external_id' => (string) $externalId,
+                'sn' => $onu['sn'] ?? '',
+                'current_name' => $name !== '' ? $name : 'not set',
                 'proposed_name' => $proposed,
-                'matched_by'    => $matchedBy,
-                'account_no'    => $matched['account_no'],
+                'matched_by' => $matchedBy,
+                'account_no' => $matched['account_no'],
                 'customer_name' => $matched['customer_name'],
-                'plan'          => $matched['plan_label'],
-                'status'        => $this->resolveStatus($onu, $statuses),
+                'plan' => $matched['plan_label'],
+                'status' => $this->resolveStatus($onu, $statuses),
                 'rename_needed' => $renameNeeded,
-                'eligible'      => $renameNeeded,
-                'reason'        => $renameNeeded ? 'Name differs from the standard format.' : 'Already aligned.',
+                'eligible' => $renameNeeded,
+                'reason' => $renameNeeded ? 'Name differs from the standard format.' : 'Already aligned.',
             ];
         }
 
@@ -522,8 +589,8 @@ class SmartOltReconciliationService
     public function getMacAlignmentPreview(?int $organizationId = null): array
     {
         $inventory = $this->cachedInventory();
-        $optical   = $this->cachedOptical();
-        $statuses  = $this->cachedStatuses();
+        $optical = $this->cachedOptical();
+        $statuses = $this->cachedStatuses();
 
         $sessions = $this->radius->activeSessions($organizationId);
 
@@ -531,13 +598,13 @@ class SmartOltReconciliationService
         $byMac = $sessions['by_mac'];
 
         $summary = [
-            'total'         => 0,
-            'matched'       => 0,
+            'total' => 0,
+            'matched' => 0,
             'rename_needed' => 0,
-            'aligned'       => 0,
-            'unmatched'     => 0,
-            'no_mac'        => 0,
-            'sessions'      => count($sessions['by_username']),
+            'aligned' => 0,
+            'unmatched' => 0,
+            'no_mac' => 0,
+            'sessions' => count($sessions['by_username']),
         ];
 
         $rows = [];
@@ -546,16 +613,16 @@ class SmartOltReconciliationService
             $summary['total']++;
 
             $currentName = trim((string) ($onu['name'] ?? ''));
-            $status      = $this->resolveStatus($onu, $statuses);
-            $macs        = $optical['items'][$externalId]['macs'] ?? [];
+            $status = $this->resolveStatus($onu, $statuses);
+            $macs = $optical['items'][$externalId]['macs'] ?? [];
 
-            $matched    = null;
+            $matched = null;
             $matchedMac = '';
 
             foreach ($macs as $mac) {
                 $key = $this->normalizeMac((string) $mac);
                 if ($key !== '' && isset($byMac[$key])) {
-                    $matched    = $byMac[$key];
+                    $matched = $byMac[$key];
                     $matchedMac = (string) $mac;
                     break;
                 }
@@ -570,18 +637,18 @@ class SmartOltReconciliationService
                 $summary[$state === self::ALIGN_NO_MAC ? 'no_mac' : 'unmatched']++;
 
                 $rows[] = [
-                    'external_id'        => (string) $externalId,
-                    'state'              => $state,
-                    'radius_username'    => '',
+                    'external_id' => (string) $externalId,
+                    'state' => $state,
+                    'radius_username' => '',
                     'calling_station_id' => $macs === [] ? '' : (string) $macs[0],
-                    'current_name'       => $currentName !== '' ? $currentName : 'not set',
-                    'target_name'        => '',
-                    'sn'                 => (string) ($onu['sn'] ?? ''),
-                    'status'             => $status,
-                    'server_id'          => null,
-                    'server_label'       => '—',
-                    'eligible'           => false,
-                    'reason'             => $state === self::ALIGN_NO_MAC
+                    'current_name' => $currentName !== '' ? $currentName : 'not set',
+                    'target_name' => '',
+                    'sn' => (string) ($onu['sn'] ?? ''),
+                    'status' => $status,
+                    'server_id' => null,
+                    'server_label' => '—',
+                    'eligible' => false,
+                    'reason' => $state === self::ALIGN_NO_MAC
                         ? 'No MAC has been discovered for this ONU yet — run MAC Discovery first.'
                         : 'No live RADIUS session is using any MAC seen behind this ONU.',
                 ];
@@ -591,7 +658,7 @@ class SmartOltReconciliationService
             $summary['matched']++;
 
             // The contract for this pass: the target name IS the RADIUS username.
-            $targetName   = $this->sanitizeName((string) $matched['username']);
+            $targetName = $this->sanitizeName((string) $matched['username']);
             $renameNeeded = $targetName !== ''
                 && ($this->isPlaceholderName($currentName) || strcmp($currentName, $targetName) !== 0);
 
@@ -604,31 +671,224 @@ class SmartOltReconciliationService
             }
 
             $rows[] = [
-                'external_id'        => (string) $externalId,
-                'state'              => $state,
-                'radius_username'    => (string) $matched['username'],
+                'external_id' => (string) $externalId,
+                'state' => $state,
+                'radius_username' => (string) $matched['username'],
                 'calling_station_id' => $matchedMac,
-                'current_name'       => $currentName !== '' ? $currentName : 'not set',
-                'target_name'        => $targetName,
-                'sn'                 => (string) ($onu['sn'] ?? ''),
-                'status'             => $status,
-                'server_id'          => $matched['server_id'],
-                'server_label'       => $matched['server_label'],
-                'eligible'           => $renameNeeded,
-                'reason'             => $renameNeeded
+                'current_name' => $currentName !== '' ? $currentName : 'not set',
+                'target_name' => $targetName,
+                'sn' => (string) ($onu['sn'] ?? ''),
+                'status' => $status,
+                'server_id' => $matched['server_id'],
+                'server_label' => $matched['server_label'],
+                'eligible' => $renameNeeded,
+                'reason' => $renameNeeded
                     ? 'The SmartOLT name does not match the RADIUS username.'
                     : 'Already named for the RADIUS username.',
             ];
         }
 
         $result = [
-            'summary'    => $summary,
-            'rows'       => $rows,
-            'errors'     => $sessions['errors'],
+            'summary' => $summary,
+            'rows' => $rows,
+            'errors' => $sessions['errors'],
             'updated_at' => now()->toIso8601String(),
         ];
 
         $this->putCache('mac_alignment', $result);
+
+        return $result;
+    }
+
+    // =========================================================================
+    // SN alignment
+    // =========================================================================
+
+    /**
+     * Compare each ONU's SmartOLT serial against the subscriber's stored
+     * `technical_details.router_modem_sn`, and propose adopting the SmartOLT value.
+     *
+     * Direction is one-way by design. The serial SmartOLT reports is read off the
+     * device itself, so it is the fact; the billing column is a copy that drifts when
+     * a technician swaps a modem and updates one system but not the other. This pass
+     * closes that gap in the direction that can be trusted.
+     *
+     * Matching is MAC-only, the same binding the name-alignment pass uses: the bridge
+     * MAC behind the ONU is matched to a live PPPoE calling-station-id, and that
+     * session's username locates the billing record. Matching on the ONU's name was
+     * considered and rejected — a misnamed ONU would write its serial onto the wrong
+     * subscriber, and unlike a rename that is a change to a billing record.
+     *
+     * Read-only: nothing here writes. Applying is the `sn_alignment` job.
+     *
+     * @return array{summary: array<string, int>, rows: array<int, array<string, mixed>>, errors: array<int, mixed>, updated_at: string}
+     */
+    public function getSnAlignmentPreview(?int $organizationId = null): array
+    {
+        $inventory = $this->cachedInventory();
+        $optical = $this->cachedOptical();
+        $statuses = $this->cachedStatuses();
+
+        $sessions = $this->radius->activeSessions($organizationId);
+        $byMac = $sessions['by_mac'];
+
+        // Hoisted once, keyed by username: every ONU below is a hash lookup rather
+        // than a query. technical_details.username carries a unique index, so one
+        // username resolves to exactly one billing record.
+        $byUsername = [];
+        foreach ($this->loadSubscribers($organizationId) as $tdId => $sub) {
+            $key = strtolower($sub['username']);
+            if ($key !== '' && !isset($byUsername[$key])) {
+                $byUsername[$key] = $sub + ['td_id' => (int) $tdId];
+            }
+        }
+
+        $summary = [
+            'total' => 0,
+            'matched' => 0,
+            'aligned' => 0,
+            'missing' => 0,
+            'mismatch' => 0,
+            'no_subscriber' => 0,
+            'unmatched' => 0,
+            'no_mac' => 0,
+            'sessions' => count($sessions['by_username']),
+        ];
+
+        $rows = [];
+
+        foreach ($inventory['items'] as $externalId => $onu) {
+            $summary['total']++;
+
+            $onuSerial = trim((string) ($onu['sn'] ?? ''));
+            $status = $this->resolveStatus($onu, $statuses);
+            $macs = $optical['items'][$externalId]['macs'] ?? [];
+
+            $base = [
+                'external_id' => (string) $externalId,
+                'sn' => $onuSerial,
+                'current_name' => trim((string) ($onu['name'] ?? '')) !== ''
+                    ? trim((string) ($onu['name'] ?? ''))
+                    : 'not set',
+                'status' => $status,
+                'calling_station_id' => '',
+                'radius_username' => '',
+                'account_no' => '',
+                'customer_name' => '',
+                'billing_sn' => '',
+                'technical_detail_id' => null,
+                'server_id' => null,
+                'server_label' => '—',
+                'eligible' => false,
+            ];
+
+            // An ONU SmartOLT reports no serial for has nothing to copy, whatever
+            // else is known about it.
+            if ($onuSerial === '') {
+                $summary['no_mac']++;
+                $rows[] = $base + [
+                    'state' => self::SN_NO_MAC,
+                    'reason' => 'SmartOLT reports no serial for this ONU — nothing to copy.',
+                ];
+                continue;
+            }
+
+            $matched = null;
+            $matchedMac = '';
+
+            foreach ($macs as $mac) {
+                $key = $this->normalizeMac((string) $mac);
+                if ($key !== '' && isset($byMac[$key])) {
+                    $matched = $byMac[$key];
+                    $matchedMac = (string) $mac;
+                    break;
+                }
+            }
+
+            if ($matched === null) {
+                // Not yet crawled versus genuinely unattributable — the same split the
+                // name-alignment pass makes, so "run MAC discovery" never reads as
+                // "this ONU has no subscriber".
+                $state = $macs === [] ? self::SN_NO_MAC : self::SN_UNMATCHED;
+                $summary[$state === self::SN_NO_MAC ? 'no_mac' : 'unmatched']++;
+
+                $rows[] = $base + [
+                    'state' => $state,
+                    'calling_station_id' => $macs === [] ? '' : (string) $macs[0],
+                    'reason' => $state === self::SN_NO_MAC
+                        ? 'No MAC has been discovered for this ONU yet — run MAC Discovery first.'
+                        : 'No live RADIUS session is using any MAC seen behind this ONU.',
+                ];
+                continue;
+            }
+
+            $summary['matched']++;
+
+            $username = (string) $matched['username'];
+            $subscriber = $byUsername[strtolower($username)] ?? null;
+
+            $base = array_merge($base, [
+                'calling_station_id' => $matchedMac,
+                'radius_username' => $username,
+                'server_id' => $matched['server_id'],
+                'server_label' => $matched['server_label'],
+            ]);
+
+            if ($subscriber === null) {
+                $summary['no_subscriber']++;
+                $rows[] = $base + [
+                    'state' => self::SN_NO_SUBSCRIBER,
+                    'reason' => "No billing record carries the PPPoE username '{$username}'.",
+                ];
+                continue;
+            }
+
+            $billingSn = trim((string) $subscriber['sn']);
+
+            $base = array_merge($base, [
+                'account_no' => $subscriber['account_no'],
+                'customer_name' => $subscriber['customer_name'],
+                'billing_sn' => $billingSn,
+                'technical_detail_id' => $subscriber['td_id'],
+            ]);
+
+            // Compared normalized so punctuation or case alone never reads as drift,
+            // but the value written is SmartOLT's verbatim.
+            if ($billingSn !== '' && $this->normalizeSerial($billingSn) === $this->normalizeSerial($onuSerial)) {
+                $summary['aligned']++;
+                $rows[] = $base + [
+                    'state' => self::SN_ALIGNED,
+                    'reason' => 'Billing already carries this ONU serial.',
+                ];
+                continue;
+            }
+
+            if ($billingSn === '') {
+                $summary['missing']++;
+                $rows[] = $base + [
+                    'state' => self::SN_MISSING,
+                    'eligible' => true,
+                    'reason' => 'The billing record has no router/modem SN — this fills it in.',
+                ];
+                continue;
+            }
+
+            $summary['mismatch']++;
+            $rows[] = $base + [
+                'state' => self::SN_MISMATCH,
+                'eligible' => true,
+                'reason' => "Billing holds a different serial ({$billingSn}) — applying overwrites it.",
+            ];
+        }
+
+        $result = [
+            'summary' => $summary,
+            'rows' => $rows,
+            'errors' => $sessions['errors'],
+            'updated_at' => now()->toIso8601String(),
+        ];
+
+        $this->putCache('sn_alignment', $result);
 
         return $result;
     }
@@ -649,7 +909,7 @@ class SmartOltReconciliationService
      */
     public function getProfilePreview(?int $organizationId = null): array
     {
-        $inventory   = $this->cachedInventory();
+        $inventory = $this->cachedInventory();
         $subscribers = $this->loadSubscribers($organizationId);
 
         $bySerial = [];
@@ -660,12 +920,12 @@ class SmartOltReconciliationService
         }
 
         $summary = ['total' => 0, 'eligible' => 0, 'unchanged' => 0, 'unmatched' => 0, 'vlan_drift' => 0];
-        $rows    = [];
+        $rows = [];
 
         foreach ($inventory['items'] as $externalId => $onu) {
             $summary['total']++;
 
-            $serial  = $this->normalizeSerial((string) ($onu['sn'] ?? ''));
+            $serial = $this->normalizeSerial((string) ($onu['sn'] ?? ''));
             $matched = $serial !== '' ? ($bySerial[$serial] ?? null) : null;
 
             if ($matched === null) {
@@ -675,8 +935,8 @@ class SmartOltReconciliationService
 
             $oldAddress = $this->sanitizeAddress((string) ($onu['address'] ?? ''));
             $oldContact = $this->sanitizeContact((string) ($onu['contact'] ?? ''));
-            $oldLat     = $onu['latitude'] ?? '';
-            $oldLng     = $onu['longitude'] ?? '';
+            $oldLat = $onu['latitude'] ?? '';
+            $oldLng = $onu['longitude'] ?? '';
 
             $newAddress = $this->sanitizeAddress($matched['address']);
             $newContact = $this->sanitizeContact($matched['contact']);
@@ -684,8 +944,8 @@ class SmartOltReconciliationService
 
             $addressChanged = $newAddress !== '' && $newAddress !== $oldAddress;
             $contactChanged = $newContact !== '' && $newContact !== $oldContact;
-            $coordsChanged  = $newLat !== '' && $newLng !== '' && ((string) $oldLat !== $newLat || (string) $oldLng !== $newLng);
-            $vlanDrift      = $matched['vlan'] !== '' && (string) ($onu['vlan'] ?? '') !== '' && (string) $onu['vlan'] !== $matched['vlan'];
+            $coordsChanged = $newLat !== '' && $newLng !== '' && ((string) $oldLat !== $newLat || (string) $oldLng !== $newLng);
+            $vlanDrift = $matched['vlan'] !== '' && (string) ($onu['vlan'] ?? '') !== '' && (string) $onu['vlan'] !== $matched['vlan'];
 
             if ($vlanDrift) {
                 $summary['vlan_drift']++;
@@ -699,32 +959,32 @@ class SmartOltReconciliationService
             }
 
             $rows[] = [
-                'external_id'     => (string) $externalId,
-                'sn'              => $onu['sn'] ?? '',
-                'name'            => $onu['name'] ?? '',
-                'account_no'      => $matched['account_no'],
-                'customer_name'   => $matched['customer_name'],
-                'old_address'     => $oldAddress,
-                'new_address'     => $newAddress,
-                'old_contact'     => $oldContact,
-                'new_contact'     => $newContact,
-                'old_latitude'    => (string) $oldLat,
-                'new_latitude'    => $newLat,
-                'old_longitude'   => (string) $oldLng,
-                'new_longitude'   => $newLng,
-                'olt_vlan'        => (string) ($onu['vlan'] ?? ''),
-                'billing_vlan'    => $matched['vlan'],
+                'external_id' => (string) $externalId,
+                'sn' => $onu['sn'] ?? '',
+                'name' => $onu['name'] ?? '',
+                'account_no' => $matched['account_no'],
+                'customer_name' => $matched['customer_name'],
+                'old_address' => $oldAddress,
+                'new_address' => $newAddress,
+                'old_contact' => $oldContact,
+                'new_contact' => $newContact,
+                'old_latitude' => (string) $oldLat,
+                'new_latitude' => $newLat,
+                'old_longitude' => (string) $oldLng,
+                'new_longitude' => $newLng,
+                'olt_vlan' => (string) ($onu['vlan'] ?? ''),
+                'billing_vlan' => $matched['vlan'],
                 'address_changed' => $addressChanged,
                 'contact_changed' => $contactChanged,
-                'coords_changed'  => $coordsChanged,
-                'vlan_drift'      => $vlanDrift,
-                'eligible'        => $eligible,
+                'coords_changed' => $coordsChanged,
+                'vlan_drift' => $vlanDrift,
+                'eligible' => $eligible,
             ];
         }
 
         $result = [
-            'summary'   => $summary,
-            'rows'      => $rows,
+            'summary' => $summary,
+            'rows' => $rows,
             'vlan_note' => 'VLAN differences are reported for review only. SmartOLT changes an ONU VLAN through provisioning, not update_location_details, so this pass does not push it.',
             'updated_at' => now()->toIso8601String(),
         ];
@@ -748,12 +1008,14 @@ class SmartOltReconciliationService
     public function getCleanupPreview(int $offlineDays = self::DEFAULT_OFFLINE_DAYS, ?int $organizationId = null): array
     {
         $offlineDays = max(1, $offlineDays);
-        $inventory   = $this->cachedInventory();
-        $statuses    = $this->cachedStatuses();
-        $safety      = $this->buildSafetyMap($organizationId);
+        $inventory = $this->cachedInventory();
+        $statuses = $this->cachedStatuses();
+        $safety = $this->buildSafetyMap($organizationId);
+        // Hoisted: one cache read for the whole sweep, not one per candidate ONU.
+        $optical = $this->cachedOptical();
 
         $summary = ['total' => 0, 'eligible' => 0, 'blocked' => 0];
-        $rows    = [];
+        $rows = [];
 
         foreach ($inventory['items'] as $externalId => $onu) {
             $status = $this->resolveStatus($onu, $statuses);
@@ -778,18 +1040,30 @@ class SmartOltReconciliationService
                 $summary['blocked']++;
             }
 
+            // Both ends of the PON link, from the last optical crawl. Null where this
+            // ONU has never been scanned — the tool offers "Scan MAC / Optical Power"
+            // to fill them, and a null reads as "not measured", never as "0 dBm".
+            $reading = $optical['items'][(string) $externalId] ?? [];
+
             $rows[] = [
-                'external_id'        => (string) $externalId,
-                'sn'                 => $onu['sn'] ?? '',
-                'name'               => $onu['name'] ?? '',
-                'zone_name'          => $onu['zone_name'] ?? '',
-                'odb_name'           => $onu['odb_name'] ?? '',
-                'olt_name'           => $onu['olt_name'] ?? '',
-                'status'             => $status,
+                'external_id' => (string) $externalId,
+                'sn' => $onu['sn'] ?? '',
+                'name' => $onu['name'] ?? '',
+                'zone_name' => $onu['zone_name'] ?? '',
+                'odb_name' => $onu['odb_name'] ?? '',
+                'olt_name' => $onu['olt_name'] ?? '',
+                'status' => $status,
                 'last_status_change' => $onu['last_status_change'] ?? '',
-                'days_offline'       => $days,
-                'eligible'           => $eligible,
-                'reasons'            => $reasons,
+                'days_offline' => $days,
+                'onu_rx' => $reading['onu_rx'] ?? ($reading['rx_power'] ?? null),
+                'olt_rx' => $reading['olt_rx'] ?? null,
+                'rx_power' => $reading['rx_power'] ?? null,
+                'optical_checked_at' => $reading['checked_at'] ?? null,
+                // Retained, and still authoritative for the unattended nightly pass.
+                // The operator-driven tool shows these as context rather than as a
+                // gate: an operator who has selected a row has already made the call.
+                'eligible' => $eligible,
+                'reasons' => $reasons,
             ];
         }
 
@@ -811,8 +1085,8 @@ class SmartOltReconciliationService
     private function revalidateCleanup(string $externalId, int $offlineDays, array $safety): array
     {
         $inventory = $this->cachedInventory();
-        $statuses  = $this->cachedStatuses();
-        $onu       = $inventory['items'][$externalId] ?? null;
+        $statuses = $this->cachedStatuses();
+        $onu = $inventory['items'][$externalId] ?? null;
 
         if (!is_array($onu)) {
             return ['eligible' => false, 'reasons' => ['The ONU is no longer in the cached inventory.']];
@@ -842,7 +1116,7 @@ class SmartOltReconciliationService
     private function cleanupBlockers(string $serialRaw, array $safety): array
     {
         $reasons = [];
-        $serial  = $this->normalizeSerial($serialRaw);
+        $serial = $this->normalizeSerial($serialRaw);
 
         if (!$safety['available']) {
             $reasons[] = 'Billing safety validation is unavailable.';
@@ -915,30 +1189,76 @@ class SmartOltReconciliationService
 
         try {
             $job = DB::transaction(function () use ($type, $options, $organizationId): ?array {
+                $threshold = now()->subMinutes(self::CLAIM_TTL_MINUTES);
+
+                // Scoped to this tool. The filter was missing, so a live job belonging
+                // to any other tool in the suite also blocked SmartOLT from starting —
+                // the single-slot rule is per tool, not across the whole table.
                 $active = DB::table('tool_jobs')
+                    ->where('tool', self::RESOURCE_TYPE)
                     ->whereIn('status', self::LIVE_STATUSES)
                     ->lockForUpdate()
-                    ->first();
+                    ->get();
 
-                if ($active !== null) {
+                $blocking = [];
+                $stranded = [];
+
+                foreach ($active as $row) {
+                    if ($this->jobIsStranded($row, $threshold)) {
+                        $stranded[] = $row;
+                    } else {
+                        $blocking[] = $row;
+                    }
+                }
+
+                // Retire the abandoned ones. A job left `running` by a driver that went
+                // away — a closed tab before the drain was scheduled, a worker killed
+                // mid-slice, a deploy — otherwise holds the single slot forever and
+                // every later start is refused with nothing visibly running. Nothing is
+                // rolled back: the steps it applied stand, exactly as an operator abort.
+                if ($stranded !== []) {
+                    $strandedIds = array_map(static fn (object $row): int => (int) $row->id, $stranded);
+
+                    // Conditional on status, so a job another transaction finished in
+                    // the meantime is not dragged back out of its terminal state.
+                    DB::table('tool_jobs')
+                        ->whereIn('id', $strandedIds)
+                        ->whereIn('status', self::LIVE_STATUSES)
+                        ->update([
+                            'status'     => self::STATUS_ABORTED,
+                            'message'    => 'Abandoned — nothing advanced this job for over '
+                                . self::CLAIM_TTL_MINUTES . ' minutes, so the slot was released.',
+                            'locked_by'  => null,
+                            'locked_at'  => null,
+                            'updated_at' => now(),
+                        ]);
+
+                    $this->log('warning', 'Released stranded job(s) holding the active slot.', [
+                        'job_ids'     => $strandedIds,
+                        'ttl_minutes' => self::CLAIM_TTL_MINUTES,
+                        'starting'    => $type,
+                    ]);
+                }
+
+                if ($blocking !== []) {
                     return null;
                 }
 
                 $context = $this->buildJobContext($type, $options, $organizationId);
 
                 $id = DB::table('tool_jobs')->insertGetId([
-                    'tool'            => self::RESOURCE_TYPE,
-                    'type'            => $type,
-                    'status'          => self::STATUS_RUNNING,
-                    'current'         => 0,
-                    'total'           => $context['total'],
-                    'message'         => $context['message'],
-                    'context'         => json_encode($context['context']),
-                    'summary'         => null,
-                    'user_id'         => auth()->id(),
+                    'tool' => self::RESOURCE_TYPE,
+                    'type' => $type,
+                    'status' => self::STATUS_RUNNING,
+                    'current' => 0,
+                    'total' => $context['total'],
+                    'message' => $context['message'],
+                    'context' => json_encode($context['context']),
+                    'summary' => null,
+                    'user_id' => auth()->id(),
                     'organization_id' => $organizationId,
-                    'created_at'      => now(),
-                    'updated_at'      => now(),
+                    'created_at' => now(),
+                    'updated_at' => now(),
                 ]);
 
                 return ['id' => $id];
@@ -949,12 +1269,86 @@ class SmartOltReconciliationService
         }
 
         if ($job === null) {
-            return $this->failure('Another operation is already running. Wait for it to finish or abort it first.');
+            // Reached only when a genuinely live job holds the slot — an abandoned one
+            // was already released above — so the operator is told what to wait for.
+            $holder = DB::table('tool_jobs')
+                ->where('tool', self::RESOURCE_TYPE)
+                ->whereIn('status', self::LIVE_STATUSES)
+                ->orderByDesc('id')
+                ->first();
+
+            if ($holder === null) {
+                return $this->failure('Another operation claimed the slot first. Try again.');
+            }
+
+            $detail = $holder->status === self::STATUS_PAUSED
+                ? 'is paused on a SmartOLT rate limit and will resume on its own'
+                : sprintf('is running (%d of %d)', (int) $holder->current, (int) $holder->total);
+
+            return $this->failure(sprintf(
+                "'%s' %s. Wait for it to finish, or abort it first.",
+                $holder->type,
+                $detail
+            ));
         }
 
         $this->log('info', "Job '{$type}' started.", ['job_id' => $job['id'], 'type' => $type]);
 
         return ['success' => true, 'skipped' => false, 'message' => 'Job started.', 'job' => $this->readJob((int) $job['id'])];
+    }
+
+    /**
+     * Is this live job abandoned, or is something still working on it?
+     *
+     * Two independent signs of life, because they alternate. A driver inside a slice
+     * holds `locked_at`; between slices the claim is released and it is `saveJob()`
+     * bumping `updated_at` that shows progress. Either one inside the TTL means the
+     * job is moving and must be left alone.
+     *
+     * A paused job is the exception worth getting right: it is idle *by design* while
+     * a SmartOLT quota cooldown runs, and that cooldown is an hour — far longer than
+     * the TTL. Treating it as abandoned would throw away a checkpointed sweep that was
+     * about to resume on its own. So a pause is only stranded once its own `resume_at`
+     * has passed and still nothing has moved it.
+     *
+     * @param object $row raw `tool_jobs` row
+     */
+    private function jobIsStranded(object $row, \Carbon\Carbon $threshold): bool
+    {
+        foreach (['locked_at', 'updated_at'] as $column) {
+            $value = $row->{$column} ?? null;
+
+            if ($value === null || $value === '') {
+                continue;
+            }
+
+            try {
+                if (\Carbon\Carbon::parse($value)->greaterThan($threshold)) {
+                    return false;
+                }
+            } catch (Throwable $e) {
+                // An unparseable timestamp is not evidence of abandonment; treat the
+                // job as live so a bad value can never trigger an automatic abort.
+                return false;
+            }
+        }
+
+        if (($row->status ?? '') === self::STATUS_PAUSED) {
+            $context  = json_decode((string) ($row->context ?? '{}'), true);
+            $resumeAt = is_array($context) ? (string) ($context['resume_at'] ?? '') : '';
+
+            if ($resumeAt !== '') {
+                try {
+                    if (\Carbon\Carbon::parse($resumeAt)->isFuture()) {
+                        return false;
+                    }
+                } catch (Throwable $e) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -987,8 +1381,63 @@ class SmartOltReconciliationService
                     'success' => true,
                     'skipped' => true,
                     'message' => $job['message'],
-                    'job'     => $job,
+                    'job' => $job,
                 ];
+            }
+        }
+
+        // Only one driver may be inside a job at a time. The scheduler drains jobs
+        // unattended while an operator may still have the tool open, so without this
+        // both could run the same queue index and apply the same step twice — two
+        // deletions for one selected ONU. Losing the race is a no-op, not an error:
+        // the other driver is already advancing the job and the caller sees its
+        // progress on the next poll.
+        $owner = $this->driverId();
+
+        if (!$this->claimJob($jobId, $owner)) {
+            return [
+                'success' => true,
+                'skipped' => true,
+                'message' => $job['message'],
+                'job' => $this->readJob($jobId) ?? $job,
+            ];
+        }
+
+        try {
+            return $this->advanceJob($jobId, $owner);
+        } finally {
+            // Released even on a throw, so a failed slice cannot hold the claim for
+            // the full TTL before the next driver may pick the job up.
+            $this->releaseJob($jobId, $owner);
+        }
+    }
+
+    /**
+     * Run one bounded slice of an already-claimed job.
+     *
+     * Split out of processJob() so the claim is taken once, around the whole slice,
+     * and released once — including on the failure path.
+     *
+     * @return array<string, mixed>
+     */
+    private function advanceJob(int $jobId, string $owner): array
+    {
+        // Re-read under the claim. Between the pre-claim read and here another driver
+        // may have finished, aborted or advanced this job, and acting on the stale
+        // copy would replay a step that has already been applied.
+        $job = $this->readJob($jobId);
+
+        if ($job === null) {
+            return $this->failure("Job #{$jobId} does not exist.");
+        }
+
+        if (!in_array($job['status'], self::LIVE_STATUSES, true)) {
+            return ['success' => true, 'skipped' => true, 'message' => 'The job is no longer running.', 'job' => $job];
+        }
+
+        if ($job['status'] === self::STATUS_PAUSED) {
+            if (!$this->cooldownElapsed($job)) {
+                return ['success' => true, 'skipped' => true, 'message' => $job['message'], 'job' => $job];
             }
 
             $job = $this->resumeJob($job);
@@ -1000,14 +1449,15 @@ class SmartOltReconciliationService
             for ($step = 0; $step < self::SLICE_SIZE; $step++) {
                 $job = match ($job['type']) {
                     self::JOB_SMARTOLT_SYNC => $this->stepInventorySync($job),
-                    self::JOB_RADIUS_SCAN   => $this->stepStatusSync($job),
-                    // Canonical name and its legacy alias run the same crawl.
+                    self::JOB_RADIUS_SCAN => $this->stepStatusSync($job),
+                        // Canonical name and its legacy alias run the same crawl.
                     self::JOB_OPTICAL_SCAN,
                     self::JOB_MAC_DISCOVERY => $this->stepOpticalDiscovery($job),
-                    self::JOB_RENAME        => $this->stepRename($job),
-                    self::JOB_PROFILE_SYNC  => $this->stepProfileSync($job),
-                    self::JOB_DELETE        => $this->stepDelete($job),
-                    default                 => $this->finishJob($job, self::STATUS_FAILED, "Unknown job type '{$job['type']}'."),
+                    self::JOB_RENAME => $this->stepRename($job),
+                    self::JOB_PROFILE_SYNC => $this->stepProfileSync($job),
+                    self::JOB_SN_ALIGNMENT => $this->stepSnAlignment($job),
+                    self::JOB_DELETE => $this->stepDelete($job),
+                    default => $this->finishJob($job, self::STATUS_FAILED, "Unknown job type '{$job['type']}'."),
                 };
 
                 if ($job['status'] !== self::STATUS_RUNNING) {
@@ -1047,13 +1497,13 @@ class SmartOltReconciliationService
 
         $resumeAt = now()->addSeconds($seconds);
 
-        $context['rate_limited']    = true;
+        $context['rate_limited'] = true;
         $context['rate_limit_hits'] = (int) ($context['rate_limit_hits'] ?? 0) + 1;
-        $context['paused_at']       = now()->toIso8601String();
-        $context['resume_at']       = $resumeAt->toIso8601String();
-        $context['pause_reason']    = $reason;
+        $context['paused_at'] = now()->toIso8601String();
+        $context['resume_at'] = $resumeAt->toIso8601String();
+        $context['pause_reason'] = $reason;
 
-        $job['status']  = self::STATUS_PAUSED;
+        $job['status'] = self::STATUS_PAUSED;
         $job['context'] = $context;
         $job['message'] = sprintf(
             'Paused on the SmartOLT API rate limit — resuming automatically after %s. %s',
@@ -1062,20 +1512,20 @@ class SmartOltReconciliationService
         );
 
         DB::table('tool_jobs')->where('id', $job['id'])->update([
-            'status'     => self::STATUS_PAUSED,
-            'current'    => $job['current'],
-            'total'      => $job['total'],
-            'message'    => $job['message'],
-            'context'    => json_encode($context),
+            'status' => self::STATUS_PAUSED,
+            'current' => $job['current'],
+            'total' => $job['total'],
+            'message' => $job['message'],
+            'context' => json_encode($context),
             'updated_at' => now(),
         ]);
 
         $this->log('warning', 'Job paused on the SmartOLT rate limit.', [
-            'job_id'    => $job['id'],
-            'type'      => $job['type'],
-            'progress'  => $job['current'] . '/' . $job['total'],
+            'job_id' => $job['id'],
+            'type' => $job['type'],
+            'progress' => $job['current'] . '/' . $job['total'],
             'resume_at' => $resumeAt->toDateTimeString(),
-            'reason'    => $reason,
+            'reason' => $reason,
         ]);
 
         return $job;
@@ -1114,23 +1564,23 @@ class SmartOltReconciliationService
     {
         $context = $job['context'];
         $context['rate_limited'] = false;
-        $context['resumed_at']   = now()->toIso8601String();
+        $context['resumed_at'] = now()->toIso8601String();
         unset($context['resume_at'], $context['pause_reason']);
 
-        $job['status']  = self::STATUS_RUNNING;
+        $job['status'] = self::STATUS_RUNNING;
         $job['context'] = $context;
         $job['message'] = sprintf('Resumed after the rate-limit cooldown at %d of %d.', $job['current'], $job['total']);
 
         DB::table('tool_jobs')->where('id', $job['id'])->update([
-            'status'     => self::STATUS_RUNNING,
-            'message'    => $job['message'],
-            'context'    => json_encode($context),
+            'status' => self::STATUS_RUNNING,
+            'message' => $job['message'],
+            'context' => json_encode($context),
             'updated_at' => now(),
         ]);
 
         $this->log('info', 'Job resumed after the rate-limit cooldown.', [
-            'job_id'   => $job['id'],
-            'type'     => $job['type'],
+            'job_id' => $job['id'],
+            'type' => $job['type'],
             'progress' => $job['current'] . '/' . $job['total'],
         ]);
 
@@ -1158,7 +1608,7 @@ class SmartOltReconciliationService
             });
         }
 
-        return $query->get()->map(fn (object $row): array => $this->hydrateJob($row))->all();
+        return $query->get()->map(fn(object $row): array => $this->hydrateJob($row))->all();
     }
 
     /**
@@ -1184,6 +1634,166 @@ class SmartOltReconciliationService
         return ['success' => true, 'skipped' => false, 'message' => 'Job aborted.', 'job' => $job];
     }
 
+    /**
+     * Identity of this driver, for the claim.
+     *
+     * Host plus process id, so a stuck claim in `tool_jobs.locked_by` names something
+     * an operator can actually go and look at rather than an opaque token.
+     */
+    private function driverId(): string
+    {
+        return substr(gethostname() ?: 'unknown', 0, 40) . ':' . getmypid();
+    }
+
+    /**
+     * Take the claim on a job, or report that someone else holds it.
+     *
+     * One conditional UPDATE, never a SELECT followed by an UPDATE: the WHERE clause
+     * carries the precondition, so two drivers issuing this at the same instant give
+     * one row affected and one zero. Whoever gets the row runs the slice.
+     *
+     * A claim older than CLAIM_TTL_MINUTES is takeable — that is the path that
+     * recovers a job whose driver died without ever releasing.
+     */
+    private function claimJob(int $jobId, string $owner): bool
+    {
+        $expiry = now()->subMinutes(self::CLAIM_TTL_MINUTES);
+
+        $claimed = DB::table('tool_jobs')
+            ->where('id', $jobId)
+            ->where('tool', self::RESOURCE_TYPE)
+            ->whereIn('status', self::LIVE_STATUSES)
+            ->where(function ($q) use ($expiry): void {
+                $q->whereNull('locked_at')->orWhere('locked_at', '<=', $expiry);
+            })
+            ->update(['locked_by' => $owner, 'locked_at' => now()]);
+
+        return $claimed === 1;
+    }
+
+    /**
+     * Give up the claim, but only if it is still ours.
+     *
+     * The `locked_by` predicate matters: if our claim already expired and another
+     * driver took the job over, an unconditional clear here would release *their*
+     * claim and let a third driver in alongside them.
+     */
+    private function releaseJob(int $jobId, string $owner): void
+    {
+        try {
+            DB::table('tool_jobs')
+                ->where('id', $jobId)
+                ->where('locked_by', $owner)
+                ->update(['locked_by' => null, 'locked_at' => null]);
+        } catch (Throwable $e) {
+            // A claim that cannot be cleared still expires on its own, so this must
+            // never turn a completed slice into a failure.
+            $this->log('warning', 'Could not release the job claim.', ['job_id' => $jobId, 'error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * One job, by id — read-only, for the UI progress poll.
+     *
+     * The tool polls this instead of driving the job itself, so a sweep keeps running
+     * when the tab is closed and the progress bar simply reattaches on the next visit.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function getJob(int $jobId): ?array
+    {
+        return $this->readJob($jobId);
+    }
+
+    /**
+     * Advance every live job until they finish, park, or the budget runs out.
+     *
+     * This is what makes a sweep independent of the browser that started it. The
+     * scheduler calls it once a minute; each pass takes the claim on one job at a
+     * time and steps it, so a sync started at 17:00 keeps running through the night
+     * whether or not anyone is watching. Closing the tab now costs nothing.
+     *
+     * Repeat-safe by construction. It starts no work of its own — it only advances
+     * rows that startJob() already created — and every step is checkpointed by index
+     * in `tool_jobs.context`. A pass that dies halfway loses at most the slice in
+     * flight, and the claim it held expires and is retaken. Two passes overlapping
+     * cannot both enter the same job.
+     *
+     * @return array{success:int,failed:int,skipped:int,errors:array<int,mixed>,jobs:array<int,array<string,mixed>>}
+     */
+    public function driveJobs(?int $organizationId = null, int $budgetSeconds = self::DRIVE_BUDGET_SECONDS): array
+    {
+        $result = ['success' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => [], 'jobs' => []];
+        $deadline = microtime(true) + max(1, $budgetSeconds);
+        $owner = $this->driverId();
+
+        foreach ($this->resumableJobs($organizationId) as $queued) {
+            if (microtime(true) >= $deadline) {
+                break;
+            }
+
+            $jobId = (int) $queued['id'];
+
+            // Per-job try/catch: one broken job must not abandon the rest of the
+            // queue, and what failed has to reach errors[] rather than be swallowed.
+            try {
+                if (!$this->claimJob($jobId, $owner)) {
+                    // Another driver, or an operator's open tab, already has it.
+                    $result['skipped']++;
+                    continue;
+                }
+
+                $steps = 0;
+
+                try {
+                    // Keep stepping this job while it stays runnable and the pass has
+                    // time left, so one drain finishes short jobs outright instead of
+                    // advancing every job by a single slice per minute.
+                    while (microtime(true) < $deadline) {
+                        $outcome = $this->advanceJob($jobId, $owner);
+                        $after = $outcome['job'] ?? null;
+                        $steps++;
+
+                        if (!is_array($after) || $after['status'] !== self::STATUS_RUNNING) {
+                            break;
+                        }
+                    }
+                } finally {
+                    $this->releaseJob($jobId, $owner);
+                }
+
+                $final = $this->readJob($jobId);
+                $status = $final['status'] ?? self::STATUS_FAILED;
+
+                if ($status === self::STATUS_FAILED) {
+                    $result['failed']++;
+                    $result['errors'][] = ['job_id' => $jobId, 'error' => $final['message'] ?? 'The job failed.'];
+                } elseif (in_array($status, [self::STATUS_PAUSED, self::STATUS_PENDING], true)) {
+                    // Parked on a SmartOLT quota stop. Not a failure: the checkpoint
+                    // stands and a later pass resumes it once the cooldown elapses.
+                    $result['skipped']++;
+                } else {
+                    $result['success']++;
+                }
+
+                $result['jobs'][] = [
+                    'job_id' => $jobId,
+                    'type' => $final['type'] ?? $queued['type'],
+                    'status' => $status,
+                    'current' => $final['current'] ?? 0,
+                    'total' => $final['total'] ?? 0,
+                    'steps' => $steps,
+                ];
+            } catch (Throwable $e) {
+                $result['failed']++;
+                $result['errors'][] = ['job_id' => $jobId, 'error' => $e->getMessage()];
+                $this->log('error', 'Could not drive a job.', ['job_id' => $jobId, 'error' => $e->getMessage()]);
+            }
+        }
+
+        return $result;
+    }
+
     // ---- Individual step processors ----------------------------------------
 
     /**
@@ -1193,18 +1803,18 @@ class SmartOltReconciliationService
     private function stepInventorySync(array $job): array
     {
         $context = $job['context'];
-        $page    = max(1, (int) ($context['page'] ?? 1));
-        $items   = is_array($context['items'] ?? null) ? $context['items'] : [];
+        $page = max(1, (int) ($context['page'] ?? 1));
+        $items = is_array($context['items'] ?? null) ? $context['items'] : [];
 
         $response = $this->callSmartOlt('GET', 'onu/get_all_onus_details', [], [
-            'page'      => $page,
+            'page' => $page,
             'page_size' => self::INVENTORY_PAGE,
         ]);
 
         if (!$response['success']) {
             if ($response['rate_limited']) {
                 // Checkpoint on the page that was refused, not the one after it.
-                $context['page']  = $page;
+                $context['page'] = $page;
                 $context['items'] = $items;
 
                 return $this->pauseForRateLimit($job, $context, 'Inventory download stopped on page ' . $page . '.', $response['retry_after']);
@@ -1214,18 +1824,18 @@ class SmartOltReconciliationService
         }
 
         $merged = $this->mergeInventoryPage($response['data'], $items);
-        $items  = $merged['items'];
+        $items = $merged['items'];
 
         $totalPages = $merged['total_pages'];
-        $hasMore    = $totalPages > 0 ? ($page < $totalPages) : ($merged['count'] >= self::INVENTORY_PAGE);
+        $hasMore = $totalPages > 0 ? ($page < $totalPages) : ($merged['count'] >= self::INVENTORY_PAGE);
 
         if ($hasMore) {
-            $context['page']  = $page + 1;
+            $context['page'] = $page + 1;
             $context['items'] = $items;
 
             return $this->saveJob($job, [
                 'current' => $page,
-                'total'   => $totalPages > 0 ? $totalPages : $page + 1,
+                'total' => $totalPages > 0 ? $totalPages : $page + 1,
                 'message' => sprintf('Downloaded inventory page %d (%d ONUs cached).', $page, count($items)),
                 'context' => $context,
             ]);
@@ -1235,7 +1845,7 @@ class SmartOltReconciliationService
 
         return $this->finishJob($job, self::STATUS_COMPLETED, 'SmartOLT inventory synchronized.', [
             'inventory_count' => count($items),
-            'pages'           => $page,
+            'pages' => $page,
         ]);
     }
 
@@ -1267,8 +1877,8 @@ class SmartOltReconciliationService
         }
 
         return [
-            'items'       => $items,
-            'count'       => count($onus),
+            'items' => $items,
+            'count' => count($onus),
             'total_pages' => is_array($payload) ? (int) ($payload['total_pages'] ?? 0) : 0,
         ];
     }
@@ -1294,7 +1904,7 @@ class SmartOltReconciliationService
             $externalId = $this->externalId($row);
             if ($externalId !== '') {
                 $statuses[$externalId] = [
-                    'status'             => $this->normalizeStatus($row['status'] ?? $row['onu_status'] ?? ''),
+                    'status' => $this->normalizeStatus($row['status'] ?? $row['onu_status'] ?? ''),
                     'last_status_change' => (string) ($row['last_status_change'] ?? $row['status_changed_at'] ?? ''),
                 ];
             }
@@ -1333,18 +1943,18 @@ class SmartOltReconciliationService
     private function stepOpticalDiscovery(array $job): array
     {
         $context = $job['context'];
-        $queue   = is_array($context['queue'] ?? null) ? $context['queue'] : [];
-        $index   = (int) ($context['index'] ?? 0);
+        $queue = is_array($context['queue'] ?? null) ? $context['queue'] : [];
+        $index = (int) ($context['index'] ?? 0);
 
         if ($index >= count($queue)) {
             return $this->finishJob($job, self::STATUS_COMPLETED, 'Optical power and MAC discovery completed.', [
-                'checked'   => (int) ($context['checked'] ?? 0),
+                'checked' => (int) ($context['checked'] ?? 0),
                 'with_macs' => (int) ($context['with_macs'] ?? 0),
             ]);
         }
 
         $externalId = (string) $queue[$index];
-        $optical    = $this->cachedOptical();
+        $optical = $this->cachedOptical();
 
         $response = $this->callSmartOlt('GET', 'onu/get_onu_full_status_info/' . rawurlencode($externalId));
 
@@ -1365,9 +1975,12 @@ class SmartOltReconciliationService
             $reading = $this->extractOptical($payload);
 
             $optical['items'][$externalId] = [
-                'rx_power'   => $reading['rx_power'],
-                'tx_power'   => $reading['tx_power'],
-                'macs'       => $reading['macs'],
+                'onu_rx' => $reading['onu_rx'],
+                'olt_rx' => $reading['olt_rx'],
+                // Alias of onu_rx, kept for readers written before olt_rx existed.
+                'rx_power' => $reading['rx_power'],
+                'tx_power' => $reading['tx_power'],
+                'macs' => $reading['macs'],
                 'checked_at' => now()->toIso8601String(),
             ];
 
@@ -1396,23 +2009,23 @@ class SmartOltReconciliationService
     private function stepRename(array $job): array
     {
         $context = $job['context'];
-        $queue   = is_array($context['queue'] ?? null) ? $context['queue'] : [];
-        $index   = (int) ($context['index'] ?? 0);
+        $queue = is_array($context['queue'] ?? null) ? $context['queue'] : [];
+        $index = (int) ($context['index'] ?? 0);
 
         if ($index >= count($queue)) {
             return $this->finishJob($job, self::STATUS_COMPLETED, 'Batch ONU rename completed.', [
                 'renamed' => (int) ($context['renamed'] ?? 0),
                 'skipped' => (int) ($context['skipped'] ?? 0),
-                'failed'  => (int) ($context['failed'] ?? 0),
+                'failed' => (int) ($context['failed'] ?? 0),
             ]);
         }
 
-        $item       = $queue[$index];
+        $item = $queue[$index];
         $externalId = (string) ($item['external_id'] ?? '');
-        $newName    = $this->sanitizeName((string) ($item['new_name'] ?? ''));
+        $newName = $this->sanitizeName((string) ($item['new_name'] ?? ''));
 
         $inventory = $this->cachedInventory();
-        $oldName   = (string) ($inventory['items'][$externalId]['name'] ?? '');
+        $oldName = (string) ($inventory['items'][$externalId]['name'] ?? '');
 
         if ($newName === '') {
             $context['failed'] = (int) ($context['failed'] ?? 0) + 1;
@@ -1460,51 +2073,178 @@ class SmartOltReconciliationService
     }
 
     /**
+     * Write one matched ONU's SmartOLT serial into its subscriber's billing record.
+     *
+     * The only step in this service that touches a billing table, so it is also the
+     * only one that opens a transaction. The transaction is per item and sits inside
+     * the loop, never around it: one failed row must not roll back the hundreds that
+     * already succeeded. No SmartOLT or RouterOS call happens in here at all, so
+     * there is no HTTP inside the transaction and no rate limit to park on.
+     *
+     * Idempotent by re-read, not by trust. The target is resolved and compared again
+     * under `lockForUpdate` at write time rather than relying on what the preview
+     * computed, so a serial that was already applied — by an earlier run of this same
+     * batch, by another operator, or by a service order in between — is counted as
+     * skipped and written again by nobody. Re-running a finished batch therefore ends
+     * with `updated = 0`, `failed = 0`.
+     *
+     * @param array<string, mixed> $job
+     * @return array<string, mixed>
+     */
+    private function stepSnAlignment(array $job): array
+    {
+        $context = $job['context'];
+        $queue = is_array($context['queue'] ?? null) ? $context['queue'] : [];
+        $index = (int) ($context['index'] ?? 0);
+
+        if ($index >= count($queue)) {
+            return $this->finishJob($job, self::STATUS_COMPLETED, 'Router/modem SN alignment completed.', [
+                'updated' => (int) ($context['updated'] ?? 0),
+                'skipped' => (int) ($context['skipped'] ?? 0),
+                'blocked' => (int) ($context['blocked'] ?? 0),
+                'failed' => (int) ($context['failed'] ?? 0),
+            ]);
+        }
+
+        $scopeId = $context['organization_id'] ?? null;
+
+        $item = $queue[$index];
+        $externalId = (string) ($item['external_id'] ?? '');
+        $tdId = (int) ($item['technical_detail_id'] ?? 0);
+        $newSn = trim((string) ($item['new_sn'] ?? ''));
+
+        if ($tdId <= 0 || $newSn === '') {
+            $context['failed'] = (int) ($context['failed'] ?? 0) + 1;
+            $this->log('warning', 'SN alignment item is missing its target or serial.', [
+                'external_id' => $externalId,
+                'technical_detail_id' => $tdId,
+            ]);
+        } else {
+            try {
+                // Returns the previous serial when a write happened, null when the
+                // record already carried this serial and nothing was done.
+                $previousSn = DB::transaction(function () use ($tdId, $newSn, $scopeId): ?string {
+                    $current = DB::table('technical_details')
+                        ->where('id', $tdId)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if ($current === null) {
+                        throw new \RuntimeException("technical_details #{$tdId} no longer exists.");
+                    }
+
+                    // Out-of-scope target: refused, not written. Mirrors the scoping
+                    // loadSubscribers() applies when building the preview, so the step
+                    // can only ever write what the caller was allowed to see.
+                    if ($scopeId !== null) {
+                        $rowOrg = $current->organization_id === null ? null : (int) $current->organization_id;
+                        if ($rowOrg !== null && $rowOrg !== (int) $scopeId) {
+                            throw new \DomainException("technical_details #{$tdId} belongs to another organization.");
+                        }
+                    }
+
+                    $stored = trim((string) ($current->router_modem_sn ?? ''));
+
+                    if ($stored !== '' && $this->normalizeSerial($stored) === $this->normalizeSerial($newSn)) {
+                        return null;
+                    }
+
+                    DB::table('technical_details')
+                        ->where('id', $tdId)
+                        ->update([
+                            'router_modem_sn' => $newSn,
+                            'updated_at' => now(),
+                        ]);
+
+                    return $stored;
+                });
+
+                if ($previousSn === null) {
+                    $context['skipped'] = (int) ($context['skipped'] ?? 0) + 1;
+                } else {
+                    $context['updated'] = (int) ($context['updated'] ?? 0) + 1;
+
+                    $this->recordLog(
+                        'align_router_sn',
+                        "Adopted SmartOLT serial '{$newSn}' as the router/modem SN for technical_details #{$tdId}.",
+                        $externalId,
+                        ['technical_detail_id' => $tdId, 'router_modem_sn' => $previousSn],
+                        ['technical_detail_id' => $tdId, 'router_modem_sn' => $newSn]
+                    );
+                }
+            } catch (\DomainException $e) {
+                // Refused on scope, not broken — counted apart from genuine failures.
+                $context['blocked'] = (int) ($context['blocked'] ?? 0) + 1;
+                $this->log('warning', 'SN alignment target is outside the caller\'s organization.', [
+                    'external_id' => $externalId,
+                    'technical_detail_id' => $tdId,
+                    'organization_id' => $scopeId,
+                ]);
+            } catch (Throwable $e) {
+                $context['failed'] = (int) ($context['failed'] ?? 0) + 1;
+                $this->log('error', 'SN alignment write failed.', [
+                    'external_id' => $externalId,
+                    'technical_detail_id' => $tdId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $context['index'] = $index + 1;
+
+        return $this->saveJob($job, [
+            'current' => $index + 1,
+            'message' => sprintf('Aligning router/modem SN %d of %d.', $index + 1, count($queue)),
+            'context' => $context,
+        ]);
+    }
+
+    /**
      * @param array<string, mixed> $job
      * @return array<string, mixed>
      */
     private function stepProfileSync(array $job): array
     {
         $context = $job['context'];
-        $queue   = is_array($context['queue'] ?? null) ? $context['queue'] : [];
-        $index   = (int) ($context['index'] ?? 0);
+        $queue = is_array($context['queue'] ?? null) ? $context['queue'] : [];
+        $index = (int) ($context['index'] ?? 0);
 
         if ($index >= count($queue)) {
             return $this->finishJob($job, self::STATUS_COMPLETED, 'Profile synchronization completed.', [
                 'updated' => (int) ($context['updated'] ?? 0),
                 'skipped' => (int) ($context['skipped'] ?? 0),
-                'failed'  => (int) ($context['failed'] ?? 0),
+                'failed' => (int) ($context['failed'] ?? 0),
             ]);
         }
 
-        $item       = $queue[$index];
+        $item = $queue[$index];
         $externalId = (string) ($item['external_id'] ?? '');
-        $inventory  = $this->cachedInventory();
-        $onu        = $inventory['items'][$externalId] ?? [];
+        $inventory = $this->cachedInventory();
+        $onu = $inventory['items'][$externalId] ?? [];
 
-        $payload  = [];
+        $payload = [];
         $previous = [];
-        $next     = [];
+        $next = [];
 
         if (($item['address_changed'] ?? false) && ($item['new_address'] ?? '') !== '') {
             $payload['address_or_comment'] = $this->sanitizeAddress((string) $item['new_address']);
             $previous['address'] = (string) ($onu['address'] ?? '');
-            $next['address']     = $payload['address_or_comment'];
+            $next['address'] = $payload['address_or_comment'];
         }
 
         if (($item['contact_changed'] ?? false) && ($item['new_contact'] ?? '') !== '') {
             $payload['contact'] = $this->sanitizeContact((string) $item['new_contact']);
             $previous['contact'] = (string) ($onu['contact'] ?? '');
-            $next['contact']     = $payload['contact'];
+            $next['contact'] = $payload['contact'];
         }
 
         if (($item['coords_changed'] ?? false) && ($item['new_latitude'] ?? '') !== '' && ($item['new_longitude'] ?? '') !== '') {
-            $payload['latitude']  = (string) $item['new_latitude'];
+            $payload['latitude'] = (string) $item['new_latitude'];
             $payload['longitude'] = (string) $item['new_longitude'];
-            $previous['latitude']  = (string) ($onu['latitude'] ?? '');
+            $previous['latitude'] = (string) ($onu['latitude'] ?? '');
             $previous['longitude'] = (string) ($onu['longitude'] ?? '');
-            $next['latitude']      = $payload['latitude'];
-            $next['longitude']     = $payload['longitude'];
+            $next['latitude'] = $payload['latitude'];
+            $next['longitude'] = $payload['longitude'];
         }
 
         if ($payload === []) {
@@ -1558,32 +2298,55 @@ class SmartOltReconciliationService
     private function stepDelete(array $job): array
     {
         $context = $job['context'];
-        $queue   = is_array($context['queue'] ?? null) ? $context['queue'] : [];
-        $index   = (int) ($context['index'] ?? 0);
+        $queue = is_array($context['queue'] ?? null) ? $context['queue'] : [];
+        $index = (int) ($context['index'] ?? 0);
 
         if ($index >= count($queue)) {
             return $this->finishJob($job, self::STATUS_COMPLETED, 'Inactive ONU cleanup completed.', [
                 'deleted' => (int) ($context['deleted'] ?? 0),
                 'blocked' => (int) ($context['blocked'] ?? 0),
-                'failed'  => (int) ($context['failed'] ?? 0),
+                'overridden' => (int) ($context['overridden'] ?? 0),
+                'failed' => (int) ($context['failed'] ?? 0),
             ]);
         }
 
-        $externalId  = (string) $queue[$index];
+        $externalId = (string) $queue[$index];
         $offlineDays = (int) ($context['offline_days'] ?? self::DEFAULT_OFFLINE_DAYS);
-        $safety      = $this->buildSafetyMap($context['organization_id'] ?? null);
+        $safety = $this->buildSafetyMap($context['organization_id'] ?? null);
+
+        // Operator-driven cleanup runs on the selection, not on a verdict.
+        //
+        // The rows in this queue were picked by a person off the Inactive ONU table,
+        // so the guard result is advice they have already seen and acted against; the
+        // sweep no longer refuses their selection. It is still *computed*, because
+        // what was overridden is exactly what an audit needs afterwards: the reasons
+        // are attached to the activity-log entry for each deletion.
+        //
+        // `enforce_safety` restores the refusing behaviour for a caller that wants
+        // it. It defaults to false here and is not set by the tool. The unattended
+        // nightly pass does not come through this step at all — automateCleanup()
+        // keeps its own hard guards, because nothing there was reviewed by a person.
+        $enforceSafety = (bool) ($context['enforce_safety'] ?? false);
 
         $check = $this->revalidateCleanup($externalId, $offlineDays, $safety);
 
-        if (!$check['eligible']) {
+        if ($enforceSafety && !$check['eligible']) {
             $context['blocked'] = (int) ($context['blocked'] ?? 0) + 1;
             $this->log('warning', 'Deletion blocked at final revalidation.', [
                 'external_id' => $externalId,
-                'reasons'     => $check['reasons'],
+                'reasons' => $check['reasons'],
             ]);
         } else {
+            if (!$check['eligible']) {
+                $context['overridden'] = (int) ($context['overridden'] ?? 0) + 1;
+                $this->log('warning', 'Operator-selected ONU deleted over a safety objection.', [
+                    'external_id' => $externalId,
+                    'reasons' => $check['reasons'],
+                ]);
+            }
+
             $inventory = $this->cachedInventory();
-            $onu       = $inventory['items'][$externalId] ?? [];
+            $onu = $inventory['items'][$externalId] ?? [];
 
             $response = $this->callSmartOlt('POST', 'onu/delete/' . rawurlencode($externalId));
 
@@ -1609,7 +2372,9 @@ class SmartOltReconciliationService
                     "Permanently unprovisioned ONU {$externalId} (" . ($onu['sn'] ?? 'no serial') . ').',
                     $externalId,
                     ['onu' => $onu],
-                    ['deleted' => true],
+                    // What the guards said at the moment of deletion travels with the
+                    // entry, so an override is answerable later rather than invisible.
+                    ['deleted' => true, 'safety_eligible' => $check['eligible'], 'safety_reasons' => $check['reasons']],
                     false
                 );
             } else {
@@ -1645,7 +2410,7 @@ class SmartOltReconciliationService
             case self::JOB_OPTICAL_SCAN:
             case self::JOB_MAC_DISCOVERY:
                 $inventory = $this->cachedInventory();
-                $optical   = $this->cachedOptical();
+                $optical = $this->cachedOptical();
                 $requested = is_array($options['external_ids'] ?? null) ? $options['external_ids'] : [];
 
                 // With no explicit target list, only ONUs never read before are
@@ -1664,7 +2429,7 @@ class SmartOltReconciliationService
 
                 return [
                     'context' => ['queue' => $queue, 'index' => 0, 'checked' => 0, 'with_macs' => 0],
-                    'total'   => count($queue),
+                    'total' => count($queue),
                     'message' => 'Starting optical power and MAC discovery for ' . count($queue) . ' ONU(s).',
                 ];
 
@@ -1679,8 +2444,44 @@ class SmartOltReconciliationService
 
                 return [
                     'context' => ['queue' => $queue, 'index' => 0, 'renamed' => 0, 'skipped' => 0, 'failed' => 0],
-                    'total'   => count($queue),
+                    'total' => count($queue),
                     'message' => 'Starting rename of ' . count($queue) . ' ONU(s).',
+                ];
+
+            case self::JOB_SN_ALIGNMENT:
+                $queue = [];
+                foreach (is_array($options['items'] ?? null) ? $options['items'] : [] as $item) {
+                    if (!is_array($item)) {
+                        continue;
+                    }
+                    $tdId = (int) ($item['technical_detail_id'] ?? 0);
+                    $newSn = trim((string) ($item['new_sn'] ?? ''));
+                    if ($tdId <= 0 || $newSn === '') {
+                        continue;
+                    }
+                    $queue[] = [
+                        'external_id' => (string) ($item['external_id'] ?? ''),
+                        'technical_detail_id' => $tdId,
+                        'new_sn' => $newSn,
+                    ];
+                }
+
+                return [
+                    // The caller's scope is checkpointed with the queue. The step
+                    // re-checks every row against it, because the ids in `items` came
+                    // from the request and a scoped operator must not be able to write
+                    // another organization's billing record by posting its id.
+                    'context' => [
+                        'queue' => $queue,
+                        'index' => 0,
+                        'updated' => 0,
+                        'skipped' => 0,
+                        'failed' => 0,
+                        'blocked' => 0,
+                        'organization_id' => $organizationId,
+                    ],
+                    'total' => count($queue),
+                    'message' => 'Starting router/modem SN alignment for ' . count($queue) . ' subscriber(s).',
                 ];
 
             case self::JOB_PROFILE_SYNC:
@@ -1694,7 +2495,7 @@ class SmartOltReconciliationService
 
                 return [
                     'context' => ['queue' => $queue, 'index' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0],
-                    'total'   => count($queue),
+                    'total' => count($queue),
                     'message' => 'Starting profile push for ' . count($queue) . ' ONU(s).',
                 ];
 
@@ -1709,15 +2510,18 @@ class SmartOltReconciliationService
 
                 return [
                     'context' => [
-                        'queue'           => $queue,
-                        'index'           => 0,
-                        'deleted'         => 0,
-                        'blocked'         => 0,
-                        'failed'          => 0,
-                        'offline_days'    => max(1, (int) ($options['offline_days'] ?? self::DEFAULT_OFFLINE_DAYS)),
+                        'queue' => $queue,
+                        'index' => 0,
+                        'deleted' => 0,
+                        'blocked' => 0,
+                        'overridden' => 0,
+                        'failed' => 0,
+                        'offline_days' => max(1, (int) ($options['offline_days'] ?? self::DEFAULT_OFFLINE_DAYS)),
+                        // Off by default: the operator's selection is the decision.
+                        'enforce_safety' => (bool) ($options['enforce_safety'] ?? false),
                         'organization_id' => $organizationId,
                     ],
-                    'total'   => count($queue),
+                    'total' => count($queue),
                     'message' => 'Starting permanent removal of ' . count($queue) . ' ONU(s).',
                 ];
         }
@@ -1760,19 +2564,19 @@ class SmartOltReconciliationService
         $result = ['success' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => [], 'phases' => []];
 
         $offlineDays = max(1, (int) ($options['offline_days'] ?? self::AUTOMATION_OFFLINE_DAYS));
-        $doRename    = (bool) ($options['rename'] ?? true);
-        $doCleanup   = (bool) ($options['cleanup'] ?? true);
-        $dryRun      = (bool) ($options['dry_run'] ?? false);
-        $maxRenames  = max(0, (int) ($options['max_renames'] ?? 500));
-        $maxDeletes  = max(0, (int) ($options['max_deletes'] ?? 100));
+        $doRename = (bool) ($options['rename'] ?? true);
+        $doCleanup = (bool) ($options['cleanup'] ?? true);
+        $dryRun = (bool) ($options['dry_run'] ?? false);
+        $maxRenames = max(0, (int) ($options['max_renames'] ?? 500));
+        $maxDeletes = max(0, (int) ($options['max_deletes'] ?? 100));
 
         $this->log('info', 'SmartOLT daily automation starting.', [
             'offline_days' => $offlineDays,
-            'rename'       => $doRename,
-            'cleanup'      => $doCleanup,
-            'dry_run'      => $dryRun,
-            'max_renames'  => $maxRenames,
-            'max_deletes'  => $maxDeletes,
+            'rename' => $doRename,
+            'cleanup' => $doCleanup,
+            'dry_run' => $dryRun,
+            'max_renames' => $maxRenames,
+            'max_deletes' => $maxDeletes,
         ]);
 
         if ($this->smartOltConfig() === null) {
@@ -1826,7 +2630,7 @@ class SmartOltReconciliationService
 
         $this->log('info', 'SmartOLT daily automation finished.', [
             'success' => $result['success'],
-            'failed'  => $result['failed'],
+            'failed' => $result['failed'],
             'skipped' => $result['skipped'],
         ]);
 
@@ -1850,7 +2654,7 @@ class SmartOltReconciliationService
 
             try {
                 $outcome = $this->processJob((int) $job['id']);
-                $after   = $outcome['job'] ?? null;
+                $after = $outcome['job'] ?? null;
 
                 if (is_array($after) && $after['status'] === self::STATUS_PAUSED) {
                     $drained['still_paused']++;
@@ -1878,14 +2682,14 @@ class SmartOltReconciliationService
     private function refreshInventory(): array
     {
         $items = [];
-        $page  = 1;
+        $page = 1;
 
         // A hard ceiling so a paging bug on the far side cannot loop forever.
         $maxPages = 500;
 
         while ($page <= $maxPages) {
             $response = $this->callSmartOlt('GET', 'onu/get_all_onus_details', [], [
-                'page'      => $page,
+                'page' => $page,
                 'page_size' => self::INVENTORY_PAGE,
             ]);
 
@@ -1894,18 +2698,18 @@ class SmartOltReconciliationService
                 // partial inventory read as complete would make every ONU that was
                 // not downloaded look absent. Keep the previous cache instead.
                 return [
-                    'success'      => false,
-                    'count'        => count($items),
-                    'pages'        => $page - 1,
+                    'success' => false,
+                    'count' => count($items),
+                    'pages' => $page - 1,
                     'rate_limited' => (bool) $response['rate_limited'],
-                    'error'        => $response['rate_limited']
+                    'error' => $response['rate_limited']
                         ? 'SmartOLT rate limit reached on page ' . $page . '; the cached inventory was left in place.'
                         : $response['error'],
                 ];
             }
 
             $merged = $this->mergeInventoryPage($response['data'], $items);
-            $items  = $merged['items'];
+            $items = $merged['items'];
 
             $hasMore = $merged['total_pages'] > 0
                 ? ($page < $merged['total_pages'])
@@ -1934,10 +2738,10 @@ class SmartOltReconciliationService
 
         if (!$response['success']) {
             return [
-                'success'      => false,
-                'count'        => 0,
+                'success' => false,
+                'count' => 0,
                 'rate_limited' => (bool) $response['rate_limited'],
-                'error'        => $response['error'],
+                'error' => $response['error'],
             ];
         }
 
@@ -1991,7 +2795,7 @@ class SmartOltReconciliationService
 
             $externalId = (string) $row['external_id'];
             $targetName = $this->sanitizeName((string) $row['target_name']);
-            $oldName    = (string) ($inventory['items'][$externalId]['name'] ?? '');
+            $oldName = (string) ($inventory['items'][$externalId]['name'] ?? '');
 
             if ($targetName === '' || strcmp($oldName, $targetName) === 0) {
                 $phase['skipped']++;
@@ -2014,7 +2818,7 @@ class SmartOltReconciliationService
 
                 if (!$response['success'] && $response['rate_limited']) {
                     $phase['rate_limited'] = true;
-                    $result['errors'][]    = 'Rename phase stopped on the SmartOLT rate limit.';
+                    $result['errors'][] = 'Rename phase stopped on the SmartOLT rate limit.';
                     $this->log('warning', 'Rename phase stopped on the SmartOLT rate limit.', [
                         'renamed' => $phase['renamed'],
                     ]);
@@ -2070,7 +2874,7 @@ class SmartOltReconciliationService
 
         try {
             $preview = $this->getCleanupPreview($offlineDays, $organizationId);
-            $safety  = $this->buildSafetyMap($organizationId);
+            $safety = $this->buildSafetyMap($organizationId);
         } catch (Throwable $e) {
             $result['failed']++;
             $result['errors'][] = 'Cleanup preview: ' . $e->getMessage();
@@ -2087,9 +2891,9 @@ class SmartOltReconciliationService
             $result['skipped']++;
 
             $this->log('warning', 'Automated cleanup skipped — safety validation unavailable.', [
-                'billing_available'  => $safety['available'] ?? false,
+                'billing_available' => $safety['available'] ?? false,
                 'sessions_available' => $safety['sessions_available'] ?? false,
-                'session_errors'     => $safety['session_errors'] ?? [],
+                'session_errors' => $safety['session_errors'] ?? [],
             ]);
 
             return $phase;
@@ -2125,19 +2929,19 @@ class SmartOltReconciliationService
                     $result['skipped']++;
                     $this->log('warning', 'Automated deletion blocked at final revalidation.', [
                         'external_id' => $externalId,
-                        'reasons'     => $check['reasons'],
+                        'reasons' => $check['reasons'],
                     ]);
                     continue;
                 }
 
                 $inventory = $this->cachedInventory();
-                $onu       = $inventory['items'][$externalId] ?? [];
+                $onu = $inventory['items'][$externalId] ?? [];
 
                 $response = $this->callSmartOlt('POST', 'onu/delete/' . rawurlencode($externalId));
 
                 if (!$response['success'] && $response['rate_limited']) {
                     $phase['rate_limited'] = true;
-                    $result['errors'][]    = 'Cleanup phase stopped on the SmartOLT rate limit.';
+                    $result['errors'][] = 'Cleanup phase stopped on the SmartOLT rate limit.';
                     $this->log('warning', 'Cleanup phase stopped on the SmartOLT rate limit.', ['deleted' => $phase['deleted']]);
                     break;
                 }
@@ -2163,9 +2967,9 @@ class SmartOltReconciliationService
                     ['deleted' => true],
                     false,
                     [
-                        'source'       => 'cron:smartolt-daily-automation',
+                        'source' => 'cron:smartolt-daily-automation',
                         'offline_days' => $row['days_offline'] ?? null,
-                        'onu_status'   => $row['status'] ?? null,
+                        'onu_status' => $row['status'] ?? null,
                     ]
                 );
             } catch (Throwable $e) {
@@ -2209,7 +3013,15 @@ class SmartOltReconciliationService
         }
 
         $externalId = (string) ($data['external_id'] ?? '');
-        $previous   = is_array($data['previous_state'] ?? null) ? $data['previous_state'] : [];
+        $previous = is_array($data['previous_state'] ?? null) ? $data['previous_state'] : [];
+
+        // SN alignment is the one operation here that changed a billing row rather
+        // than the ONU, so it is reversed against the database and never through the
+        // SmartOLT API. Detected on the snapshot's shape rather than the action name,
+        // so a renamed action string cannot route a DB change into the ONU path.
+        if (array_key_exists('technical_detail_id', $previous)) {
+            return $this->undoSnAlignment($entry, $data, $logId);
+        }
 
         if ($externalId === '' || $previous === []) {
             return $this->failure("Operation #{$logId} carries no snapshot to restore.");
@@ -2226,7 +3038,7 @@ class SmartOltReconciliationService
             $payload['contact'] = $this->sanitizeContact((string) $previous['contact']);
         }
         if (array_key_exists('latitude', $previous) && array_key_exists('longitude', $previous)) {
-            $payload['latitude']  = (string) $previous['latitude'];
+            $payload['latitude'] = (string) $previous['latitude'];
             $payload['longitude'] = (string) $previous['longitude'];
         }
 
@@ -2248,7 +3060,7 @@ class SmartOltReconciliationService
             $this->putCache('inventory', $inventory);
         }
 
-        $data['reversed']    = true;
+        $data['reversed'] = true;
         $data['reversed_at'] = now()->toIso8601String();
         $data['reversed_by'] = auth()->id();
         $entry->additional_data = $data;
@@ -2259,6 +3071,94 @@ class SmartOltReconciliationService
             "Reversed operation #{$logId} ({$entry->action}) for ONU {$externalId}.",
             $externalId,
             is_array($data['new_state'] ?? null) ? $data['new_state'] : [],
+            $previous,
+            false,
+            ['reverted_log_id' => $logId]
+        );
+
+        return ['success' => true, 'skipped' => false, 'message' => "Operation #{$logId} reversed."];
+    }
+
+    /**
+     * Reverse one SN adoption by putting the previous router/modem SN back.
+     *
+     * Refuses when the current value is no longer the one this operation wrote: a
+     * later service order or another operator has since set the serial, and quietly
+     * reverting to a snapshot older than that change would silently undo their work
+     * too. The operator is told what it found instead.
+     *
+     * @param array<string, mixed> $data
+     * @return array{success: bool, skipped: bool, message: string}
+     */
+    private function undoSnAlignment(ActivityLog $entry, array $data, int $logId): array
+    {
+        $previous = is_array($data['previous_state'] ?? null) ? $data['previous_state'] : [];
+        $applied = is_array($data['new_state'] ?? null) ? $data['new_state'] : [];
+
+        $tdId = (int) ($previous['technical_detail_id'] ?? 0);
+        if ($tdId <= 0) {
+            return $this->failure("Operation #{$logId} carries no billing record to restore.");
+        }
+
+        $previousSn = trim((string) ($previous['router_modem_sn'] ?? ''));
+        $appliedSn = trim((string) ($applied['router_modem_sn'] ?? ''));
+
+        try {
+            $outcome = DB::transaction(function () use ($tdId, $previousSn, $appliedSn): string {
+                $current = DB::table('technical_details')
+                    ->where('id', $tdId)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($current === null) {
+                    return 'missing';
+                }
+
+                $stored = trim((string) ($current->router_modem_sn ?? ''));
+
+                if ($appliedSn !== '' && $this->normalizeSerial($stored) !== $this->normalizeSerial($appliedSn)) {
+                    return 'changed';
+                }
+
+                DB::table('technical_details')
+                    ->where('id', $tdId)
+                    ->update([
+                        // An empty snapshot means the column was blank before this
+                        // operation filled it; restore the blank, not an empty string.
+                        'router_modem_sn' => $previousSn === '' ? null : $previousSn,
+                        'updated_at' => now(),
+                    ]);
+
+                return 'restored';
+            });
+        } catch (Throwable $e) {
+            $this->log('error', 'SN alignment reversal failed.', [
+                'log_id' => $logId,
+                'technical_detail_id' => $tdId,
+                'error' => $e->getMessage(),
+            ]);
+            return $this->failure("Could not reverse operation #{$logId}: " . $e->getMessage());
+        }
+
+        if ($outcome === 'missing') {
+            return $this->failure("The billing record this operation changed (technical_details #{$tdId}) no longer exists.");
+        }
+
+        if ($outcome === 'changed') {
+            return $this->failure("The router/modem SN has been changed since operation #{$logId} ran, so it was left alone. Review the record before reversing by hand.");
+        }
+
+        $data['reversed'] = true;
+        $data['reversed_at'] = now()->toIso8601String();
+        $data['reversed_by'] = auth()->id();
+        $entry->additional_data = $data;
+        $entry->save();
+
+        $this->recordLog(
+            'undo_' . $entry->action,
+            "Reversed operation #{$logId} ({$entry->action}) — restored the router/modem SN on technical_details #{$tdId}.",
+            (string) ($data['external_id'] ?? ''),
+            $applied,
             $previous,
             false,
             ['reverted_log_id' => $logId]
@@ -2289,18 +3189,18 @@ class SmartOltReconciliationService
             $data = is_array($entry->additional_data) ? $entry->additional_data : [];
 
             return [
-                'log_id'         => (int) $entry->log_id,
-                'created_at'     => optional($entry->created_at)->toIso8601String(),
-                'level'          => $entry->level,
-                'action'         => $entry->action,
-                'message'        => $entry->message,
-                'operator'       => $entry->user?->username ?? $entry->user?->email_address ?? 'System',
-                'external_id'    => $data['external_id'] ?? null,
+                'log_id' => (int) $entry->log_id,
+                'created_at' => optional($entry->created_at)->toIso8601String(),
+                'level' => $entry->level,
+                'action' => $entry->action,
+                'message' => $entry->message,
+                'operator' => $entry->user?->username ?? $entry->user?->email_address ?? 'System',
+                'external_id' => $data['external_id'] ?? null,
                 'previous_state' => is_array($data['previous_state'] ?? null) ? $data['previous_state'] : [],
-                'new_state'      => is_array($data['new_state'] ?? null) ? $data['new_state'] : [],
-                'reversible'     => (bool) ($data['reversible'] ?? false),
-                'reversed'       => (bool) ($data['reversed'] ?? false),
-                'reversed_at'    => $data['reversed_at'] ?? null,
+                'new_state' => is_array($data['new_state'] ?? null) ? $data['new_state'] : [],
+                'reversible' => (bool) ($data['reversible'] ?? false),
+                'reversed' => (bool) ($data['reversed'] ?? false),
+                'reversed_at' => $data['reversed_at'] ?? null,
             ];
         })->all();
     }
@@ -2314,48 +3214,118 @@ class SmartOltReconciliationService
     {
         switch ($dataset) {
             case 'alignment':
-                $data    = $this->getAlignmentPreview($organizationId);
+                $data = $this->getAlignmentPreview($organizationId);
                 $headers = ['External ID', 'Serial', 'Current Name', 'Proposed Name', 'Matched By', 'Account No', 'Customer', 'Plan', 'Status', 'Rename Needed'];
-                $rows    = array_map(static fn (array $r): array => [
-                    $r['external_id'], $r['sn'], $r['current_name'], $r['proposed_name'], $r['matched_by'] ?? '',
-                    $r['account_no'] ?? '', $r['customer_name'] ?? '', $r['plan'] ?? '', $r['status'], $r['rename_needed'] ? 'yes' : 'no',
+                $rows = array_map(static fn(array $r): array => [
+                    $r['external_id'],
+                    $r['sn'],
+                    $r['current_name'],
+                    $r['proposed_name'],
+                    $r['matched_by'] ?? '',
+                    $r['account_no'] ?? '',
+                    $r['customer_name'] ?? '',
+                    $r['plan'] ?? '',
+                    $r['status'],
+                    $r['rename_needed'] ? 'yes' : 'no',
                 ], $data['rows']);
                 break;
 
             case 'profile':
-                $data    = $this->getProfilePreview($organizationId);
+                $data = $this->getProfilePreview($organizationId);
                 $headers = ['External ID', 'Serial', 'Name', 'Account No', 'Old Address', 'New Address', 'Old Contact', 'New Contact', 'OLT VLAN', 'Billing VLAN', 'Eligible'];
-                $rows    = array_map(static fn (array $r): array => [
-                    $r['external_id'], $r['sn'], $r['name'], $r['account_no'] ?? '', $r['old_address'], $r['new_address'],
-                    $r['old_contact'], $r['new_contact'], $r['olt_vlan'], $r['billing_vlan'], $r['eligible'] ? 'yes' : 'no',
+                $rows = array_map(static fn(array $r): array => [
+                    $r['external_id'],
+                    $r['sn'],
+                    $r['name'],
+                    $r['account_no'] ?? '',
+                    $r['old_address'],
+                    $r['new_address'],
+                    $r['old_contact'],
+                    $r['new_contact'],
+                    $r['olt_vlan'],
+                    $r['billing_vlan'],
+                    $r['eligible'] ? 'yes' : 'no',
+                ], $data['rows']);
+                break;
+
+            case 'sn_alignment':
+                $data = $this->getSnAlignmentPreview($organizationId);
+                $headers = ['External ID', 'State', 'SmartOLT Serial', 'Billing SN', 'RADIUS Username', 'Calling-Station-Id', 'Account No', 'Customer', 'Status', 'Eligible', 'Reason'];
+                $rows = array_map(static fn(array $r): array => [
+                    $r['external_id'],
+                    $r['state'],
+                    $r['sn'],
+                    $r['billing_sn'],
+                    $r['radius_username'],
+                    $r['calling_station_id'],
+                    $r['account_no'],
+                    $r['customer_name'],
+                    $r['status'],
+                    $r['eligible'] ? 'yes' : 'no',
+                    $r['reason'],
                 ], $data['rows']);
                 break;
 
             case 'cleanup':
-                $data    = $this->getCleanupPreview(self::DEFAULT_OFFLINE_DAYS, $organizationId);
-                $headers = ['External ID', 'Serial', 'Name', 'Zone', 'Status', 'Last Status Change', 'Days Offline', 'Eligible', 'Blockers'];
-                $rows    = array_map(static fn (array $r): array => [
-                    $r['external_id'], $r['sn'], $r['name'], $r['zone_name'], $r['status'], $r['last_status_change'],
-                    $r['days_offline'], $r['eligible'] ? 'yes' : 'no', implode(' | ', $r['reasons']),
+                $data = $this->getCleanupPreview(self::DEFAULT_OFFLINE_DAYS, $organizationId);
+                $headers = [
+                    'External ID',
+                    'Serial',
+                    'Name',
+                    'Zone',
+                    'Status',
+                    'Last Status Change',
+                    'Days Offline',
+                    'ONU RX (dBm)',
+                    'OLT RX (dBm)',
+                    'Optical Checked At',
+                    'Eligible',
+                    'Blockers',
+                ];
+                $rows = array_map(static fn(array $r): array => [
+                    $r['external_id'],
+                    $r['sn'],
+                    $r['name'],
+                    $r['zone_name'],
+                    $r['status'],
+                    $r['last_status_change'],
+                    $r['days_offline'],
+                    // Never measured stays blank rather than becoming a 0 dBm reading.
+                    $r['onu_rx'] ?? '',
+                    $r['olt_rx'] ?? '',
+                    $r['optical_checked_at'] ?? '',
+                    $r['eligible'] ? 'yes' : 'no',
+                    implode(' | ', $r['reasons']),
                 ], $data['rows']);
                 break;
 
             case 'inventory':
             default:
                 $dataset = 'inventory';
-                $state   = $this->getState(true, $organizationId);
+                $state = $this->getState(true, $organizationId);
                 $headers = ['External ID', 'Serial', 'Name', 'OLT', 'Board', 'Port', 'Zone', 'ODB', 'Status', 'Days Offline', 'RX (dBm)', 'TX (dBm)', 'Signal'];
-                $rows    = array_map(static fn (array $r): array => [
-                    $r['external_id'], $r['sn'], $r['name'], $r['olt_name'], $r['board'], $r['port'], $r['zone_name'],
-                    $r['odb_name'], $r['status'], $r['days_offline'] ?? '', $r['rx_power'] ?? '', $r['tx_power'] ?? '', $r['signal'],
+                $rows = array_map(static fn(array $r): array => [
+                    $r['external_id'],
+                    $r['sn'],
+                    $r['name'],
+                    $r['olt_name'],
+                    $r['board'],
+                    $r['port'],
+                    $r['zone_name'],
+                    $r['odb_name'],
+                    $r['status'],
+                    $r['days_offline'] ?? '',
+                    $r['rx_power'] ?? '',
+                    $r['tx_power'] ?? '',
+                    $r['signal'],
                 ], $state['rows']);
                 break;
         }
 
         return [
             'filename' => 'smartolt-' . $dataset . '-' . now()->format('Ymd-His') . '.csv',
-            'headers'  => $headers,
-            'rows'     => $rows,
+            'headers' => $headers,
+            'rows' => $rows,
         ];
     }
 
@@ -2409,28 +3379,28 @@ class SmartOltReconciliationService
                     || $this->looksRateLimited($response->body());
 
                 return [
-                    'success'      => false,
-                    'status'       => $response->status(),
-                    'data'         => $payload,
-                    'error'        => $limited
+                    'success' => false,
+                    'status' => $response->status(),
+                    'data' => $payload,
+                    'error' => $limited
                         ? 'SmartOLT rate limit reached (HTTP ' . $response->status() . ').'
                         : 'HTTP ' . $response->status(),
                     'rate_limited' => $limited,
-                    'retry_after'  => $this->retryAfterSeconds($response->header('Retry-After')),
+                    'retry_after' => $this->retryAfterSeconds($response->header('Retry-After')),
                 ];
             }
 
             if (is_array($payload) && array_key_exists('status', $payload) && $payload['status'] === false) {
-                $error   = (string) ($payload['error'] ?? $payload['message'] ?? 'SmartOLT rejected the request.');
+                $error = (string) ($payload['error'] ?? $payload['message'] ?? 'SmartOLT rejected the request.');
                 $limited = $this->looksRateLimited($error);
 
                 return [
-                    'success'      => false,
-                    'status'       => $response->status(),
-                    'data'         => $payload,
-                    'error'        => $error,
+                    'success' => false,
+                    'status' => $response->status(),
+                    'data' => $payload,
+                    'error' => $error,
                     'rate_limited' => $limited,
-                    'retry_after'  => $this->retryAfterSeconds($response->header('Retry-After')),
+                    'retry_after' => $this->retryAfterSeconds($response->header('Retry-After')),
                 ];
             }
 
@@ -2488,30 +3458,63 @@ class SmartOltReconciliationService
     }
 
     /**
-     * Pull RX/TX power and any MAC addresses out of a full-status payload.
+     * Pull both optical readings and any MAC addresses out of a full-status payload.
      *
      * The payload shape varies by OLT vendor, so the search is a deep scan for the
      * recognised keys rather than a fixed path.
      *
-     * @return array{rx_power: float|null, tx_power: float|null, macs: array<int, string>}
+     * Two readings, not one. A PON link has a reading at each end: `onu_rx` is what
+     * the subscriber's ONU hears from the OLT (the downstream leg) and `olt_rx` is
+     * what the OLT hears back from that ONU (the upstream leg). A dirty connector or
+     * a bent drop usually shows on one leg well before the other, so a technician
+     * needs both to tell a failing subscriber drop from a failing feeder.
+     *
+     * Why the keys are classified before they are matched. The previous unanchored
+     * pattern `(onu_?)?(rx|signal)_?(power|level)?$` also matches the *string*
+     * "olt_rx_power" — it ends in a recognised suffix — so on any vendor whose
+     * payload listed the OLT-side reading first, that value was captured as the ONU
+     * reading and the ONU's own RX was discarded. Every key is now tested for an
+     * explicit OLT-side marker first, and only what is not OLT-side can land in
+     * `onu_rx`.
+     *
+     * `rx_power` is retained as an alias of `onu_rx` because the state payload, the
+     * CSV export and the web tool all already read that key.
+     *
+     * @return array{onu_rx: float|null, olt_rx: float|null, rx_power: float|null, tx_power: float|null, macs: array<int, string>}
      */
     private function extractOptical(mixed $payload): array
     {
-        $rx   = null;
-        $tx   = null;
+        $onuRx = null;
+        $oltRx = null;
+        $tx = null;
         $macs = [];
 
-        $walk = function (mixed $node) use (&$walk, &$rx, &$tx, &$macs): void {
+        $walk = function (mixed $node) use (&$walk, &$onuRx, &$oltRx, &$tx, &$macs): void {
             if (is_array($node)) {
                 foreach ($node as $key => $value) {
                     if (is_string($key)) {
                         $lower = strtolower($key);
 
-                        if ($rx === null && preg_match('/(onu_?)?(rx|signal)_?(power|level)?$/', $lower)) {
-                            $rx = $this->parseDbm($value);
+                        // Which end of the link this key describes, decided before the
+                        // reading is claimed. An OLT-side key can never fall through to
+                        // $onuRx, which is what the old unanchored match allowed.
+                        $isOltSide = preg_match('/(olt|uplink|upstream)|^olt|_olt_|olt_rx/', $lower) === 1;
+
+                        $isRxKey = preg_match('/(^|_)(rx|signal)(_?(power|level|dbm))?$/', $lower) === 1;
+                        $isTxKey = preg_match('/(^|_)tx(_?(power|level|dbm))?$/', $lower) === 1;
+
+                        if ($isRxKey) {
+                            if ($isOltSide) {
+                                $oltRx ??= $this->parseDbm($value);
+                            } else {
+                                $onuRx ??= $this->parseDbm($value);
+                            }
                         }
-                        if ($tx === null && preg_match('/(onu_?)?tx_?(power|level)?$/', $lower)) {
-                            $tx = $this->parseDbm($value);
+
+                        // TX is only ever read from the ONU side; the OLT's own
+                        // transmit level is a property of the port, not of this ONU.
+                        if ($isTxKey && !$isOltSide) {
+                            $tx ??= $this->parseDbm($value);
                         }
                     }
 
@@ -2531,7 +3534,14 @@ class SmartOltReconciliationService
 
         $walk($payload);
 
-        return ['rx_power' => $rx, 'tx_power' => $tx, 'macs' => array_values(array_unique($macs))];
+        return [
+            'onu_rx' => $onuRx,
+            'olt_rx' => $oltRx,
+            // Legacy alias, kept because existing consumers read `rx_power`.
+            'rx_power' => $onuRx,
+            'tx_power' => $tx,
+            'macs' => array_values(array_unique($macs)),
+        ];
     }
 
     /**
@@ -2618,16 +3628,16 @@ class SmartOltReconciliationService
         $query->chunkById(self::SUBSCRIBER_CHUNK, function ($chunk) use (&$subscribers): void {
             foreach ($chunk as $row) {
                 $subscribers[(int) $row->td_id] = [
-                    'account_no'    => trim((string) ($row->account_no ?? '')),
-                    'username'      => trim((string) ($row->username ?? '')),
-                    'sn'            => trim((string) ($row->router_modem_sn ?? '')),
-                    'vlan'          => trim((string) ($row->vlan ?? '')),
-                    'mac'           => '',
+                    'account_no' => trim((string) ($row->account_no ?? '')),
+                    'username' => trim((string) ($row->username ?? '')),
+                    'sn' => trim((string) ($row->router_modem_sn ?? '')),
+                    'vlan' => trim((string) ($row->vlan ?? '')),
+                    'mac' => '',
                     'customer_name' => trim(($row->first_name ?? '') . ' ' . ($row->last_name ?? '')),
-                    'address'       => trim((string) ($row->address ?? '')),
-                    'contact'       => trim((string) ($row->contact_number_primary ?? '')),
-                    'coordinates'   => trim((string) ($row->address_coordinates ?? '')),
-                    'plan_label'    => trim((string) ($row->desired_plan ?? '')),
+                    'address' => trim((string) ($row->address ?? '')),
+                    'contact' => trim((string) ($row->contact_number_primary ?? '')),
+                    'coordinates' => trim((string) ($row->address_coordinates ?? '')),
+                    'plan_label' => trim((string) ($row->desired_plan ?? '')),
                     'billing_status_id' => $row->billing_status_id,
                 ];
             }
@@ -2663,8 +3673,8 @@ class SmartOltReconciliationService
         }
 
         try {
-            $accounts  = [];
-            $jobs      = [];
+            $accounts = [];
+            $jobs = [];
             $usernames = [];
 
             DB::table('technical_details as td')
@@ -2715,25 +3725,25 @@ class SmartOltReconciliationService
             }
 
             $map = [
-                'available'          => true,
-                'accounts'           => $accounts,
-                'job_orders'         => $jobs,
-                'usernames'          => $usernames,
+                'available' => true,
+                'accounts' => $accounts,
+                'job_orders' => $jobs,
+                'usernames' => $usernames,
                 'sessions_available' => $sessions['available'],
-                'online'             => $online,
-                'session_errors'     => $sessions['errors'],
+                'online' => $online,
+                'session_errors' => $sessions['errors'],
             ];
         } catch (Throwable $e) {
             $this->log('error', 'Could not build the cleanup safety map.', ['error' => $e->getMessage()]);
 
             $map = [
-                'available'          => false,
-                'accounts'           => [],
-                'job_orders'         => [],
-                'usernames'          => [],
+                'available' => false,
+                'accounts' => [],
+                'job_orders' => [],
+                'usernames' => [],
                 'sessions_available' => false,
-                'online'             => [],
-                'session_errors'     => [$e->getMessage()],
+                'online' => [],
+                'session_errors' => [$e->getMessage()],
             ];
         }
 
@@ -2753,7 +3763,7 @@ class SmartOltReconciliationService
             trim((string) $subscriber['account_no']),
             trim((string) $subscriber['customer_name']),
             $this->bareGroup((string) $subscriber['plan_label']),
-        ], static fn (string $part): bool => $part !== '');
+        ], static fn(string $part): bool => $part !== '');
 
         return $this->sanitizeName(implode(' - ', $parts));
     }
@@ -2799,14 +3809,14 @@ class SmartOltReconciliationService
     private function hydrateJob(object $row): array
     {
         return [
-            'id'         => (int) $row->id,
-            'type'       => $row->type,
-            'status'     => $row->status,
-            'current'    => (int) $row->current,
-            'total'      => (int) $row->total,
-            'message'    => (string) $row->message,
-            'context'    => json_decode((string) ($row->context ?? '{}'), true) ?: [],
-            'summary'    => json_decode((string) ($row->summary ?? 'null'), true),
+            'id' => (int) $row->id,
+            'type' => $row->type,
+            'status' => $row->status,
+            'current' => (int) $row->current,
+            'total' => (int) $row->total,
+            'message' => (string) $row->message,
+            'context' => json_decode((string) ($row->context ?? '{}'), true) ?: [],
+            'summary' => json_decode((string) ($row->summary ?? 'null'), true),
             'created_at' => $row->created_at,
             'updated_at' => $row->updated_at,
         ];
@@ -2822,10 +3832,10 @@ class SmartOltReconciliationService
         $job = array_merge($job, $changes);
 
         DB::table('tool_jobs')->where('id', $job['id'])->update([
-            'current'    => $job['current'],
-            'total'      => $job['total'],
-            'message'    => $job['message'],
-            'context'    => json_encode($job['context']),
+            'current' => $job['current'],
+            'total' => $job['total'],
+            'message' => $job['message'],
+            'context' => json_encode($job['context']),
             'updated_at' => now(),
         ]);
 
@@ -2839,22 +3849,22 @@ class SmartOltReconciliationService
      */
     private function finishJob(array $job, string $status, string $message, array $summary = []): array
     {
-        $job['status']  = $status;
+        $job['status'] = $status;
         $job['message'] = $message;
         $job['summary'] = $summary;
 
         DB::table('tool_jobs')->where('id', $job['id'])->update([
-            'status'     => $status,
-            'message'    => $message,
-            'current'    => $job['current'],
-            'total'      => $job['total'],
-            'context'    => json_encode($job['context']),
-            'summary'    => $summary === [] ? null : json_encode($summary),
+            'status' => $status,
+            'message' => $message,
+            'current' => $job['current'],
+            'total' => $job['total'],
+            'context' => json_encode($job['context']),
+            'summary' => $summary === [] ? null : json_encode($summary),
             'updated_at' => now(),
         ]);
 
         $this->log($status === self::STATUS_FAILED ? 'error' : 'info', "Job '{$job['type']}' {$status}: {$message}", [
-            'job_id'  => $job['id'],
+            'job_id' => $job['id'],
             'summary' => $summary,
         ]);
 
@@ -2938,23 +3948,23 @@ class SmartOltReconciliationService
     private function compactOnu(array $onu, string $externalId): array
     {
         return [
-            'external_id'        => $externalId,
-            'sn'                 => trim((string) ($onu['sn'] ?? $externalId)),
-            'olt_id'             => trim((string) ($onu['olt_id'] ?? '')),
-            'olt_name'           => trim((string) ($onu['olt_name'] ?? '')),
-            'board'              => trim((string) ($onu['board'] ?? '')),
-            'port'               => trim((string) ($onu['port'] ?? '')),
-            'onu'                => trim((string) ($onu['onu'] ?? '')),
-            'zone_name'          => trim((string) ($onu['zone_name'] ?? $onu['zone'] ?? '')),
-            'odb_name'           => trim((string) ($onu['odb_name'] ?? $onu['odb'] ?? '')),
-            'odb_port'           => trim((string) ($onu['odb_port'] ?? '')),
-            'name'               => trim((string) ($onu['name'] ?? '')),
-            'address'            => trim((string) ($onu['address'] ?? '')),
-            'contact'            => trim((string) ($onu['contact'] ?? '')),
-            'latitude'           => trim((string) ($onu['latitude'] ?? '')),
-            'longitude'          => trim((string) ($onu['longitude'] ?? '')),
-            'vlan'               => trim((string) ($onu['vlan'] ?? '')),
-            'status'             => $this->normalizeStatus($onu['status'] ?? $onu['onu_status'] ?? ''),
+            'external_id' => $externalId,
+            'sn' => trim((string) ($onu['sn'] ?? $externalId)),
+            'olt_id' => trim((string) ($onu['olt_id'] ?? '')),
+            'olt_name' => trim((string) ($onu['olt_name'] ?? '')),
+            'board' => trim((string) ($onu['board'] ?? '')),
+            'port' => trim((string) ($onu['port'] ?? '')),
+            'onu' => trim((string) ($onu['onu'] ?? '')),
+            'zone_name' => trim((string) ($onu['zone_name'] ?? $onu['zone'] ?? '')),
+            'odb_name' => trim((string) ($onu['odb_name'] ?? $onu['odb'] ?? '')),
+            'odb_port' => trim((string) ($onu['odb_port'] ?? '')),
+            'name' => trim((string) ($onu['name'] ?? '')),
+            'address' => trim((string) ($onu['address'] ?? '')),
+            'contact' => trim((string) ($onu['contact'] ?? '')),
+            'latitude' => trim((string) ($onu['latitude'] ?? '')),
+            'longitude' => trim((string) ($onu['longitude'] ?? '')),
+            'vlan' => trim((string) ($onu['vlan'] ?? '')),
+            'status' => $this->normalizeStatus($onu['status'] ?? $onu['onu_status'] ?? ''),
             'last_status_change' => trim((string) ($onu['last_status_change'] ?? $onu['status_changed_at'] ?? '')),
         ];
     }
@@ -2966,7 +3976,7 @@ class SmartOltReconciliationService
     private function resolveStatus(array $onu, array $statuses): string
     {
         $externalId = (string) ($onu['external_id'] ?? '');
-        $cached     = $statuses['items'][$externalId] ?? null;
+        $cached = $statuses['items'][$externalId] ?? null;
 
         if (is_array($cached) && ($cached['status'] ?? '') !== '') {
             return $this->normalizeStatus($cached['status']);
@@ -2982,7 +3992,7 @@ class SmartOltReconciliationService
         return match (true) {
             $status === '' => 'unknown',
             str_contains($status, 'online'), str_contains($status, 'working') => 'online',
-            str_contains($status, 'los')     => 'los',
+            str_contains($status, 'los') => 'los',
             str_contains($status, 'pwrfail'), str_contains($status, 'power') => 'pwrfail',
             str_contains($status, 'offline'), str_contains($status, 'dying') => 'offline',
             default => $status,
@@ -2996,7 +4006,7 @@ class SmartOltReconciliationService
     private function daysOffline(array $onu, array $statuses): ?int
     {
         $externalId = (string) ($onu['external_id'] ?? '');
-        $changed    = $statuses['items'][$externalId]['last_status_change'] ?? ($onu['last_status_change'] ?? '');
+        $changed = $statuses['items'][$externalId]['last_status_change'] ?? ($onu['last_status_change'] ?? '');
 
         if (trim((string) $changed) === '') {
             return null;
@@ -3099,13 +4109,13 @@ class SmartOltReconciliationService
         array $extra = []
     ): void {
         ActivityLog::log($action, $message, 'info', [
-            'resource_type'   => self::RESOURCE_TYPE,
+            'resource_type' => self::RESOURCE_TYPE,
             'additional_data' => array_merge([
-                'external_id'    => $externalId,
+                'external_id' => $externalId,
                 'previous_state' => $previousState,
-                'new_state'      => $newState,
-                'reversible'     => $reversible,
-                'reversed'       => false,
+                'new_state' => $newState,
+                'reversible' => $reversible,
+                'reversed' => false,
             ], $extra),
         ]);
     }

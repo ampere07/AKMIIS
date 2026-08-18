@@ -1,8 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, CheckCircle2, ChevronDown, Copy, Download, History, KeyRound,
-  Loader2, RefreshCw, Router, Search, ShieldAlert, Trash2, Undo2, X, Zap
+  Loader2, RefreshCw, Router, ShieldAlert, Trash2, Undo2, X, Zap
 } from 'lucide-react';
+import { useDataGrid, type DataGridColumn, type DataGridFilter } from '../hooks/useDataGrid';
+import {
+  ColumnMenu,
+  GridFilterBar,
+  SelectAllHeaderCell,
+  SelectionBar,
+  SortableHeaderCell,
+} from '../components/DataGridControls';
 import {
   radiusReconciliationService,
   type BulkOperation,
@@ -59,6 +67,72 @@ const STATE_BADGES: Record<ReconciliationState, { label: string; classes: string
 /** Rows rendered at once. The dataset can run to thousands; the table pages rather than mounting them all. */
 const PAGE_SIZE = 100;
 
+/** A row's stable key — a username can legitimately appear once per server. */
+const rowKey = (row: ReconciliationRow) => `${row.username}::${row.server_id ?? 'none'}`;
+
+/**
+ * The audit table's columns.
+ *
+ * `value` is what the column is searched and sorted on; the cell markup itself is built
+ * by `renderCell` in the component, which keeps the badges and sub-lines this screen
+ * already renders. Module scope so the identities stay stable across renders and the
+ * grid's memos are not invalidated on every pass.
+ *
+ * `server_label` and `customer_name` are off by default because both already ride as a
+ * sub-line inside a neighbouring cell; enabling either promotes it to a real column and
+ * the sub-line stands down, so the same fact is never shown twice.
+ */
+const AUDIT_COLUMNS: Array<DataGridColumn<ReconciliationRow>> = [
+  { key: 'state', label: 'State', value: (row) => STATE_BADGES[row.state]?.label ?? row.state },
+  { key: 'account_no', label: 'Account No', value: (row) => row.account_no },
+  { key: 'customer_name', label: 'Customer', value: (row) => row.customer_name, defaultHidden: true },
+  { key: 'username', label: 'Username', value: (row) => row.username },
+  { key: 'rad_group', label: 'MikroTik RADIUS Group', value: (row) => row.rad_group },
+  { key: 'server_label', label: 'RADIUS Server', value: (row) => row.server_label, defaultHidden: true },
+  { key: 'bill_group', label: 'Billing Group / Plan', value: (row) => row.bill_group },
+  { key: 'rad_password', label: 'PPPoE Password (RADIUS)', value: (row) => row.rad_password },
+  { key: 'session', label: 'Session Status', value: (row) => (row.online ? row.session_ip || 'Online' : 'Offline') },
+  { key: 'actions', label: 'Actions', locked: true },
+];
+
+/**
+ * Dropdown narrowing that sits on top of the state tabs above the table. The tabs group
+ * states by the action they imply; these cut across that grouping — "everything offline",
+ * "everything whose password drifted" — which no single tab expresses.
+ */
+const AUDIT_FILTERS: Array<DataGridFilter<ReconciliationRow>> = [
+  {
+    key: 'state',
+    label: 'State',
+    options: (Object.keys(STATE_BADGES) as ReconciliationState[]).map((state) => ({
+      value: state,
+      label: STATE_BADGES[state].label,
+    })),
+    predicate: (row, value) => row.state === value,
+  },
+  {
+    key: 'session',
+    label: 'Session',
+    options: [
+      { value: 'online', label: 'Online' },
+      { value: 'offline', label: 'Offline' },
+    ],
+    predicate: (row, value) => (value === 'online' ? row.online : !row.online),
+  },
+  {
+    key: 'password',
+    label: 'Password',
+    options: [
+      { value: 'mismatch', label: 'Differs from billing' },
+      { value: 'match', label: 'Matches billing' },
+    ],
+    predicate: (row, value) => {
+      const differs = !!row.rad_password && row.rad_password !== row.db_password;
+      return value === 'mismatch' ? differs : !differs;
+    },
+  },
+];
+
 const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isDarkModeProp }) => {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
     if (typeof isDarkModeProp === 'boolean') return isDarkModeProp;
@@ -75,9 +149,6 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
 
   const [view, setView] = useState<'audit' | 'logs'>('audit');
   const [filter, setFilter] = useState<FilterId>('mismatched_groups');
-  const [search, setSearch] = useState('');
-  const [page, setPage] = useState(1);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
 
 
   const [logs, setLogs] = useState<OperationLog[]>([]);
@@ -102,6 +173,32 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
     return () => observer.disconnect();
   }, [isDarkModeProp]);
 
+  // ---- Rows + grid -------------------------------------------------------
+  //
+  // Declared ahead of the loaders so those can reset the grid's page and selection
+  // directly when a fresh dataset lands.
+
+  const rows = useMemo(() => data?.rows ?? [], [data]);
+  const summary = data?.summary;
+  const duplicates = data?.duplicates ?? [];
+
+  /** The state tab pre-narrows the set; the grid searches, sorts and pages what is left. */
+  const tabRows = useMemo(() => {
+    const states = FILTER_STATES[filter] ?? [];
+    return states.length === 0 ? rows : rows.filter((row) => states.includes(row.state));
+  }, [rows, filter]);
+
+  const grid = useDataGrid<ReconciliationRow>({
+    rows: tabRows,
+    columns: AUDIT_COLUMNS,
+    rowKey,
+    filters: AUDIT_FILTERS,
+    pageSize: PAGE_SIZE,
+    storageKey: 'mikrotik_radius_tool.columns',
+  });
+
+  const { clearSelection: clearGridSelection, setPage: setGridPage } = grid;
+
   // ---- Data loading ------------------------------------------------------
 
   const loadServers = useCallback(async () => {
@@ -125,14 +222,14 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
     try {
       const result = await radiusReconciliationService.getSnapshot(target);
       setData(result);
-      setSelected(new Set());
-      setPage(1);
+      clearGridSelection();
+      setGridPage(1);
     } catch (error: any) {
       setNotice({ tone: 'error', text: error?.response?.data?.message || 'Could not read the cached snapshot.' });
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [clearGridSelection, setGridPage]);
 
   /**
    * The live sweep. Only ever called from the explicit operator action, never on mount.
@@ -143,8 +240,8 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
     try {
       const result = await radiusReconciliationService.getData(target);
       setData(result);
-      setSelected(new Set());
-      setPage(1);
+      clearGridSelection();
+      setGridPage(1);
 
       if (result.errors.length > 0) {
         setNotice({ tone: 'error', text: result.errors.join(' · ') });
@@ -154,7 +251,7 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [clearGridSelection, setGridPage]);
 
   const loadLogs = useCallback(async () => {
     setLogsLoading(true);
@@ -175,26 +272,6 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
 
   // ---- Derived -----------------------------------------------------------
 
-  const rows = data?.rows ?? [];
-  const summary = data?.summary;
-  const duplicates = data?.duplicates ?? [];
-
-  const filteredRows = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    const states = FILTER_STATES[filter] ?? [];
-
-    return rows.filter((row) => {
-      if (states.length > 0 && !states.includes(row.state)) return false;
-      if (needle === '') return true;
-      return (
-        row.username.toLowerCase().includes(needle) ||
-        (row.account_no ?? '').toLowerCase().includes(needle) ||
-        (row.customer_name ?? '').toLowerCase().includes(needle) ||
-        (row.rad_group ?? '').toLowerCase().includes(needle)
-      );
-    });
-  }, [rows, filter, search]);
-
   /** How many rows a tab would show, before the search box narrows them. */
   const filterCount = useCallback(
     (id: FilterId): number => {
@@ -204,20 +281,10 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
     [rows]
   );
 
-  const pagedRows = useMemo(
-    () => filteredRows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-    [filteredRows, page]
-  );
+  const { pagedRows, selectedRows, page, totalPages, visibleColumns } = grid;
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
-
-  /** A row's stable key — a username can legitimately appear once per server. */
-  const rowKey = (row: ReconciliationRow) => `${row.username}::${row.server_id ?? 'none'}`;
-
-  const selectedRows = useMemo(
-    () => filteredRows.filter((row) => selected.has(rowKey(row))),
-    [filteredRows, selected]
-  );
+  /** Sub-lines stand down when their fact has been promoted to a column of its own. */
+  const visibleKeys = useMemo(() => new Set(visibleColumns.map((c) => c.key)), [visibleColumns]);
 
   // ---- Actions -----------------------------------------------------------
 
@@ -341,6 +408,232 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
         { label: 'Duplicates', value: summary.duplicate_accounts, tone: 'text-red-500', filter: 'all' },
       ]
     : [];
+
+  /**
+   * One table cell, chosen by column key.
+   *
+   * Columns are operator-orderable and hideable, so the cells can no longer be a fixed
+   * sequence of <td>s — each returns its own, and the header order drives the row order.
+   * The badge and sub-line composition the screen already used is preserved verbatim.
+   */
+  const renderCell = (columnKey: string, row: ReconciliationRow): React.ReactNode => {
+    const key = rowKey(row);
+    const badge = STATE_BADGES[row.state];
+
+    switch (columnKey) {
+      case 'state':
+        return (
+          <td className="px-3 py-2.5">
+            <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium whitespace-nowrap ${badge.classes}`}>
+              {badge.label}
+            </span>
+          </td>
+        );
+
+      case 'account_no':
+        return (
+          <td className={`px-3 py-2.5 text-xs ${muted}`}>
+            <span className={text}>{row.account_no ?? '—'}</span>
+            {/* Only while Customer is not a column in its own right. */}
+            {!visibleKeys.has('customer_name') && row.customer_name && (
+              <div className="opacity-70 mt-0.5">{row.customer_name}</div>
+            )}
+          </td>
+        );
+
+      case 'customer_name':
+        return <td className={`px-3 py-2.5 text-xs ${text}`}>{row.customer_name ?? '—'}</td>;
+
+      case 'username':
+        return <td className={`px-3 py-2.5 font-mono text-xs font-medium ${text}`}>{row.username}</td>;
+
+      case 'rad_group':
+        return (
+          <td className={`px-3 py-2.5 text-xs ${text}`}>
+            <div>{row.rad_group ?? '—'}</div>
+            {/* Only while RADIUS Server is not a column in its own right. */}
+            {!visibleKeys.has('server_label') && (
+              <div className={`opacity-70 mt-0.5 ${muted}`}>
+                {row.server_label}
+                {row.rad_disabled ? ' · disabled' : ''}
+              </div>
+            )}
+          </td>
+        );
+
+      case 'server_label':
+        return (
+          <td className={`px-3 py-2.5 text-xs ${muted}`}>
+            {row.server_label}
+            {row.rad_disabled ? ' · disabled' : ''}
+          </td>
+        );
+
+      case 'bill_group':
+        return <td className={`px-3 py-2.5 text-xs ${text}`}>{row.bill_group ?? '—'}</td>;
+
+      case 'rad_password':
+        return (
+          <td className="px-3 py-2.5 text-xs">
+            {row.rad_password
+              ? (
+                <span
+                  className={`font-mono ${row.db_password && row.db_password !== row.rad_password ? 'text-amber-500' : text}`}
+                  title={
+                    row.db_password && row.db_password !== row.rad_password
+                      ? `Billing holds a different password (${row.db_password})`
+                      : 'Matches the billing record'
+                  }
+                >
+                  {row.rad_password}
+                </span>
+              )
+              : <span className={muted}>—</span>}
+          </td>
+        );
+
+      case 'session':
+        return (
+          <td className="px-3 py-2.5">
+            <span className={`inline-flex items-center gap-1.5 text-xs ${row.online ? 'text-emerald-500' : muted}`}>
+              <span
+                className={`inline-block w-2 h-2 rounded-full ${row.online ? 'bg-emerald-500' : isDarkMode ? 'bg-gray-700' : 'bg-gray-300'}`}
+              />
+              {row.online ? (row.session_ip || 'Online') : 'Offline'}
+            </span>
+          </td>
+        );
+
+      case 'actions':
+        return (
+          <td className="px-3 py-2.5">
+                    <div className="flex items-center justify-end gap-1 flex-wrap">
+                      {/* Save Pass — write the device's password into billing.
+                          Offered whenever the two disagree, not only on the
+                          password_mismatch state: a higher-priority finding
+                          (a duplicate, a restriction) hides that state but does
+                          not make the credential drift go away. */}
+                      {row.rad_password && row.rad_password !== row.db_password && (
+                        <button
+                          onClick={() =>
+                            runAction(`Save Pass ${row.username}`, () =>
+                              radiusReconciliationService.syncPassword(row.username, row.rad_password ?? '')
+                            )
+                          }
+                          disabled={busy !== null}
+                          title="Write the RADIUS PPPoE password into technical_details and the account's latest job order"
+                          className="px-2 py-1 rounded text-[11px] font-medium bg-amber-500/15 text-amber-500 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-50"
+                        >
+                          {busy === `Save Pass ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Save Pass'}
+                        </button>
+                      )}
+
+                      {row.state === 'group_mismatch' && (
+                        <>
+                          {/* Push to Mikrotik — billing wins. */}
+                          <button
+                            onClick={() =>
+                              runAction(`Push to Mikrotik ${row.username}`, () =>
+                                radiusReconciliationService.syncGroupToMikrotik(
+                                  row.username,
+                                  row.bill_target_group ?? '',
+                                  row.server_id,
+                                  row.rad_id
+                                )
+                              )
+                            }
+                            disabled={busy !== null}
+                            title={`Set the device group to "${row.bill_target_group ?? ''}" and re-enable the account`}
+                            className="px-2 py-1 rounded text-[11px] font-medium bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/25 disabled:opacity-50"
+                          >
+                            {busy === `Push to Mikrotik ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Push to Mikrotik'}
+                          </button>
+
+                          {/* Retain Mikrotik — the device wins; billing adopts it. */}
+                          <button
+                            onClick={() =>
+                              runAction(`Retain Mikrotik ${row.username}`, () =>
+                                radiusReconciliationService.syncGroupToBilling(row.username, row.rad_group ?? '')
+                              )
+                            }
+                            disabled={busy !== null}
+                            title="Map the device's group to its full billing plan label and update the customer's plan"
+                            className="px-2 py-1 rounded text-[11px] font-medium bg-purple-500/15 text-purple-400 border border-purple-500/30 hover:bg-purple-500/25 disabled:opacity-50"
+                          >
+                            {busy === `Retain Mikrotik ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Retain Mikrotik'}
+                          </button>
+                        </>
+                      )}
+
+                      {/* Restrict — park in Restricted, disable, and kill the session. */}
+                      {row.state !== 'missing_radius' && row.state !== 'restricted' && (
+                        <button
+                          onClick={() =>
+                            runAction(`Restrict ${row.username}`, () =>
+                              radiusReconciliationService.restrict(row.username, row.server_id, row.rad_id)
+                            )
+                          }
+                          disabled={busy !== null}
+                          title="Move to the Restricted group, disable the account and terminate any live session"
+                          className="px-2 py-1 rounded text-[11px] font-medium bg-gray-500/15 text-gray-400 border border-gray-500/30 hover:bg-gray-500/25 disabled:opacity-50"
+                        >
+                          {busy === `Restrict ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Restrict'}
+                        </button>
+                      )}
+
+                      {row.state === 'duplicate_radius' && (
+                        <button
+                          onClick={() => {
+                            const dup = duplicates.find((d) => d.username === row.username);
+                            if (dup) {
+                              setDuplicateTarget(dup);
+                              setKeepServerId(dup.instances[0]?.server_id ?? null);
+                            }
+                          }}
+                          className="px-2 py-1 rounded text-[11px] font-medium bg-red-500/15 text-red-500 border border-red-500/30 hover:bg-red-500/25"
+                        >
+                          Resolve
+                        </button>
+                      )}
+
+                      {/* Disconnect — kill the session, leave the group alone. */}
+                      {row.online && (
+                        <button
+                          onClick={() =>
+                            runAction(`Disconnect ${row.username}`, () =>
+                              radiusReconciliationService.disconnect(row.username, row.server_id)
+                            )
+                          }
+                          disabled={busy !== null}
+                          title="Terminate the live session without changing the account's group"
+                          className="px-2 py-1 rounded text-[11px] font-medium bg-orange-500/15 text-orange-500 border border-orange-500/30 hover:bg-orange-500/25 disabled:opacity-50"
+                        >
+                          {busy === `Disconnect ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Disconnect'}
+                        </button>
+                      )}
+
+                      {row.state === 'orphan_radius' && row.server_id !== null && (
+                        <button
+                          onClick={() =>
+                            runAction(`del:${key}`, () =>
+                              radiusReconciliationService.deleteUser(row.username, row.rad_id, row.server_id as number)
+                            )
+                          }
+                          disabled={busy !== null}
+                          title="Remove this account from the device"
+                          className="px-2 py-1 rounded text-[11px] font-medium bg-red-500/15 text-red-500 border border-red-500/30 hover:bg-red-500/25 disabled:opacity-50"
+                        >
+                          {busy === `del:${key}` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                        </button>
+                      )}
+                    </div>
+          </td>
+        );
+
+      default:
+        return <td className="px-3 py-2.5" />;
+    }
+  };
 
   return (
     <div className={`p-4 md:p-6 min-h-full ${isDarkMode ? 'bg-gray-950' : 'bg-gray-50'}`}>
@@ -509,7 +802,7 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
             {metricCards.map((metric) => (
               <button
                 key={metric.label}
-                onClick={() => { setFilter(metric.filter); setPage(1); }}
+                onClick={() => { setFilter(metric.filter); grid.setPage(1); }}
                 className={`rounded-xl border p-3 text-left transition-colors hover:border-indigo-500/50 ${card}`}
               >
                 <div className={`text-xs font-medium ${muted}`}>{metric.label}</div>
@@ -526,7 +819,7 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
                 return (
                   <button
                     key={tab.id}
-                    onClick={() => { setFilter(tab.id); setPage(1); }}
+                    onClick={() => { setFilter(tab.id); grid.setPage(1); }}
                     className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       filter === tab.id
                         ? 'bg-indigo-600 border-indigo-600 text-white'
@@ -541,23 +834,41 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
               })}
             </div>
 
-            <div className="relative">
-              <Search className={`w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 ${muted}`} />
-              <input
-                value={search}
-                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-                placeholder="Search by username, account number, customer or group…"
-                className={`w-full pl-9 pr-3 py-2 rounded-lg border text-sm ${input}`}
+            <div className="flex flex-col md:flex-row md:items-center gap-3">
+              <GridFilterBar
+                isDarkMode={isDarkMode}
+                search={grid.search}
+                onSearch={grid.setSearch}
+                placeholder="Search by username, account number, customer, group or server…"
+                filters={AUDIT_FILTERS}
+                filterValues={grid.filterValues}
+                onFilterChange={grid.setFilterValue}
+                hasActiveFilter={grid.hasActiveFilter}
+                onClear={grid.clearFilters}
+                filteredCount={grid.filteredCount}
+                totalRows={grid.totalRows}
+              />
+              <ColumnMenu
+                isDarkMode={isDarkMode}
+                columns={grid.columns}
+                hiddenKeys={grid.hiddenKeys}
+                onToggle={grid.toggleColumn}
+                onMove={grid.moveColumn}
+                onReset={grid.resetColumns}
               />
             </div>
           </div>
 
           {/* Bulk bar */}
-          {selectedRows.length > 0 && (
-            <div className={`rounded-xl border border-indigo-500/40 bg-indigo-500/10 p-3 mb-4 flex flex-wrap items-center gap-2`}>
-              <span className={`text-sm font-medium ${text}`}>{selectedRows.length} selected</span>
-              <div className="flex-1" />
-              {([
+          <SelectionBar
+            isDarkMode={isDarkMode}
+            selectedCount={grid.selectedCount}
+            selectableFilteredCount={grid.selectableFilteredCount}
+            isAllFilteredSelected={grid.isAllFilteredSelected}
+            onSelectAllFiltered={grid.selectAllFiltered}
+            onClearSelection={grid.clearSelection}
+          >
+            {([
                 { op: 'sync_passwords' as BulkOperation, label: 'Sync Passwords', icon: KeyRound },
                 { op: 'sync_group_mikrotik' as BulkOperation, label: 'Sync Groups → RADIUS', icon: RefreshCw },
                 { op: 'sync_group_billing' as BulkOperation, label: 'Sync Groups → Billing', icon: RefreshCw },
@@ -574,14 +885,7 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
                   {label}
                 </button>
               ))}
-              <button
-                onClick={() => setSelected(new Set())}
-                className={`px-3 py-1.5 rounded-lg border text-xs font-medium ${card} ${muted}`}
-              >
-                Clear
-              </button>
-            </div>
-          )}
+          </SelectionBar>
 
           {/* Table */}
           <div className={`rounded-xl border overflow-hidden ${card}`}>
@@ -589,31 +893,38 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
               <table className="w-full text-sm">
                 <thead className={`text-xs uppercase tracking-wide ${headRow}`}>
                   <tr>
-                    <th className="px-3 py-2.5 w-10">
-                      <input
-                        type="checkbox"
-                        checked={pagedRows.length > 0 && pagedRows.every((r) => selected.has(rowKey(r)))}
-                        onChange={(e) => {
-                          const next = new Set(selected);
-                          pagedRows.forEach((r) => (e.target.checked ? next.add(rowKey(r)) : next.delete(rowKey(r))));
-                          setSelected(next);
-                        }}
-                        className="rounded"
-                      />
-                    </th>
-                    <th className="px-3 py-2.5 text-left font-semibold">Account No</th>
-                    <th className="px-3 py-2.5 text-left font-semibold">Username</th>
-                    <th className="px-3 py-2.5 text-left font-semibold">MikroTik RADIUS Group</th>
-                    <th className="px-3 py-2.5 text-left font-semibold">Billing Group / Plan</th>
-                    <th className="px-3 py-2.5 text-left font-semibold">PPPoE Password (RADIUS)</th>
-                    <th className="px-3 py-2.5 text-left font-semibold">Session Status</th>
-                    <th className="px-3 py-2.5 text-right font-semibold">Actions</th>
+                    <SelectAllHeaderCell
+                      isDarkMode={isDarkMode}
+                      isPageSelected={grid.isPageSelected}
+                      isAllFilteredSelected={grid.isAllFilteredSelected}
+                      selectablePageCount={grid.selectablePageCount}
+                      selectableFilteredCount={grid.selectableFilteredCount}
+                      selectedCount={grid.selectedCount}
+                      onSelectPage={grid.selectPage}
+                      onDeselectPage={grid.deselectPage}
+                      onSelectAllFiltered={grid.selectAllFiltered}
+                      onClearSelection={grid.clearSelection}
+                    />
+                    {visibleColumns.map((column) => {
+                      const sortState = grid.sortStateFor(column.key);
+                      return (
+                        <SortableHeaderCell
+                          key={column.key}
+                          label={column.label}
+                          sortable={!!column.value}
+                          direction={sortState.direction}
+                          priority={sortState.priority}
+                          onSort={(additive) => grid.toggleSort(column.key, additive)}
+                          align={column.key === 'actions' ? 'right' : 'left'}
+                        />
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody className={isDarkMode ? 'divide-y divide-gray-800' : 'divide-y divide-gray-100'}>
                   {loading && (
                     <tr>
-                      <td colSpan={8} className={`px-4 py-12 text-center ${muted}`}>
+                      <td colSpan={visibleColumns.length + 1} className={`px-4 py-12 text-center ${muted}`}>
                         <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />
                         Contacting {serverId === 'all' ? 'every RADIUS device' : 'the RADIUS device'} and reading billing…
                       </td>
@@ -622,7 +933,7 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
 
                   {!loading && pagedRows.length === 0 && (
                     <tr>
-                      <td colSpan={8} className={`px-4 py-12 text-center ${muted}`}>
+                      <td colSpan={visibleColumns.length + 1} className={`px-4 py-12 text-center ${muted}`}>
                         {rows.length === 0
                           ? 'Press "Sync & Reconcile Now" to audit the RADIUS devices against billing.'
                           : 'No account matches this filter.'}
@@ -632,188 +943,19 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
 
                   {!loading && pagedRows.map((row) => {
                     const key = rowKey(row);
-                    const badge = STATE_BADGES[row.state];
                     return (
                       <tr key={key} className={rowHover}>
                         <td className="px-3 py-2.5">
                           <input
                             type="checkbox"
-                            checked={selected.has(key)}
-                            onChange={(e) => {
-                              const next = new Set(selected);
-                              e.target.checked ? next.add(key) : next.delete(key);
-                              setSelected(next);
-                            }}
+                            checked={grid.selected.has(key)}
+                            onChange={(e) => grid.toggleRow(key, e.target.checked)}
                             className="rounded"
                           />
                         </td>
-                        {/* The state badge rides in the ACCOUNT NO cell and the server
-                            label under the group, so the header contract stays at the
-                            eight agreed columns without losing either fact. */}
-                        <td className={`px-3 py-2.5 text-xs ${muted}`}>
-                          <div className="flex items-center gap-1.5">
-                            <span className={text}>{row.account_no ?? '—'}</span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${badge.classes}`}>
-                              {badge.label}
-                            </span>
-                          </div>
-                          {row.customer_name && <div className="opacity-70 mt-0.5">{row.customer_name}</div>}
-                        </td>
-                        <td className={`px-3 py-2.5 font-mono text-xs font-medium ${text}`}>{row.username}</td>
-                        <td className={`px-3 py-2.5 text-xs ${text}`}>
-                          <div>{row.rad_group ?? '—'}</div>
-                          <div className={`opacity-70 mt-0.5 ${muted}`}>
-                            {row.server_label}
-                            {row.rad_disabled ? ' · disabled' : ''}
-                          </div>
-                        </td>
-                        <td className={`px-3 py-2.5 text-xs ${text}`}>{row.bill_group ?? '—'}</td>
-                        <td className="px-3 py-2.5 text-xs">
-                          {row.rad_password
-                            ? (
-                              <span
-                                className={`font-mono ${row.db_password && row.db_password !== row.rad_password ? 'text-amber-500' : text}`}
-                                title={
-                                  row.db_password && row.db_password !== row.rad_password
-                                    ? `Billing holds a different password (${row.db_password})`
-                                    : 'Matches the billing record'
-                                }
-                              >
-                                {row.rad_password}
-                              </span>
-                            )
-                            : <span className={muted}>—</span>}
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span className={`inline-flex items-center gap-1.5 text-xs ${row.online ? 'text-emerald-500' : muted}`}>
-                            <span
-                              className={`inline-block w-2 h-2 rounded-full ${row.online ? 'bg-emerald-500' : isDarkMode ? 'bg-gray-700' : 'bg-gray-300'}`}
-                            />
-                            {row.online ? (row.session_ip || 'Online') : 'Offline'}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <div className="flex items-center justify-end gap-1 flex-wrap">
-                            {/* Save Pass — write the device's password into billing.
-                                Offered whenever the two disagree, not only on the
-                                password_mismatch state: a higher-priority finding
-                                (a duplicate, a restriction) hides that state but does
-                                not make the credential drift go away. */}
-                            {row.rad_password && row.rad_password !== row.db_password && (
-                              <button
-                                onClick={() =>
-                                  runAction(`Save Pass ${row.username}`, () =>
-                                    radiusReconciliationService.syncPassword(row.username, row.rad_password ?? '')
-                                  )
-                                }
-                                disabled={busy !== null}
-                                title="Write the RADIUS PPPoE password into technical_details and the account's latest job order"
-                                className="px-2 py-1 rounded text-[11px] font-medium bg-amber-500/15 text-amber-500 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-50"
-                              >
-                                {busy === `Save Pass ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Save Pass'}
-                              </button>
-                            )}
-
-                            {row.state === 'group_mismatch' && (
-                              <>
-                                {/* Push to Mikrotik — billing wins. */}
-                                <button
-                                  onClick={() =>
-                                    runAction(`Push to Mikrotik ${row.username}`, () =>
-                                      radiusReconciliationService.syncGroupToMikrotik(
-                                        row.username,
-                                        row.bill_target_group ?? '',
-                                        row.server_id,
-                                        row.rad_id
-                                      )
-                                    )
-                                  }
-                                  disabled={busy !== null}
-                                  title={`Set the device group to "${row.bill_target_group ?? ''}" and re-enable the account`}
-                                  className="px-2 py-1 rounded text-[11px] font-medium bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/25 disabled:opacity-50"
-                                >
-                                  {busy === `Push to Mikrotik ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Push to Mikrotik'}
-                                </button>
-
-                                {/* Retain Mikrotik — the device wins; billing adopts it. */}
-                                <button
-                                  onClick={() =>
-                                    runAction(`Retain Mikrotik ${row.username}`, () =>
-                                      radiusReconciliationService.syncGroupToBilling(row.username, row.rad_group ?? '')
-                                    )
-                                  }
-                                  disabled={busy !== null}
-                                  title="Map the device's group to its full billing plan label and update the customer's plan"
-                                  className="px-2 py-1 rounded text-[11px] font-medium bg-purple-500/15 text-purple-400 border border-purple-500/30 hover:bg-purple-500/25 disabled:opacity-50"
-                                >
-                                  {busy === `Retain Mikrotik ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Retain Mikrotik'}
-                                </button>
-                              </>
-                            )}
-
-                            {/* Restrict — park in Restricted, disable, and kill the session. */}
-                            {row.state !== 'missing_radius' && row.state !== 'restricted' && (
-                              <button
-                                onClick={() =>
-                                  runAction(`Restrict ${row.username}`, () =>
-                                    radiusReconciliationService.restrict(row.username, row.server_id, row.rad_id)
-                                  )
-                                }
-                                disabled={busy !== null}
-                                title="Move to the Restricted group, disable the account and terminate any live session"
-                                className="px-2 py-1 rounded text-[11px] font-medium bg-gray-500/15 text-gray-400 border border-gray-500/30 hover:bg-gray-500/25 disabled:opacity-50"
-                              >
-                                {busy === `Restrict ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Restrict'}
-                              </button>
-                            )}
-
-                            {row.state === 'duplicate_radius' && (
-                              <button
-                                onClick={() => {
-                                  const dup = duplicates.find((d) => d.username === row.username);
-                                  if (dup) {
-                                    setDuplicateTarget(dup);
-                                    setKeepServerId(dup.instances[0]?.server_id ?? null);
-                                  }
-                                }}
-                                className="px-2 py-1 rounded text-[11px] font-medium bg-red-500/15 text-red-500 border border-red-500/30 hover:bg-red-500/25"
-                              >
-                                Resolve
-                              </button>
-                            )}
-
-                            {/* Disconnect — kill the session, leave the group alone. */}
-                            {row.online && (
-                              <button
-                                onClick={() =>
-                                  runAction(`Disconnect ${row.username}`, () =>
-                                    radiusReconciliationService.disconnect(row.username, row.server_id)
-                                  )
-                                }
-                                disabled={busy !== null}
-                                title="Terminate the live session without changing the account's group"
-                                className="px-2 py-1 rounded text-[11px] font-medium bg-orange-500/15 text-orange-500 border border-orange-500/30 hover:bg-orange-500/25 disabled:opacity-50"
-                              >
-                                {busy === `Disconnect ${row.username}` ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Disconnect'}
-                              </button>
-                            )}
-
-                            {row.state === 'orphan_radius' && row.server_id !== null && (
-                              <button
-                                onClick={() =>
-                                  runAction(`del:${key}`, () =>
-                                    radiusReconciliationService.deleteUser(row.username, row.rad_id, row.server_id as number)
-                                  )
-                                }
-                                disabled={busy !== null}
-                                title="Remove this account from the device"
-                                className="px-2 py-1 rounded text-[11px] font-medium bg-red-500/15 text-red-500 border border-red-500/30 hover:bg-red-500/25 disabled:opacity-50"
-                              >
-                                {busy === `del:${key}` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                              </button>
-                            )}
-                          </div>
-                        </td>
+                        {visibleColumns.map((column) => (
+                          <React.Fragment key={column.key}>{renderCell(column.key, row)}</React.Fragment>
+                        ))}
                       </tr>
                     );
                   })}
@@ -822,14 +964,14 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
             </div>
 
             {/* Pagination */}
-            {!loading && filteredRows.length > PAGE_SIZE && (
+            {!loading && grid.filteredCount > PAGE_SIZE && (
               <div className={`flex items-center justify-between px-4 py-3 border-t ${isDarkMode ? 'border-gray-800' : 'border-gray-100'}`}>
                 <span className={`text-xs ${muted}`}>
-                  Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filteredRows.length)} of {filteredRows.length}
+                  Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, grid.filteredCount)} of {grid.filteredCount}
                 </span>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    onClick={() => grid.setPage(Math.max(1, page - 1))}
                     disabled={page === 1}
                     className={`px-3 py-1 rounded border text-xs disabled:opacity-40 ${card} ${text}`}
                   >
@@ -837,7 +979,7 @@ const MikrotikRadiusTool: React.FC<MikrotikRadiusToolProps> = ({ isDarkMode: isD
                   </button>
                   <span className={`text-xs ${muted}`}>Page {page} of {totalPages}</span>
                   <button
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    onClick={() => grid.setPage(Math.min(totalPages, page + 1))}
                     disabled={page >= totalPages}
                     className={`px-3 py-1 rounded border text-xs disabled:opacity-40 ${card} ${text}`}
                   >

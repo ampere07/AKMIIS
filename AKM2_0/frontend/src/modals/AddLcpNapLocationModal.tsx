@@ -29,6 +29,17 @@ interface AddLcpNapLocationModalProps {
   onClose: () => void;
   onSave: () => void;
   editData?: EditData;
+  /**
+   * Coordinates to open with, as the stored "lat, lng" string. Supplied by the map's
+   * pin-drop flow, which has already had the operator place and confirm the point.
+   */
+  initialCoordinates?: string;
+  /**
+   * Present the coordinates as settled: read-only field, no click-to-set map, and no
+   * geolocation guess. The pin the operator confirmed on the map is the answer, and
+   * nothing in here may quietly move it.
+   */
+  lockCoordinates?: boolean;
 }
 
 interface LCP {
@@ -68,7 +79,9 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
   isOpen,
   onClose,
   onSave,
-  editData
+  editData,
+  initialCoordinates,
+  lockCoordinates = false,
 }) => {
   const getCurrentUser = () => {
     try {
@@ -162,9 +175,15 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
         populateForm(editData);
       } else {
         resetForm();
+        // A pin-drop hands the coordinates in already confirmed. Applied after the reset
+        // so the blank form does not wipe them.
+        if (initialCoordinates) {
+          setFormData(prev => ({ ...prev, coordinates: initialCoordinates }));
+        }
       }
     }
-  }, [isOpen]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, initialCoordinates]);
 
   const fetchImageSizeSettings = async () => {
     try {
@@ -246,16 +265,20 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
         zoomControl: true,
       });
 
-      map.addListener('click', (e: google.maps.MapMouseEvent) => {
-        if (e.latLng) {
-          handleMapClick(e.latLng.lat(), e.latLng.lng());
-        }
-      });
+      // Locked coordinates came from a confirmed pin drop — the preview map stays a
+      // preview and cannot re-set them.
+      if (!lockCoordinates) {
+        map.addListener('click', (e: google.maps.MapMouseEvent) => {
+          if (e.latLng) {
+            handleMapClick(e.latLng.lat(), e.latLng.lng());
+          }
+        });
+      }
 
       mapInstanceRef.current = map;
 
       // Try to get user's current location if no coordinates set
-      if (!formData.coordinates && navigator.geolocation) {
+      if (!lockCoordinates && !formData.coordinates && navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           (position) => {
             const userLat = position.coords.latitude;
@@ -1063,11 +1086,13 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
                   type="text"
                   value={formData.coordinates}
                   onChange={(e) => setFormData({ ...formData, coordinates: e.target.value })}
+                  readOnly={lockCoordinates}
+                  title={lockCoordinates ? 'Set by the pin you confirmed on the map' : undefined}
                   placeholder="14.466580, 121.201807"
                   className={`w-full px-3 py-2 pr-10 rounded border focus:outline-none ${isDarkMode
                     ? 'bg-gray-800 text-white border-gray-700'
                     : 'bg-white text-gray-900 border-gray-300'
-                    }`}
+                    } ${lockCoordinates ? 'cursor-not-allowed opacity-80' : ''}`}
                   onFocus={(e) => e.target.style.borderColor = colorPalette?.primary || '#7c3aed'}
                   onBlur={(e) => e.target.style.borderColor = ''}
                 />
@@ -1098,7 +1123,9 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
                     ? 'bg-gray-800 text-gray-400 border-gray-700'
                     : 'bg-gray-100 text-gray-600 border-gray-300'
                     }`}>
-                    Click on the map to set coordinates
+                    {lockCoordinates
+                      ? 'Pinned on the map. Cancel and drop a new pin to move it.'
+                      : 'Click on the map to set coordinates'}
                   </div>
                 </div>
               )}

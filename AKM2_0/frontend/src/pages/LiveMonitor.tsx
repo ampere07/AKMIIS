@@ -1015,6 +1015,38 @@ const LiveMonitor: React.FC = () => {
 
               {/* Name - Top Center (slightly pushed down to not overlap with status if name is long) */}
               <div className="w-full text-center mt-6">
+                {/* JO / SO completed in the period, sitting directly above the name. Rendered
+                    whenever the API supplies them — including at zero, since "0 today" is the
+                    useful reading here. Centred, so it clears the absolutely-positioned status
+                    badge on the left and the admin action on the right. Colours match the
+                    job-order/service-order detail badge below. */}
+                {(meta.jo_count !== undefined || meta.so_count !== undefined) && (
+                  <div className="flex items-center justify-center gap-3 mb-2">
+                    {/* Sized at 1.4x the widget font — deliberately larger than the daily-time
+                        lines (0.9x) so the counts read at a glance on a wall monitor, while
+                        staying below the name (1.9x). Still scales with the font-size control. */}
+                    <span
+                      className={`px-3 py-1 rounded-lg font-bold uppercase tracking-tight border-2 ${isDarkMode
+                          ? 'bg-blue-600/20 text-blue-400 border-blue-500/40'
+                          : 'bg-blue-100 text-blue-700 border-blue-400/60'
+                        }`}
+                      style={{ fontSize: `${fontSize * 1.4}px` }}
+                      title="Job Orders completed"
+                    >
+                      JO: {meta.jo_count ?? 0}
+                    </span>
+                    <span
+                      className={`px-3 py-1 rounded-lg font-bold uppercase tracking-tight border-2 ${isDarkMode
+                          ? 'bg-purple-600/20 text-purple-400 border-purple-500/40'
+                          : 'bg-purple-100 text-purple-700 border-purple-400/60'
+                        }`}
+                      style={{ fontSize: `${fontSize * 1.4}px` }}
+                      title="Service Orders completed"
+                    >
+                      SO: {meta.so_count ?? 0}
+                    </span>
+                  </div>
+                )}
                 <div className={`font-bold truncate px-2 ${isDarkMode ? 'text-white' : 'text-gray-900'}`} style={{ fontSize: `${fontSize * 1.9}px` }} title={row.label}>
                   {row.label}
                 </div>

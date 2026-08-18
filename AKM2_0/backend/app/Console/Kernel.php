@@ -281,6 +281,33 @@ class Kernel extends ConsoleKernel
                      \Illuminate\Support\Facades\Log::error('SmartOLT daily automation failed');
                  });
 
+        // Tools suite: advance operator-started background jobs.
+        //
+        // Uses: SmartOltReconciliationService::driveJobs()
+        // Dependencies: SmartOLT API, MikroTik User Manager REST (per job type)
+        // Logs: storage/logs/smartolt/tool-jobs.log
+        //
+        // Every minute, because this is what decouples a sweep from the browser
+        // that started it. The tool starts a job and polls its progress; this is
+        // what actually advances it, so closing the tab no longer strands a
+        // four-thousand-ONU sync partway through.
+        //
+        // Safe if it runs late, twice, or alongside an operator with the tool
+        // still open. It starts no work of its own — it only advances rows that
+        // startJob() already created — and each job is claimed with a conditional
+        // UPDATE before any step is applied, so no two drivers can ever run the
+        // same queue index. Every step is checkpointed by index, so a pass killed
+        // mid-slice resumes instead of replaying. A pass is budgeted to finish
+        // inside the minute; anything longer continues on the next tick.
+        $schedule->command('cron:tool-jobs-drain')
+                 ->everyMinute()
+                 ->timezone(config('app.timezone'))
+                 ->withoutOverlapping()
+                 ->runInBackground()
+                 ->onFailure(function () {
+                     \Illuminate\Support\Facades\Log::error('Tool job drain failed');
+                 });
+
         // MikroTik RADIUS: adopt missing PPPoE passwords, settle plan groups,
         // enforce restriction on accounts billing has written off.
         //

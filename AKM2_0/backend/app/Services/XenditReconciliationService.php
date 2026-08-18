@@ -329,6 +329,7 @@ class XenditReconciliationService
                 'pp.last_reconciled_at',
                 'pp.next_reconciliation_at',
                 'pp.reconnect_status',
+                'pp.created_at',
                 'pp.updated_at',
                 'ba.id as billing_account_id',
                 'c.first_name',
@@ -425,6 +426,14 @@ class XenditReconciliationService
             'billing_status'    => (string) $record->status,
             'settled_at'        => $this->extractSettledAt($payload),
             'payment_date'      => $record->payment_date,
+            // The three dates the reconciliation table sorts on.
+            //
+            // Created and updated come off our own row; expiry is the gateway's, and
+            // only Xendit knows it — `pending_payments` has no expiry column, so it is
+            // read out of the stored callback payload and is null until one arrives.
+            'created_at'        => $record->created_at,
+            'updated_at'        => $record->updated_at,
+            'expiry_date'       => $this->extractExpiryDate($payload),
             'attempts'          => (int) ($record->reconciliation_attempts ?? 0),
             'last_reconciled_at'  => $record->last_reconciled_at,
             'next_reconciliation_at' => $record->next_reconciliation_at,
@@ -453,6 +462,30 @@ class XenditReconciliationService
         }
 
         return $provider !== '' ? strtoupper($provider) : 'UNKNOWN';
+    }
+
+    /**
+     * When the gateway says the request stops being payable.
+     *
+     * Mirrors extractSettledAt(): Xendit names this field differently across the
+     * invoice and payment-request APIs, and a v3 payment request nests it under
+     * `actions`, so the recognised names are tried in order rather than assuming one.
+     *
+     * Null is a real answer — a payload that carries no expiry at all, or a row whose
+     * callback has not arrived yet — and the table renders it as unknown rather than
+     * inventing a date.
+     */
+    private function extractExpiryDate(array $payload): ?string
+    {
+        foreach (['expiry_date', 'expires_at', 'expiration_date', 'expired_at'] as $key) {
+            $value = $payload[$key] ?? null;
+
+            if (is_string($value) && trim($value) !== '') {
+                return $value;
+            }
+        }
+
+        return null;
     }
 
     /**

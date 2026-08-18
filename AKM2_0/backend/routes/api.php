@@ -3858,8 +3858,14 @@ Route::middleware('auth:sanctum')->prefix('smartolt-reconciliation')->group(func
     Route::get('/optical-power', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'opticalPower']);
     Route::get('/alignment-preview', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'alignmentPreview']);
     Route::get('/mac-alignment', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'macAlignment']);
+    Route::get('/sn-alignment', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'snAlignment']);
     Route::get('/profile-preview', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'profilePreview']);
     Route::get('/cleanup-preview', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'cleanupPreview']);
+    // Progress polling. Jobs are advanced by `cron:tool-jobs-drain`, so these are
+    // plain reads — the tool watches a sweep rather than driving it, and a closed
+    // tab costs nothing. `active-job` lets the page reattach without a remembered id.
+    Route::get('/job-status', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'jobStatus']);
+    Route::get('/active-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'activeJob']);
     Route::get('/logs', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'logs']);
     Route::get('/export', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'export']);
 

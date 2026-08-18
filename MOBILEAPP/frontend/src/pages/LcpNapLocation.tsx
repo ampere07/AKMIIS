@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { View, Text, Pressable, useWindowDimensions, ActivityIndicator, TextInput, StyleSheet, Modal, Alert, ScrollView } from 'react-native';
-import { MapPin, Search, Plus, Navigation } from 'lucide-react-native';
+import { MapPin, Search, Plus, Navigation, Check, X, Layers } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ExpoLocation from 'expo-location';
 import { ensureLocationPermission } from '../services/locationConsent';
@@ -71,6 +71,106 @@ const parseCoordinates = (coordString: string): { latitude: number; longitude: n
   return (isNaN(latitude) || isNaN(longitude)) ? null : { latitude, longitude };
 };
 
+/**
+ * The digits of an LCP name, and nothing else.
+ *
+ * Field naming is not consistent — the same LCP turns up as `LCP-001`, `LP 001`,
+ * `LCP#001` and `LP-001` depending on who typed it — and on a phone screen the prefix
+ * is both the widest part of the badge and the least informative, since every pin in
+ * view carries the same one. Reducing to `001` is what makes a cluster readable at
+ * arm's length, and it makes the differently-typed spellings of one LCP render alike.
+ *
+ * The first run of digits is taken verbatim, so leading zeros survive: `LCP-024` reads
+ * `024`, not `24`. A name with no digits keeps its text with the prefix stripped.
+ *
+ * Duplicated from the web map rather than shared: the two apps have no common module,
+ * and the badge has to read identically on both. Change one, change the other.
+ */
+const lcpBadgeLabel = (lcpName: string): string => {
+  const name = String(lcpName ?? '').trim();
+  const digits = name.match(/\d+/);
+
+  if (digits) return digits[0];
+
+  const stripped = name.replace(/^\s*(lcp|lp)\s*[-–—_#:.]*\s*/i, '').trim();
+  return stripped || name || '—';
+};
+
+/** Palette for cluster badges — one stable colour per LP, so an LP looks the same each visit. */
+const CLUSTER_COLORS = ['#7c3aed', '#2563eb', '#0891b2', '#059669', '#d97706', '#dc2626', '#db2777', '#4f46e5'];
+
+const clusterColorFor = (lpName: string): string => {
+  let hash = 0;
+  for (let i = 0; i < lpName.length; i += 1) {
+    hash = (hash * 31 + lpName.charCodeAt(i)) >>> 0;
+  }
+  return CLUSTER_COLORS[hash % CLUSTER_COLORS.length];
+};
+
+/**
+ * Badge geometry — the same numbers the web map draws, so the two surfaces match.
+ *
+ * Deliberately duplicated from `AKM2_0/frontend/src/pages/LcpNapLocation.tsx` rather
+ * than derived independently: the badge has to be pixel-identical on a phone and on a
+ * desk, and two sets of constants drift. Change one, change the other.
+ *
+ * A solid disc inside a translucent halo, carrying the LCP's number — the shape the
+ * Subscriber Map already uses, so the two maps in the product read as one family.
+ * The halo is what separates a badge from the map underneath it at any zoom, and it
+ * does the job a hard border used to do without adding a hairline that has to survive
+ * rasterisation.
+ *
+ * Square by construction. Width and height are one number, decided before layout, with
+ * nothing trailing off the right-hand side — which is the whole reason the previous
+ * pill kept coming back sliced on Android.
+ */
+
+/** Point size of the digits inside the disc. */
+const BADGE_TEXT_SIZE = 11;
+
+/** Thickness of the halo around the disc, per side. */
+const BADGE_HALO = 3;
+
+/**
+ * Solid disc sized to fit safely under Fabric's 100px native raster buffer across high-density displays.
+ * Outer size stays <= 30dp (90px on 3x density), preventing bitmap truncation.
+ */
+const clusterInnerSize = (label: string): number =>
+  Math.min(24, Math.max(20, Math.ceil(Math.max(1, label.length) * 5 + 10)));
+
+/** The full canvas, disc plus halo on every side. */
+const clusterOuterSize = (label: string): number => clusterInnerSize(label) + BADGE_HALO * 2;
+
+interface LpCluster {
+  lpName: string;
+  latitude: number;
+  longitude: number;
+  locations: LocationMarker[];
+}
+
+/**
+ * The `budget` markers closest to `center`, or all of them when there are fewer.
+ *
+ * The render budget exists to protect frame rate: react-native-maps mounts a real view
+ * per marker, and a few thousand of them will stall the map. Nearest-to-centre is the
+ * cull that loses the least — what the operator is looking at survives, and panning
+ * re-derives the set. Manhattan distance is deliberate: this only has to rank, and
+ * skipping the square roots keeps the pass cheap on every region change.
+ */
+const nearestTo = (
+  rows: LocationMarker[],
+  budget: number,
+  center: { latitude: number; longitude: number }
+): LocationMarker[] => {
+  if (rows.length <= budget) return rows;
+
+  return rows
+    .map(m => ({ m, d: Math.abs(m.latitude - center.latitude) + Math.abs(m.longitude - center.longitude) }))
+    .sort((a, b) => a.d - b.d)
+    .slice(0, budget)
+    .map(x => x.m);
+};
+
 const getPinSize = (delta: number) => {
   if (delta < 0.005) return 26;
   if (delta < 0.02) return 22;
@@ -137,6 +237,101 @@ const CustomMarker = React.memo<{
   );
 });
 
+/**
+ * A whole LP rendered as one circular cluster marker.
+ *
+ * Clustering is by LP rather than by pixel distance because that is how the field team
+ * reasons about the plant: everything hanging off one LP is one thing to visit. Tapping
+ * the badge frames that LP's own children and lets them draw individually.
+ *
+/**
+ * A whole LP rendered as one circular cluster marker.
+ *
+ * Clustering is by LP rather than by pixel distance because that is how the field team
+ * reasons about the plant: everything hanging off one LP is one thing to visit. Tapping
+ * the badge frames that LP's own children and lets them draw individually.
+ *
+ * The badge carries the LP's number, drawn using native View circles (halo + inner disc)
+ * and centered Text to avoid the react-native-svg density scaling bug on Android that
+ * causes SVG badges inside react-native-maps to render as 1/4 of a circle.
+ */
+const ClusterMarker = React.memo<{
+  cluster: LpCluster;
+  onPress: (cluster: LpCluster) => void;
+}>(({ cluster, onPress }) => {
+  const color = clusterColorFor(cluster.lpName);
+  const label = lcpBadgeLabel(cluster.lpName);
+  const count = cluster.locations.length;
+
+  const size = clusterOuterSize(label);
+  const inner = clusterInnerSize(label);
+
+  const [tracksViewChanges, setTracksViewChanges] = React.useState(true);
+  const clusterKey = `${label}-${count}`;
+
+  React.useEffect(() => {
+    setTracksViewChanges(true);
+    const timer = setTimeout(() => {
+      setTracksViewChanges(false);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [clusterKey]);
+
+  return (
+    <Marker
+      coordinate={{ latitude: cluster.latitude, longitude: cluster.longitude }}
+      title={cluster.lpName}
+      description={`${count} LCP/NAP locations — tap to expand`}
+      onPress={() => onPress(cluster)}
+      anchor={{ x: 0.5, y: 0.5 }}
+      zIndex={1000}
+      tracksViewChanges={tracksViewChanges}
+    >
+      <View
+        style={{
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          backgroundColor: `${color}40`,
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <View
+          style={{
+            width: inner,
+            height: inner,
+            borderRadius: inner / 2,
+            backgroundColor: color,
+            alignItems: 'center',
+            justifyContent: 'center',
+            elevation: 2,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 1 },
+            shadowOpacity: 0.25,
+            shadowRadius: 2,
+          }}
+        >
+          <Text
+            style={{
+              fontSize: label.length > 2 ? 9 : BADGE_TEXT_SIZE,
+              fontWeight: '700',
+              color: '#ffffff',
+              textAlign: 'center',
+              includeFontPadding: false,
+              lineHeight: label.length > 2 ? 11 : 13,
+            }}
+            numberOfLines={1}
+          >
+            {label}
+          </Text>
+        </View>
+      </View>
+    </Marker>
+  );
+});
+
+
 const LcpNapSidebarItem = React.memo<{
   item: LcpNapItem;
   isSelected: boolean;
@@ -179,6 +374,24 @@ const LcpNapLocation: React.FC = () => {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
+
+  // Pin-drop: the Add action arms the map instead of opening the form.
+  const [isPlacingPin, setIsPlacingPin] = useState(false);
+  const [pinCoords, setPinCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [pinnedCoordinates, setPinnedCoordinates] = useState<string | null>(null);
+
+  // Clustering by LP threshold (pins per LP before collapsing into a cluster badge, default '0' matching web).
+  /**
+   * Whether the map groups pins by LP.
+   *
+   * Replaces the numeric per-LP threshold this control used to carry. In practice the
+   * threshold only ever sat at 0 (group everything) or high enough to disable grouping,
+   * so the number asked the operator to express a binary as an integer. On means every
+   * LP collapses to one badge; off means individual pins, still bounded by the pin
+   * budget beside it.
+   */
+  const [isClustered, setIsClustered] = useState<boolean>(true);
+  const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
   const [searchSuggestions, setSearchSuggestions] = useState<any[]>([]);
   const [isSearchingSuggestions, setIsSearchingSuggestions] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -401,33 +614,110 @@ const LcpNapLocation: React.FC = () => {
         (m.lcp_name || '').toLowerCase().includes(query) ||
         (m.nap_name || '').toLowerCase().includes(query)
       );
-      return filtered.slice(0, 100);
     }
 
-    // Viewport culling — only render markers in view + 50% buffer
-    const latSpan = currentRegion.latitudeDelta * 1.5;
-    const lngSpan = currentRegion.longitudeDelta * 1.5;
-    const latMin = currentRegion.latitude - latSpan / 2;
-    const latMax = currentRegion.latitude + latSpan / 2;
-    const lngMin = currentRegion.longitude - lngSpan / 2;
-    const lngMax = currentRegion.longitude + lngSpan / 2;
+    return filtered;
+  }, [markers, selectedLcpNapId, lcpNapGroups, debouncedSearch, searchedPlacePin]);
 
-    const visible = filtered.filter(m =>
-      m.latitude >= latMin && m.latitude <= latMax &&
-      m.longitude >= lngMin && m.longitude <= lngMax
-    );
+  /**
+   * Split what the map should show into LP clusters and individual pins.
+   *
+   * With clustering on, every LP collapses into one badge (e.g. LP 010 [ 6 ]); tapping
+   * a badge frames that LP's children and lets them draw individually from then on.
+   * With it off, nothing groups and the pins draw straight through.
+   */
+  const { clusters, individualMarkers } = useMemo(() => {
+    const pinBudget = parseInt(pinLimit, 10) || 50;
 
-    const limit = parseInt(pinLimit) || 50;
-    if (visible.length <= limit) return visible;
+    // Clustering off: no grouping at all, just the pins under the render budget.
+    if (!isClustered) {
+      return { clusters: [], individualMarkers: nearestTo(markersToDisplay, pinBudget, mapCenter) };
+    }
 
-    const cLat = mapCenter.latitude;
-    const cLng = mapCenter.longitude;
-    return visible
-      .map(m => ({ m, d: Math.abs(m.latitude - cLat) + Math.abs(m.longitude - cLng) }))
-      .sort((a, b) => a.d - b.d)
-      .slice(0, limit)
-      .map(x => x.m);
-  }, [markers, selectedLcpNapId, lcpNapGroups, debouncedSearch, mapCenter, pinLimit, currentRegion, searchedPlacePin]);
+    const groups = new Map<string, LocationMarker[]>();
+    markersToDisplay.forEach(marker => {
+      const lpName = marker.lcp_name || 'Others';
+      const existing = groups.get(lpName);
+      if (existing) existing.push(marker);
+      else groups.set(lpName, [marker]);
+    });
+
+    const nextClusters: LpCluster[] = [];
+    const loose: LocationMarker[] = [];
+
+    groups.forEach((groupLocations, lpName) => {
+      // Every LP groups while clustering is on, except one the operator has opened.
+      if (!expandedClusters.has(lpName)) {
+        const centroid = groupLocations.reduce(
+          (acc, location) => ({
+            latitude: acc.latitude + location.latitude,
+            longitude: acc.longitude + location.longitude,
+          }),
+          { latitude: 0, longitude: 0 }
+        );
+        nextClusters.push({
+          lpName,
+          latitude: centroid.latitude / groupLocations.length,
+          longitude: centroid.longitude / groupLocations.length,
+          locations: groupLocations,
+        });
+      } else {
+        loose.push(...groupLocations);
+      }
+    });
+
+    // Render budget applied only to loose unclustered pins to protect frame rate.
+    // Clusters are cheap (one marker per LP) so they are never culled.
+    return { clusters: nextClusters, individualMarkers: nearestTo(loose, pinBudget, mapCenter) };
+  }, [markersToDisplay, isClustered, expandedClusters, pinLimit, mapCenter]);
+
+  /** Frame the LP's own children and let them draw individually from here on. */
+  const handleClusterPress = useCallback((cluster: LpCluster) => {
+    if (cluster.locations.length > 0 && mapRef.current) {
+      mapRef.current.fitToCoordinates(
+        cluster.locations.map(l => ({ latitude: l.latitude, longitude: l.longitude })),
+        { edgePadding: { top: 60, right: 60, bottom: 60, left: 60 }, animated: true }
+      );
+    }
+    setExpandedClusters(prev => {
+      const next = new Set(prev);
+      next.add(cluster.lpName);
+      return next;
+    });
+  }, []);
+
+  // A different selection, or toggling clustering, invalidates which LPs were opened.
+  useEffect(() => {
+    setExpandedClusters(new Set());
+  }, [selectedLcpNapId, isClustered]);
+
+  // ---- Pin-drop placement ------------------------------------------------
+
+  /**
+   * Arm the map instead of opening the form.
+   *
+   * The technician frames the pole on the map and confirms; only then does the form
+   * open, with those coordinates already filled and locked. Typing a lat/lng into a
+   * blank form was the step this replaces.
+   */
+  const startPinPlacement = useCallback(() => {
+    setPinCoords({ latitude: mapCenter.latitude, longitude: mapCenter.longitude });
+    setSelectedLocation(null);
+    setIsPlacingPin(true);
+  }, [mapCenter]);
+
+  const cancelPinPlacement = useCallback(() => {
+    setIsPlacingPin(false);
+    setPinCoords(null);
+  }, []);
+
+  /** Lock the point in and hand it to the form. */
+  const confirmPinPlacement = useCallback(() => {
+    if (!pinCoords) return;
+    setPinnedCoordinates(`${pinCoords.latitude.toFixed(6)}, ${pinCoords.longitude.toFixed(6)}`);
+    setIsPlacingPin(false);
+    setShowAddModal(true);
+  }, [pinCoords]);
 
   const handleLcpNapSelect = useCallback((id: number | string) => {
     setSelectedLcpNapId(id);
@@ -555,10 +845,10 @@ const LcpNapLocation: React.FC = () => {
               </View>
 
               <View style={[styles.limitWrapper, { backgroundColor: '#f3f4f6', borderColor: '#e5e7eb' }]}>
-                <MapPin size={18} color={primaryColor} style={styles.iconMargin} />
+                <MapPin size={16} color={primaryColor} style={styles.iconMargin} />
                 <TextInput
                   style={[styles.limitInput, { color: '#111827' }]}
-                  placeholder="Limit"
+                  placeholder="25"
                   placeholderTextColor="#9ca3af"
                   value={pinLimit}
                   onChangeText={v => setPinLimit(v.replace(/[^0-9]/g, ''))}
@@ -566,6 +856,25 @@ const LcpNapLocation: React.FC = () => {
                   maxLength={4}
                 />
               </View>
+
+              {/* Group pins by LP, on or off. Filled means grouping is active. */}
+              <Pressable
+                onPress={() => setIsClustered(prev => !prev)}
+                accessibilityRole="switch"
+                accessibilityState={{ checked: isClustered }}
+                accessibilityLabel={isClustered ? 'Clustering on. Tap to show individual pins.' : 'Clustering off. Tap to group pins by LP.'}
+                style={[
+                  styles.clusterToggle,
+                  isClustered
+                    ? { backgroundColor: primaryColor, borderColor: primaryColor }
+                    : { backgroundColor: '#f3f4f6', borderColor: '#e5e7eb' },
+                ]}
+              >
+                <Layers size={16} color={isClustered ? '#ffffff' : '#6b7280'} />
+                <Text style={[styles.clusterToggleText, { color: isClustered ? '#ffffff' : '#6b7280' }]}>
+                  Cluster
+                </Text>
+              </Pressable>
             </View>
           </View>
 
@@ -585,6 +894,21 @@ const LcpNapLocation: React.FC = () => {
                   setCurrentRegion(r);
                   setCurrentDelta(r.latitudeDelta);
                   setMapCenter({ latitude: r.latitude, longitude: r.longitude });
+                  // While placing, the map centre *is* the provisional coordinate, so
+                  // panning moves the pin under the fixed crosshair.
+                  if (isPlacingPin) setPinCoords({ latitude: r.latitude, longitude: r.longitude });
+                }}
+                onPress={e => {
+                  // A tap re-centres on the tapped point so crosshair and pin agree.
+                  if (!isPlacingPin || !e.nativeEvent?.coordinate) return;
+                  const { latitude, longitude } = e.nativeEvent.coordinate;
+                  setPinCoords({ latitude, longitude });
+                  mapRef.current?.animateToRegion({
+                    latitude,
+                    longitude,
+                    latitudeDelta: pendingRegionRef.current.latitudeDelta,
+                    longitudeDelta: pendingRegionRef.current.longitudeDelta,
+                  }, 250);
                 }}
                 mapType="none"
                 showsPointsOfInterest={false}
@@ -614,9 +938,24 @@ const LcpNapLocation: React.FC = () => {
 
                 {userLocation && <Circle center={userLocation} radius={100} fillColor="rgba(59, 130, 246, 0.1)" strokeColor="rgba(59, 130, 246, 0.4)" strokeWidth={2} />}
 
-                {markersToDisplay.map(loc => (
+                {individualMarkers.map(loc => (
                   <CustomMarker key={loc.id} location={loc} pinSize={pinSize} onPress={handleLocationSelect} />
                 ))}
+
+                {clusters.map(cluster => (
+                  <ClusterMarker key={`cluster-${cluster.lpName}`} cluster={cluster} onPress={handleClusterPress} />
+                ))}
+
+                {/* Provisional pin, drawn under the crosshair while placing. */}
+                {isPlacingPin && pinCoords && (
+                  <Marker
+                    coordinate={pinCoords}
+                    title="New LCP/NAP location"
+                    pinColor={primaryColor}
+                    tracksViewChanges={false}
+                    zIndex={2000}
+                  />
+                )}
 
                 {/* Place search result pin — visually distinct */}
                 {searchedPlacePin && searchedPlacePin.latitude !== 0 && (
@@ -685,14 +1024,59 @@ const LcpNapLocation: React.FC = () => {
               </>
             )}
 
-            <View style={styles.mapActionButtons}>
-              <Pressable onPress={() => setShowAddModal(true)} style={[styles.mapActionButton, { backgroundColor: primaryColor }]}>
-                <Plus size={24} color="white" />
-              </Pressable>
-              <Pressable onPress={handleGetMyLocation} style={[styles.mapActionButton, { backgroundColor: '#ffffff', marginTop: 12 }]}>
-                <Navigation size={24} color={'#111827'} />
-              </Pressable>
-            </View>
+            {/* Pin-drop crosshair. Fixed to the centre of the map and click-through, so
+                the map underneath still pans and zooms normally. */}
+            {isPlacingPin && (
+              <View style={styles.crosshairOverlay} pointerEvents="none">
+                <View style={[styles.crosshairRing, { borderColor: primaryColor }]} />
+                <View style={[styles.crosshairVertical, { backgroundColor: primaryColor }]} />
+                <View style={[styles.crosshairHorizontal, { backgroundColor: primaryColor }]} />
+              </View>
+            )}
+
+            {/* Floating confirmation bar for the pin-drop. */}
+            {isPlacingPin && (
+              <View style={styles.pinBar}>
+                <View style={styles.pinBarHeader}>
+                  <MapPin size={16} color={primaryColor} />
+                  <View style={styles.pinBarText}>
+                    <Text style={styles.pinBarTitle}>Position the pin</Text>
+                    <Text style={styles.pinBarHint}>Pan the map or tap a spot, then confirm.</Text>
+                    <Text style={styles.pinBarCoords}>
+                      {pinCoords
+                        ? `${pinCoords.latitude.toFixed(6)}, ${pinCoords.longitude.toFixed(6)}`
+                        : 'Waiting for the map…'}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.pinBarActions}>
+                  <Pressable
+                    onPress={confirmPinPlacement}
+                    disabled={!pinCoords}
+                    style={[styles.pinBarButton, { backgroundColor: primaryColor, opacity: pinCoords ? 1 : 0.5 }]}
+                  >
+                    <Check size={16} color="white" />
+                    <Text style={styles.pinBarButtonText}>Confirm</Text>
+                  </Pressable>
+                  <Pressable onPress={cancelPinPlacement} style={[styles.pinBarButton, styles.pinBarCancel]}>
+                    <X size={16} color="#374151" />
+                    <Text style={[styles.pinBarButtonText, { color: '#374151' }]}>Cancel</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+
+            {!isPlacingPin && (
+              <View style={styles.mapActionButtons}>
+                <Pressable onPress={startPinPlacement} style={[styles.mapActionButton, { backgroundColor: primaryColor }]}>
+                  <Plus size={24} color="white" />
+                </Pressable>
+                <Pressable onPress={handleGetMyLocation} style={[styles.mapActionButton, { backgroundColor: '#ffffff', marginTop: 12 }]}>
+                  <Navigation size={24} color={'#111827'} />
+                </Pressable>
+              </View>
+            )}
 
             {/* Map attribution — required by tile provider */}
             <View style={styles.osmAttribution}>
@@ -713,9 +1097,18 @@ const LcpNapLocation: React.FC = () => {
 
       <AddLcpNapLocationModal
         isOpen={showAddModal}
-        onClose={() => { setShowAddModal(false); setEditLocation(null); }}
+        onClose={() => {
+          setShowAddModal(false);
+          setEditLocation(null);
+          // The pin is consumed by the form; dropping it here means reopening Add starts
+          // a fresh placement rather than silently reusing the last point.
+          setPinnedCoordinates(null);
+          setPinCoords(null);
+        }}
         onSave={() => loadLocations()}
         editData={editLocation}
+        initialCoordinates={pinnedCoordinates ?? undefined}
+        lockCoordinates={pinnedCoordinates !== null}
       />
 
       {selectedLocation && (
@@ -751,9 +1144,11 @@ const styles = StyleSheet.create({
   badgeText: { fontSize: 11, fontWeight: '700' },
   searchContainer: { padding: 16, borderBottomWidth: 1, zIndex: 100 },
   searchWrapper: { flexDirection: 'row', alignItems: 'center', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1 },
-  headerInputsRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  limitWrapper: { flexDirection: 'row', alignItems: 'center', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8, borderWidth: 1, width: 100 },
-  limitInput: { flex: 1, fontSize: 14, padding: 0, textAlign: 'center' },
+  headerInputsRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  limitWrapper: { flexDirection: 'row', alignItems: 'center', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 8, borderWidth: 1, width: 76 },
+  limitInput: { flex: 1, fontSize: 13, padding: 0, textAlign: 'center' },
+  clusterToggle: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8, borderWidth: 1, flexShrink: 0 },
+  clusterToggleText: { fontSize: 13, fontWeight: '600', marginLeft: 6 },
   searchInput: { flex: 1, fontSize: 14, padding: 0 },
   mapContainer: { flex: 1, position: 'relative' },
   map: { ...StyleSheet.absoluteFillObject },
@@ -765,6 +1160,20 @@ const styles = StyleSheet.create({
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.4)', justifyContent: 'flex-end' },
   mobileDetailsContainer: { height: '85%', backgroundColor: '#ffffff', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden' },
   markerPin: { backgroundColor: '#22c55e', borderColor: 'white', shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.2, shadowRadius: 2, elevation: 3 },
+  crosshairOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 600 },
+  crosshairRing: { width: 40, height: 40, borderRadius: 20, borderWidth: 2, opacity: 0.7 },
+  crosshairVertical: { position: 'absolute', width: 2, height: 32 },
+  crosshairHorizontal: { position: 'absolute', height: 2, width: 32 },
+  pinBar: { position: 'absolute', left: 16, right: 16, bottom: 24, backgroundColor: '#ffffff', borderRadius: 14, borderWidth: 1, borderColor: '#e5e7eb', padding: 12, zIndex: 700, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 6 },
+  pinBarHeader: { flexDirection: 'row', alignItems: 'flex-start' },
+  pinBarText: { flex: 1, marginLeft: 8 },
+  pinBarTitle: { fontSize: 14, fontWeight: '600', color: '#111827' },
+  pinBarHint: { fontSize: 12, color: '#6b7280', marginTop: 2 },
+  pinBarCoords: { fontSize: 12, color: '#374151', marginTop: 4, fontVariant: ['tabular-nums'] },
+  pinBarActions: { flexDirection: 'row', marginTop: 12 },
+  pinBarButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 10, borderRadius: 8 },
+  pinBarCancel: { marginLeft: 8, borderWidth: 1, borderColor: '#d1d5db', backgroundColor: '#ffffff' },
+  pinBarButtonText: { color: 'white', fontSize: 14, fontWeight: '600', marginLeft: 6 },
   suggestionsDropdown: { position: 'absolute', top: 68, left: 16, right: 16, maxHeight: 400, borderRadius: 12, borderWidth: 1, zIndex: 1000, elevation: 5, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84, overflow: 'hidden' },
   dropdownBackdrop: { position: 'absolute', top: -100, left: -100, right: -100, bottom: -2000, zIndex: 999 },
   suggestionItem: { flexDirection: 'row', alignItems: 'center', padding: 12, borderBottomWidth: 1 },

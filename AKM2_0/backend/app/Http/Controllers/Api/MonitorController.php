@@ -814,6 +814,51 @@ class MonitorController extends Controller
                         }
                     }
 
+                    // 2b. JO/SO completion counts for the availability widget badges.
+                    //
+                    // Counted on OVERLAP with the view window: a task that began yesterday and was
+                    // finished today belongs to today, so start_time alone is not enough to place
+                    // it. Re-filtered against the window rather than just counting $allTasks,
+                    // because the queries above deliberately pull in ANY task with a NULL end_time
+                    // regardless of date (the timeline needs those to spot work in progress) — so
+                    // counting $allTasks directly would let an abandoned task from weeks ago
+                    // inflate today's figure. Tasks with no start_time are excluded: they are
+                    // assigned but never begun, so nothing was done.
+                    //
+                    // Reuses the collections already fetched above — no extra queries per tech.
+                    $tasksInWindow = $allTasks->filter(function ($t) use ($viewStart, $timeBound) {
+                        if (empty($t->start_time)) {
+                            return false;
+                        }
+                        try {
+                            $taskStart = \Carbon\Carbon::parse($t->start_time, 'Asia/Manila');
+                            $taskEnd = $t->end_time
+                                ? \Carbon\Carbon::parse($t->end_time, 'Asia/Manila')
+                                : $timeBound->copy();
+                        } catch (\Throwable $ex) {
+                            return false;
+                        }
+                        return $taskStart->lte($timeBound) && $taskEnd->gte($viewStart);
+                    });
+
+                    // Finished work only. A task the technician is still on is genuine work in
+                    // progress and the timeline below still bills its time, but it is not
+                    // something they completed, and the board reads these badges as a completed
+                    // tally. So an in-progress task deliberately shows working time against
+                    // "JO: 0" — that mismatch is the intended reading, not a bug to reconcile.
+                    //
+                    // JO carries the outcome on onsite_status and SO on visit_status, both aliased
+                    // to `status` by the queries above. 'resolved' and 'completed' are accepted
+                    // next to 'done' so a status written in either vocabulary still counts.
+                    // 'failed' never reaches here — $allTasks drops it.
+                    $completedTaskStatuses = ['done', 'completed', 'resolved'];
+                    $completedInWindow = $tasksInWindow->filter(function ($t) use ($completedTaskStatuses) {
+                        return in_array(strtolower(trim($t->status ?? '')), $completedTaskStatuses, true);
+                    });
+
+                    $joCount = $completedInWindow->where('task_type', 'jo')->count();
+                    $soCount = $completedInWindow->where('task_type', 'so')->count();
+
                     // Define effective start for availability (either view start or time_in)
                     $effectiveStart = $viewStart->copy();
                     if (!empty($tech->time_in)) {
@@ -963,6 +1008,9 @@ class MonitorController extends Controller
                             'primary_time_str' => $primaryTimeDisp,
                             'total_working_str' => $workingTimeStr,
                             'total_available_str' => $availableTimeStr,
+                            // Completed tasks overlapping the view window (see 2b above).
+                            'jo_count' => $joCount,
+                            'so_count' => $soCount,
                             'is_pullout' => $isPullout,
                             'time_in' => $tech->time_in,
                             'time_out' => $tech->time_out,

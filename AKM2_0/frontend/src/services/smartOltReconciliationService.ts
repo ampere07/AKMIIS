@@ -14,6 +14,7 @@ export type JobType =
   | 'mac_discovery'
   | 'rename'
   | 'profile_sync'
+  | 'sn_alignment'
   | 'delete';
 
 /**
@@ -45,6 +46,9 @@ export interface ToolJob {
 }
 
 export interface OnuRow {
+  /** ONU-side and OLT-side optical readings; null where never measured. */
+  onu_rx?: number | null;
+  olt_rx?: number | null;
   external_id: string;
   sn: string;
   name: string;
@@ -78,6 +82,13 @@ export interface SmartOltState {
   rows: OnuRow[];
 }
 
+/**
+ * @deprecated Superseded by {@link MacAlignmentRow}. The Name Alignment tab was retired
+ * because a name composed from billing records can disagree with the device that is
+ * actually authenticating; MAC alignment matches the ONU bridge MAC against the live
+ * PPPoE calling-station-id and is authoritative. Kept because the backend endpoint and
+ * its CSV dataset still respond.
+ */
 export interface AlignmentRow {
   external_id: string;
   sn: string;
@@ -93,6 +104,7 @@ export interface AlignmentRow {
   reason: string;
 }
 
+/** @deprecated Superseded by {@link MacAlignmentPreview}. See {@link AlignmentRow}. */
 export interface AlignmentPreview {
   summary: { total: number; matched: number; rename_needed: number; aligned: number; unmatched: number; placeholder: number };
   rows: AlignmentRow[];
@@ -132,6 +144,60 @@ export interface MacAlignmentPreview {
     sessions: number;
   };
   rows: MacAlignmentRow[];
+  errors: string[];
+  updated_at: string;
+}
+
+/**
+ * A row of the SN alignment pass: the serial SmartOLT reports for an ONU against the
+ * `router_modem_sn` stored on the matched subscriber's billing record.
+ *
+ * Matched by bridge MAC against the live PPPoE calling-station-id — the same binding
+ * the MAC alignment pass uses. Applying writes the SmartOLT serial into billing;
+ * nothing ever pushes the billing value back to SmartOLT.
+ */
+export type SnAlignState =
+  | 'sn_aligned'
+  | 'sn_missing'
+  | 'sn_mismatch'
+  | 'sn_no_subscriber'
+  | 'sn_unmatched'
+  | 'sn_no_mac';
+
+export interface SnAlignmentRow {
+  external_id: string;
+  state: SnAlignState;
+  /** The serial SmartOLT reports for this ONU — the value that would be written. */
+  sn: string;
+  /** What `technical_details.router_modem_sn` currently holds, if anything. */
+  billing_sn: string;
+  radius_username: string;
+  calling_station_id: string;
+  current_name: string;
+  account_no: string;
+  customer_name: string;
+  /** The billing row the write targets; null when nothing was matched. */
+  technical_detail_id: number | null;
+  status: string;
+  server_id: number | null;
+  server_label: string;
+  eligible: boolean;
+  reason: string;
+}
+
+export interface SnAlignmentPreview {
+  summary: {
+    total: number;
+    matched: number;
+    aligned: number;
+    missing: number;
+    mismatch: number;
+    no_subscriber: number;
+    unmatched: number;
+    no_mac: number;
+    sessions: number;
+  };
+  rows: SnAlignmentRow[];
   errors: string[];
   updated_at: string;
 }
@@ -176,6 +242,25 @@ export interface CleanupRow {
   status: string;
   last_status_change: string;
   days_offline: number | null;
+  /**
+   * Both ends of the PON link, as of the last optical crawl.
+   *
+   * `onu_rx` is what the subscriber's ONU hears from the OLT; `olt_rx` is what the
+   * OLT hears back. Null means never measured, not zero — an ONU the optical scan
+   * has not reached yet renders as a dash rather than as a reading of 0 dBm.
+   */
+  onu_rx: number | null;
+  olt_rx: number | null;
+  /** Legacy alias of `onu_rx`, still served for readers written before `olt_rx`. */
+  rx_power: number | null;
+  optical_checked_at: string | null;
+  /**
+   * What the billing and RADIUS guards said about removing this ONU.
+   *
+   * Advisory in this tool. Cleanup runs on the operator's selection, and an objection
+   * is recorded against the deletion rather than refusing it; these drive a warning
+   * column, not a filter. The unattended nightly pass still treats them as binding.
+   */
   eligible: boolean;
   reasons: string[];
 }
@@ -264,6 +349,11 @@ export const smartOltReconciliationService = {
     return response.data;
   },
 
+  /**
+   * @deprecated Use {@link getMacAlignment}. No UI calls this any more — the Name
+   * Alignment tab was retired in favour of the authoritative MAC pass — but the backend
+   * route is unchanged and still serves, so this stays callable.
+   */
   getAlignmentPreview: async (): Promise<AlignmentPreview> => {
     const response = await apiClient.get<{ success: boolean; data: AlignmentPreview }>(`${BASE}/alignment-preview`);
     return response.data.data;
@@ -271,6 +361,11 @@ export const smartOltReconciliationService = {
 
   getMacAlignment: async (): Promise<MacAlignmentPreview> => {
     const response = await apiClient.get<{ success: boolean; data: MacAlignmentPreview }>(`${BASE}/mac-alignment`);
+    return response.data.data;
+  },
+
+  getSnAlignment: async (): Promise<SnAlignmentPreview> => {
+    const response = await apiClient.get<{ success: boolean; data: SnAlignmentPreview }>(`${BASE}/sn-alignment`);
     return response.data.data;
   },
 
@@ -289,7 +384,47 @@ export const smartOltReconciliationService = {
   startJob: (type: JobType, options: Record<string, any> = {}): Promise<JobResult> =>
     unwrapJob(apiClient.post(`${BASE}/start-job`, { type, ...options })),
 
+  /**
+   * @deprecated The browser no longer drives jobs — `cron:tool-jobs-drain` advances
+   * them server-side, so a sweep keeps running with the tab closed. Use
+   * {@link getJobStatus} to watch progress. Kept callable because the route is
+   * unchanged and it is still the way to nudge a job by hand while investigating.
+   */
   processJob: (jobId: number): Promise<JobResult> => unwrapJob(apiClient.post(`${BASE}/process-job`, { job_id: jobId })),
+
+  /**
+   * Progress for one job. A plain read: polling neither starts nor advances work.
+   */
+  getJobStatus: async (jobId: number): Promise<JobResult> => {
+    try {
+      const response = await apiClient.get<JobResult>(`${BASE}/job-status`, { params: { job_id: jobId } });
+      return response.data;
+    } catch (error: any) {
+      const payload = error?.response?.data;
+      return {
+        success: false,
+        skipped: false,
+        message: payload?.message || error?.message || 'Could not read the job status.',
+        job: payload?.job ?? null,
+      };
+    }
+  },
+
+  /**
+   * Whatever job currently holds the single active slot, if any.
+   *
+   * Lets the tool reattach its progress bar on load: an operator who closed the tab
+   * mid-sweep comes back to a running job rather than to an idle-looking screen.
+   */
+  getActiveJob: async (): Promise<ToolJob | null> => {
+    try {
+      const response = await apiClient.get<{ success: boolean; job: ToolJob | null }>(`${BASE}/active-job`);
+      return response.data.job ?? null;
+    } catch {
+      // A failed reattach must not block the page from rendering.
+      return null;
+    }
+  },
 
   abortJob: (jobId: number): Promise<JobResult> => unwrapJob(apiClient.post(`${BASE}/abort-job`, { job_id: jobId })),
 
@@ -310,7 +445,7 @@ export const smartOltReconciliationService = {
     return response.data.data;
   },
 
-  exportCsv: async (dataset: 'inventory' | 'alignment' | 'profile' | 'cleanup'): Promise<void> => {
+  exportCsv: async (dataset: 'inventory' | 'alignment' | 'sn_alignment' | 'profile' | 'cleanup'): Promise<void> => {
     const response = await apiClient.get(`${BASE}/export`, {
       params: { dataset },
       responseType: 'blob',

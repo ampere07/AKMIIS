@@ -42,7 +42,12 @@ const allColumns = [
   { key: 'visitStatus', label: 'Visit Status', width: 'min-w-32' }
 ];
 
-const ServiceOrderPage: React.FC = () => {
+interface ServiceOrderPageProps {
+  /** Id of the service order a bell notification asked to open, if any. */
+  autoOpenServiceOrderId?: string;
+}
+
+const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrderId }) => {
   const calculateDuration = (start?: string | null, end?: string | null): string => {
     if (!start || !end) return '-';
     try {
@@ -1004,6 +1009,33 @@ const ServiceOrderPage: React.FC = () => {
   const handleRowClick = (serviceOrder: ServiceOrder) => {
     setSelectedServiceOrder(serviceOrder);
   };
+
+  /**
+   * Open the service order a bell notification pointed at, once the list holding it
+   * has loaded.
+   *
+   * Routed through handleRowClick rather than setting the selection directly, so the
+   * presence broadcast and everything else opening a row normally does still happens.
+   * The ref guard makes this fire once per id: background refreshes re-run this effect
+   * whenever the list changes, and without it a panel the operator closed would spring
+   * back open on the next poll.
+   */
+  const autoOpenedIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoOpenServiceOrderId) {
+      autoOpenedIdRef.current = null;
+      return;
+    }
+    if (autoOpenedIdRef.current === autoOpenServiceOrderId) return;
+
+    const target = serviceOrders.find((order: any) => String(order.id) === String(autoOpenServiceOrderId));
+    if (!target) return;
+
+    autoOpenedIdRef.current = autoOpenServiceOrderId;
+    handleRowClick(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenServiceOrderId, serviceOrders]);
+
 
   const handleToggleColumn = (columnKey: string) => {
     setVisibleColumns(prev => {

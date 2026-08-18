@@ -56,9 +56,11 @@ const allColumns = [
 
 interface ApplicationManagementProps {
   onNavigate?: (section: string, extra?: string) => void;
+  /** Id of the application a bell notification asked to open, if any. */
+  autoOpenApplicationId?: string;
 }
 
-const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigate }) => {
+const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigate, autoOpenApplicationId }) => {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [currentUserOrgId, setCurrentUserOrgId] = useState<number | null>(() => {
     try {
@@ -886,6 +888,33 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
       console.error('[Viewing] Failed to start viewing:', err);
     }
   };
+
+  /**
+   * Open the application a bell notification pointed at, once the list holding it
+   * has loaded.
+   *
+   * Routed through handleRowClick rather than setting the selection directly, so the
+   * presence broadcast and everything else opening a row normally does still happens.
+   * The ref guard makes this fire once per id: background refreshes re-run this effect
+   * whenever the list changes, and without it a panel the operator closed would spring
+   * back open on the next poll.
+   */
+  const autoOpenedIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoOpenApplicationId) {
+      autoOpenedIdRef.current = null;
+      return;
+    }
+    if (autoOpenedIdRef.current === autoOpenApplicationId) return;
+
+    const target = applications.find((app: any) => String(app.id) === String(autoOpenApplicationId));
+    if (!target) return;
+
+    autoOpenedIdRef.current = autoOpenApplicationId;
+    handleRowClick(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenApplicationId, applications]);
+
 
   const handleToggleColumn = (columnKey: string) => {
     setVisibleColumns(prev => {

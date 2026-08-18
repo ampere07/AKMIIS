@@ -14,7 +14,12 @@ const hexToRgba = (hex: string, opacity: number) => {
     return result ? `rgba(${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)}, ${opacity})` : hex;
 };
 
-const TransactionsRevert: React.FC = () => {
+interface TransactionsRevertProps {
+    /** Id of the revert request a bell notification asked to open, if any. */
+    autoOpenRevertId?: string;
+}
+
+const TransactionsRevert: React.FC<TransactionsRevertProps> = ({ autoOpenRevertId }) => {
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
     const {
         revertRequests,
@@ -212,6 +217,33 @@ const TransactionsRevert: React.FC = () => {
             setMobileView('details');
         }
     };
+
+    /**
+     * Open the revert request a bell notification pointed at, once the list holding it
+     * has loaded.
+     *
+     * Routed through handleRowClick rather than setting the selection directly, so the
+     * presence broadcast and everything else opening a row normally does still happens.
+     * The ref guard makes this fire once per id: background refreshes re-run this effect
+     * whenever the list changes, and without it a panel the operator closed would spring
+     * back open on the next poll.
+     */
+    const autoOpenedIdRef = React.useRef<string | null>(null);
+    useEffect(() => {
+        if (!autoOpenRevertId) {
+            autoOpenedIdRef.current = null;
+            return;
+        }
+        if (autoOpenedIdRef.current === autoOpenRevertId) return;
+
+        const target = revertRequests.find((request: any) => String(request.id) === String(autoOpenRevertId));
+        if (!target) return;
+
+        autoOpenedIdRef.current = autoOpenRevertId;
+        handleRowClick(target);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [autoOpenRevertId, revertRequests]);
+
 
     const handleMobileBack = () => {
         if (mobileView === 'details') {

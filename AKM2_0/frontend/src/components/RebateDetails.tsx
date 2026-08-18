@@ -9,6 +9,7 @@ import { getCustomerDetail, CustomerDetailData } from '../services/customerDetai
 import { BillingDetailRecord } from '../types/billing';
 import { CircleArrowRight, Loader } from 'lucide-react';
 import apiClient from '../config/api';
+import { accountStatusFrom, sessionStatusFrom } from '../utils/onlineStatus';
 
 const CustomerDetails = React.lazy(() => import('./CustomerDetails'));
 const NotFoundModal = React.lazy(() => import('../modals/NotFoundModal'));
@@ -19,9 +20,9 @@ const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): B
     applicationId: customerData.billingAccount?.accountNo || '',
     customerName: customerData.fullName,
     address: customerData.address,
-    status: customerData.billingAccount?.billingStatusId === 2 ? 'Active' : 'Inactive',
+    status: accountStatusFrom(customerData),
     balance: customerData.billingAccount?.accountBalance || 0,
-    onlineStatus: customerData.billingAccount?.billingStatusId === 2 ? 'Online' : 'Offline',
+    onlineStatus: sessionStatusFrom(customerData),
     cityId: null,
     regionId: null,
     timestamp: customerData.updatedAt || '',

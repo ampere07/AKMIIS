@@ -9,6 +9,14 @@ import {
   type XenditFilter,
   type XenditReconcileRow,
 } from '../services/xenditReconcileService';
+import { useDataGrid, type DataGridColumn } from '../hooks/useDataGrid';
+import {
+  ColumnMenu,
+  ExportButton,
+  PageSizeSelector,
+  SelectAllHeaderCell,
+  SortableHeaderCell,
+} from '../components/DataGridControls';
 
 interface XenditReconcileToolProps {
   isDarkMode?: boolean;
@@ -28,7 +36,8 @@ const FILTERS: Array<{ id: XenditFilter; label: string }> = [
   { id: 'expired', label: 'Expired / Failed' },
 ];
 
-const PER_PAGE = 50;
+/** Default rows per server page. Adjustable from the toolbar; the API caps it at 200. */
+const DEFAULT_PER_PAGE = 50;
 
 /** Selectable lookback windows, in days. */
 const WINDOWS = [7, 30, 60, 90];
@@ -47,7 +56,62 @@ const BILLING_TONES: Record<string, string> = {
 const peso = (value: number): string =>
   '₱' + value.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const stamp = (value: string | null): string => (value ? new Date(value).toLocaleString() : '—');
+/**
+ * A timestamp as `YYYY-MM-DD HH:mm:ss`, in the operator's own timezone.
+ *
+ * Fixed-width and sortable by eye, which `toLocaleString()` is not — it varies by
+ * browser locale, so the same settlement read as `3/7/2026, 9:05:00 PM` on one desk
+ * and `07/03/2026 21:05` on the next. Reconciling a gateway against a ledger is
+ * exactly the job where an ambiguous day/month costs an hour, so the format is pinned
+ * here rather than left to the browser.
+ *
+ * Xendit sends UTC ISO-8601; this renders local time, matching every other timestamp
+ * on the screen. An unparseable value is shown as-is rather than as "Invalid Date".
+ */
+const stampFull = (value: string | null): string => {
+  if (!value) return '—';
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+
+  const pad = (n: number) => String(n).padStart(2, '0');
+
+  return (
+    `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ` +
+    `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`
+  );
+};
+
+/** Sort key for a date: epoch milliseconds, so null sinks and order is chronological. */
+const dateValue = (value: string | null): number | null => {
+  if (!value) return null;
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+/**
+ * The table's columns.
+ *
+ * `value` drives sorting, searching and CSV export; the cell renderer below draws
+ * them. Keeping one definition for both is what stops a column exporting something
+ * different from what it displays.
+ */
+const COLUMNS: Array<DataGridColumn<XenditReconcileRow>> = [
+  { key: 'select', label: '', locked: true },
+  { key: 'reference', label: 'Reference / Invoice ID', value: (row) => `${row.reference_no} ${row.invoice_id}`.trim() },
+  { key: 'account_no', label: 'Account No', value: (row) => row.account_no },
+  { key: 'subscriber', label: 'Subscriber Name', value: (row) => row.subscriber_name ?? '' },
+  { key: 'amount', label: 'Amount', value: (row) => row.amount },
+  { key: 'channel', label: 'Channel', value: (row) => row.channel },
+  { key: 'xendit_status', label: 'Xendit Status', value: (row) => row.xendit_status ?? '' },
+  { key: 'billing_status', label: 'Billing Status', value: (row) => row.billing_status },
+  // The three dates. Created and expiry start hidden so the default table is no wider
+  // than it was; the column menu brings them in, and the choice is remembered.
+  { key: 'created_at', label: 'Transaction Created', value: (row) => dateValue(row.created_at), defaultHidden: true },
+  { key: 'settled_at', label: 'Paid / Settled', value: (row) => dateValue(row.settled_at) },
+  { key: 'expiry_date', label: 'Expiry / Updated', value: (row) => dateValue(row.expiry_date ?? row.updated_at), defaultHidden: true },
+  { key: 'actions', label: 'Actions', locked: true },
+];
 
 const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: isDarkModeProp }) => {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
@@ -65,7 +129,7 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
   const [search, setSearch] = useState('');
   const [days, setDays] = useState(30);
   const [page, setPage] = useState(1);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [perPage, setPerPage] = useState(DEFAULT_PER_PAGE);
 
   const [postTarget, setPostTarget] = useState<XenditReconcileRow | null>(null);
   const [expireTarget, setExpireTarget] = useState<XenditReconcileRow | null>(null);
@@ -88,6 +152,35 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
 
   // ---- Data --------------------------------------------------------------
 
+  // Memoized so the identity is stable: `data?.rows ?? []` would build a fresh array
+  // every render and invalidate everything downstream of it.
+  const rows = useMemo(() => data?.rows ?? [], [data]);
+  const summary = data?.summary;
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / perPage));
+
+  /**
+   * Sorting, column visibility, selection and export over the fetched page.
+   *
+   * Paging stays on the server: the window can run to tens of thousands of payments
+   * and the API caps a page at 200, so the grid must not try to own it. Its own
+   * pageSize is therefore pinned to the server's, which renders the fetched page in
+   * one block and leaves navigation to the existing pager rather than putting a
+   * second, disagreeing set of page numbers on the screen.
+   *
+   * Search likewise stays server-side — it has to reach rows this page does not hold.
+   */
+  const grid = useDataGrid<XenditReconcileRow>({
+    rows,
+    columns: COLUMNS,
+    rowKey: (row) => String(row.id),
+    pageSize: perPage,
+    initialSort: [{ key: 'settled_at', direction: 'desc' }],
+    storageKey: 'xendit_reconcile.columns',
+  });
+
+  const { clearSelection } = grid;
+  const selectedRows = grid.selectedRows;
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -96,26 +189,19 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
         search: search.trim() || undefined,
         days,
         page,
-        per_page: PER_PAGE,
+        per_page: perPage,
       });
       setData(result);
-      setSelected(new Set());
+      clearSelection();
     } catch (error: any) {
       setNotice({ tone: 'error', text: error?.response?.data?.message || 'Could not read the payment worklist.' });
     } finally {
       setLoading(false);
     }
-  }, [filter, search, days, page]);
+  }, [filter, search, days, page, perPage, clearSelection]);
 
   useEffect(() => { load(); }, [load]);
 
-  // Memoized so the identity is stable: `data?.rows ?? []` would build a fresh array
-  // every render and invalidate everything downstream of it.
-  const rows = useMemo(() => data?.rows ?? [], [data]);
-  const summary = data?.summary;
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / PER_PAGE));
-
-  const selectedRows = useMemo(() => rows.filter((row) => selected.has(row.id)), [rows, selected]);
 
   // ---- Actions -----------------------------------------------------------
 
@@ -329,13 +415,42 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
           ))}
         </div>
 
-        <div className="relative">
-          <Search className={`w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 ${muted}`} />
-          <input
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search by reference, invoice id, account number or subscriber name…"
-            className={`w-full pl-9 pr-3 py-2 rounded-lg border text-sm ${input}`}
+        <div className="flex flex-col md:flex-row md:items-center gap-3">
+          <div className="relative flex-1">
+            <Search className={`w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 ${muted}`} />
+            <input
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              placeholder="Search by reference, invoice id, account number or subscriber name…"
+              className={`w-full pl-9 pr-3 py-2 rounded-lg border text-sm ${input}`}
+            />
+          </div>
+
+          {/* Drives the server page size, not a client slice — the window can hold
+              far more payments than one page, so this is the meaningful control. */}
+          <PageSizeSelector
+            isDarkMode={isDarkMode}
+            pageSize={perPage}
+            onPageSizeChange={(size) => { setPerPage(size); setPage(1); }}
+            filteredCount={data?.total ?? 0}
+            options={[25, 50, 100, 200]}
+          />
+
+          <ExportButton
+            isDarkMode={isDarkMode}
+            onExport={() => grid.toCsv(`xendit_reconcile_${filter}_${new Date().toISOString().slice(0, 10)}`)}
+            rowCount={grid.selectedCount > 0 ? grid.selectedCount : rows.length}
+            isSelection={grid.selectedCount > 0}
+            label="Export View"
+          />
+
+          <ColumnMenu
+            isDarkMode={isDarkMode}
+            columns={grid.columns}
+            hiddenKeys={grid.hiddenKeys}
+            onToggle={grid.toggleColumn}
+            onMove={grid.moveColumn}
+            onReset={grid.resetColumns}
           />
         </div>
       </div>
@@ -354,7 +469,7 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
             Verify with Xendit
           </button>
           <button
-            onClick={() => setSelected(new Set())}
+            onClick={clearSelection}
             className={`px-3 py-1.5 rounded-lg border text-xs font-medium ${card} ${muted}`}
           >
             Clear
@@ -368,33 +483,51 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
           <table className="w-full text-sm">
             <thead className={`text-xs uppercase tracking-wide ${headRow}`}>
               <tr>
-                <th className="px-3 py-2.5 w-10">
-                  <input
-                    type="checkbox"
-                    checked={rows.length > 0 && rows.every((r) => selected.has(r.id))}
-                    onChange={(e) => {
-                      const next = new Set(selected);
-                      rows.forEach((r) => { e.target.checked ? next.add(r.id) : next.delete(r.id); });
-                      setSelected(next);
-                    }}
-                    className="rounded"
-                  />
-                </th>
-                <th className="px-3 py-2.5 text-left font-semibold">Reference / Invoice ID</th>
-                <th className="px-3 py-2.5 text-left font-semibold">Account No</th>
-                <th className="px-3 py-2.5 text-left font-semibold">Subscriber Name</th>
-                <th className="px-3 py-2.5 text-right font-semibold">Amount</th>
-                <th className="px-3 py-2.5 text-left font-semibold">Channel</th>
-                <th className="px-3 py-2.5 text-left font-semibold">Xendit Status</th>
-                <th className="px-3 py-2.5 text-left font-semibold">Billing Status</th>
-                <th className="px-3 py-2.5 text-left font-semibold">Settled At</th>
-                <th className="px-3 py-2.5 text-right font-semibold">Actions</th>
+                {grid.visibleColumns.map((column) => {
+                  if (column.key === 'select') {
+                    return (
+                      <SelectAllHeaderCell
+                        key={column.key}
+                        isDarkMode={isDarkMode}
+                        isPageSelected={grid.isPageSelected}
+                        isAllFilteredSelected={grid.isAllFilteredSelected}
+                        selectablePageCount={grid.selectablePageCount}
+                        selectableFilteredCount={grid.selectableFilteredCount}
+                        selectedCount={grid.selectedCount}
+                        onSelectPage={grid.selectPage}
+                        onDeselectPage={grid.deselectPage}
+                        onSelectAllFiltered={grid.selectAllFiltered}
+                        onClearSelection={grid.clearSelection}
+                      />
+                    );
+                  }
+
+                  if (column.key === 'actions') {
+                    return (
+                      <th key={column.key} className="px-3 py-2.5 text-right font-semibold">
+                        {column.label}
+                      </th>
+                    );
+                  }
+
+                  return (
+                    <SortableHeaderCell
+                      key={column.key}
+                      label={column.label}
+                      sortable={typeof column.value === 'function'}
+                      direction={grid.sortStateFor(column.key).direction}
+                      priority={grid.sortStateFor(column.key).priority}
+                      onSort={(additive: boolean) => grid.toggleSort(column.key, additive)}
+                      align={column.key === 'amount' ? 'right' : 'left'}
+                    />
+                  );
+                })}
               </tr>
             </thead>
             <tbody className={isDarkMode ? 'divide-y divide-gray-800' : 'divide-y divide-gray-100'}>
               {loading && (
                 <tr>
-                  <td colSpan={10} className={`px-4 py-12 text-center ${muted}`}>
+                  <td colSpan={grid.visibleColumns.length} className={`px-4 py-12 text-center ${muted}`}>
                     <Loader2 className="w-6 h-6 animate-spin mx-auto" />
                   </td>
                 </tr>
@@ -402,73 +535,122 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
 
               {!loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={10} className={`px-4 py-12 text-center ${muted}`}>
+                  <td colSpan={grid.visibleColumns.length} className={`px-4 py-12 text-center ${muted}`}>
                     No payment matches this filter in the last {days} days.
                   </td>
                 </tr>
               )}
 
-              {!loading && rows.map((row) => (
+              {!loading && grid.pagedRows.map((row) => (
                 <tr key={row.id} className={rowHover}>
-                  <td className="px-3 py-2.5">
-                    <input
-                      type="checkbox"
-                      checked={selected.has(row.id)}
-                      onChange={(e) => {
-                        const next = new Set(selected);
-                        e.target.checked ? next.add(row.id) : next.delete(row.id);
-                        setSelected(next);
-                      }}
-                      className="rounded"
-                    />
-                  </td>
+                  {grid.visibleColumns.map((column) => {
+                    switch (column.key) {
+                      case 'select':
+                        return (
+                          <td key={column.key} className="px-3 py-2.5">
+                            <input
+                              type="checkbox"
+                              checked={grid.selected.has(String(row.id))}
+                              onChange={(e) => grid.toggleRow(String(row.id), e.target.checked)}
+                              className="rounded"
+                            />
+                          </td>
+                        );
 
-                  <td className="px-3 py-2.5 text-xs">
-                    <div className={`font-mono font-medium ${text}`}>{row.reference_no}</div>
-                    <div className={`font-mono opacity-70 ${muted}`}>{row.invoice_id || '—'}</div>
-                  </td>
+                      case 'reference':
+                        return (
+                          <td key={column.key} className="px-3 py-2.5 text-xs">
+                            <div className={`font-mono font-medium ${text}`}>{row.reference_no}</div>
+                            <div className={`font-mono opacity-70 ${muted}`}>{row.invoice_id || '—'}</div>
+                          </td>
+                        );
 
-                  <td className={`px-3 py-2.5 text-xs font-mono ${text}`}>
-                    {row.account_no}
-                    {!row.account_exists && (
-                      <span
-                        className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded border font-medium bg-red-500/15 text-red-500 border-red-500/30"
-                        title="No billing account carries this account number, so this payment cannot be posted."
-                      >
-                        no account
-                      </span>
-                    )}
-                  </td>
+                      case 'account_no':
+                        return (
+                          <td key={column.key} className={`px-3 py-2.5 text-xs font-mono ${text}`}>
+                            {row.account_no}
+                            {!row.account_exists && (
+                              <span
+                                className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded border font-medium bg-red-500/15 text-red-500 border-red-500/30"
+                                title="No billing account carries this account number, so this payment cannot be posted."
+                              >
+                                no account
+                              </span>
+                            )}
+                          </td>
+                        );
 
-                  <td className={`px-3 py-2.5 text-xs ${row.subscriber_name ? text : muted}`}>
-                    {row.subscriber_name ?? '—'}
-                  </td>
+                      case 'subscriber':
+                        return (
+                          <td key={column.key} className={`px-3 py-2.5 text-xs ${row.subscriber_name ? text : muted}`}>
+                            {row.subscriber_name ?? '—'}
+                          </td>
+                        );
 
-                  <td className={`px-3 py-2.5 text-xs text-right font-mono font-medium ${text}`}>
-                    {peso(row.amount)}
-                  </td>
+                      case 'amount':
+                        return (
+                          <td key={column.key} className={`px-3 py-2.5 text-xs text-right font-mono font-medium ${text}`}>
+                            {peso(row.amount)}
+                          </td>
+                        );
 
-                  <td className={`px-3 py-2.5 text-xs ${muted}`}>{row.channel}</td>
+                      case 'channel':
+                        return <td key={column.key} className={`px-3 py-2.5 text-xs ${muted}`}>{row.channel}</td>;
 
-                  <td className="px-3 py-2.5 text-xs">
-                    {row.xendit_status
-                      ? <span className={text}>{row.xendit_status}</span>
-                      : <span className={muted} title="The gateway has not reported on this payment yet.">not reported</span>}
-                  </td>
+                      case 'xendit_status':
+                        return (
+                          <td key={column.key} className="px-3 py-2.5 text-xs">
+                            {row.xendit_status
+                              ? <span className={text}>{row.xendit_status}</span>
+                              : <span className={muted} title="The gateway has not reported on this payment yet.">not reported</span>}
+                          </td>
+                        );
 
-                  <td className="px-3 py-2.5">
-                    <span
-                      className={`text-[11px] px-2 py-0.5 rounded border font-medium ${
-                        BILLING_TONES[row.billing_status] ?? 'bg-gray-500/15 text-gray-400 border-gray-500/30'
-                      }`}
-                    >
-                      {row.billing_status}
-                    </span>
-                  </td>
+                      case 'billing_status':
+                        return (
+                          <td key={column.key} className="px-3 py-2.5">
+                            <span
+                              className={`text-[11px] px-2 py-0.5 rounded border font-medium ${
+                                BILLING_TONES[row.billing_status] ?? 'bg-gray-500/15 text-gray-400 border-gray-500/30'
+                              }`}
+                            >
+                              {row.billing_status}
+                            </span>
+                          </td>
+                        );
 
-                  <td className={`px-3 py-2.5 text-xs ${muted}`}>{stamp(row.settled_at)}</td>
+                      case 'created_at':
+                        return (
+                          <td key={column.key} className={`px-3 py-2.5 text-xs font-mono whitespace-nowrap ${muted}`}>
+                            {stampFull(row.created_at)}
+                          </td>
+                        );
 
-                  <td className="px-3 py-2.5">
+                      case 'settled_at':
+                        return (
+                          <td key={column.key} className={`px-3 py-2.5 text-xs font-mono whitespace-nowrap ${muted}`}>
+                            {stampFull(row.settled_at)}
+                          </td>
+                        );
+
+                      case 'expiry_date':
+                        // The gateway's expiry where it reported one, otherwise the
+                        // last time our own row moved. Titled so which is on screen is
+                        // never a guess — they mean different things to a dispute.
+                        return (
+                          <td
+                            key={column.key}
+                            className={`px-3 py-2.5 text-xs font-mono whitespace-nowrap ${muted}`}
+                            title={row.expiry_date ? 'Gateway expiry date' : 'No gateway expiry reported — showing when this record was last updated'}
+                          >
+                            {stampFull(row.expiry_date ?? row.updated_at)}
+                            {!row.expiry_date && row.updated_at && <span className="ml-1 opacity-60">(upd)</span>}
+                          </td>
+                        );
+
+                      case 'actions':
+                        return (
+                          <td key={column.key} className="px-3 py-2.5">
                     <div className="flex items-center justify-end gap-1 flex-wrap">
                       <button
                         onClick={() => runAction(`ver:${row.id}`, () => xenditReconcileService.verify(row.id))}
@@ -503,7 +685,13 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
                         </button>
                       )}
                     </div>
-                  </td>
+                          </td>
+                        );
+
+                      default:
+                        return <td key={column.key} className="px-3 py-2.5" />;
+                    }
+                  })}
                 </tr>
               ))}
             </tbody>
@@ -511,10 +699,10 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
         </div>
 
         {/* Pagination */}
-        {!loading && (data?.total ?? 0) > PER_PAGE && (
+        {!loading && (data?.total ?? 0) > perPage && (
           <div className={`flex items-center justify-between px-4 py-3 border-t ${isDarkMode ? 'border-gray-800' : 'border-gray-100'}`}>
             <span className={`text-xs ${muted}`}>
-              Showing {(page - 1) * PER_PAGE + 1}–{Math.min(page * PER_PAGE, data?.total ?? 0)} of {data?.total ?? 0}
+              Showing {(page - 1) * perPage + 1}–{Math.min(page * perPage, data?.total ?? 0)} of {data?.total ?? 0}
             </span>
             <div className="flex items-center gap-2">
               <button

@@ -83,6 +83,20 @@ class SmartOltReconciliationController extends Controller
     }
 
     /**
+     * GET /api/smartolt-reconciliation/sn-alignment
+     *
+     * The router/modem SN pass: SmartOLT's reported serial against the subscriber's
+     * stored technical_details.router_modem_sn, matched by bridge MAC.
+     */
+    public function snAlignment(Request $request): JsonResponse
+    {
+        return response()->json([
+            'success' => true,
+            'data'    => $this->service->getSnAlignmentPreview($this->organizationId($request)),
+        ]);
+    }
+
+    /**
      * GET /api/smartolt-reconciliation/profile-preview
      */
     public function profilePreview(Request $request): JsonResponse
@@ -120,6 +134,11 @@ class SmartOltReconciliationController extends Controller
             'type'                 => ['required', 'string', 'in:' . implode(',', SmartOltReconciliationService::JOB_TYPES)],
             'confirmation'         => ['nullable', 'string', 'max:32'],
             'offline_days'         => ['nullable', 'integer', 'min:1', 'max:3650'],
+            // Cleanup only. Off by default: an operator-selected ONU is removed on
+            // the strength of that selection, with any safety objection recorded
+            // against the deletion rather than refusing it. Send true to restore the
+            // refusing behaviour for a caller that wants the guards to bind.
+            'enforce_safety'       => ['nullable', 'boolean'],
             // Optical scan only: re-read every ONU instead of just the uncrawled ones.
             'rescan'               => ['nullable', 'boolean'],
             'external_ids'         => ['nullable', 'array', 'max:5000'],
@@ -134,6 +153,9 @@ class SmartOltReconciliationController extends Controller
             'items.*.address_changed' => ['nullable', 'boolean'],
             'items.*.contact_changed' => ['nullable', 'boolean'],
             'items.*.coords_changed'  => ['nullable', 'boolean'],
+            // SN alignment: the billing row to write and the serial to write into it.
+            'items.*.technical_detail_id' => ['nullable', 'integer', 'min:1'],
+            'items.*.new_sn'              => ['nullable', 'string', 'max:255'],
         ]);
 
         $type = $validated['type'];
@@ -166,6 +188,56 @@ class SmartOltReconciliationController extends Controller
             'message' => $result['message'],
             'job'     => $result['job'] ?? null,
         ], $result['success'] ? 200 : 422);
+    }
+
+    /**
+     * GET /api/smartolt-reconciliation/job-status
+     *
+     * Progress for one job, read-only.
+     *
+     * This is what the tool polls. Jobs are advanced by `cron:tool-jobs-drain` in the
+     * background, so the browser no longer has to drive a sweep to keep it moving —
+     * it only watches. Polling therefore stays a plain read: reopening the page a day
+     * later reattaches to whatever the sweep has reached, and nothing about the job
+     * depends on anyone being on this endpoint.
+     */
+    public function jobStatus(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'job_id' => ['required', 'integer', 'min:1'],
+        ]);
+
+        $job = $this->service->getJob($validated['job_id']);
+
+        if ($job === null) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Job #' . $validated['job_id'] . ' does not exist.',
+                'job'     => null,
+            ], 404);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => $job['message'],
+            'job'     => $job,
+        ]);
+    }
+
+    /**
+     * GET /api/smartolt-reconciliation/active-job
+     *
+     * The job currently occupying the single active slot, if any.
+     *
+     * Lets the tool reattach its progress bar on load without the caller having to
+     * remember a job id across the reload that closed the tab in the first place.
+     */
+    public function activeJob(Request $request): JsonResponse
+    {
+        return response()->json([
+            'success' => true,
+            'job'     => $this->service->activeJob($this->organizationId($request)),
+        ]);
     }
 
     /**
@@ -226,7 +298,7 @@ class SmartOltReconciliationController extends Controller
     public function export(Request $request): StreamedResponse
     {
         $validated = $request->validate([
-            'dataset' => ['nullable', 'string', 'in:inventory,alignment,profile,cleanup'],
+            'dataset' => ['nullable', 'string', 'in:inventory,alignment,sn_alignment,profile,cleanup'],
         ]);
 
         $export = $this->service->exportCsv(

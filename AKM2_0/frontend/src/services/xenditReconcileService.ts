@@ -31,6 +31,16 @@ export interface XenditReconcileRow {
   xendit_status: string | null;
   billing_status: string;
   settled_at: string | null;
+  /**
+   * The three dates the reconciliation table sorts on.
+   *
+   * created_at and updated_at come off our own pending_payments row. expiry_date is
+   * the gateway's and is read out of the stored callback payload — pending_payments
+   * has no expiry column — so it stays null until Xendit has reported on the request.
+   */
+  created_at: string | null;
+  updated_at: string | null;
+  expiry_date: string | null;
   payment_date: string | null;
   attempts: number;
   last_reconciled_at: string | null;

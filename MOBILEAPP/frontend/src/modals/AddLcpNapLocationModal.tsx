@@ -28,6 +28,16 @@ interface AddLcpNapLocationModalProps {
   onClose: () => void;
   onSave?: () => void;
   editData?: any;
+  /**
+   * Coordinates to open with, as the stored "lat, lng" string. Supplied by the map's
+   * pin-drop flow, which has already had the technician place and confirm the point.
+   */
+  initialCoordinates?: string;
+  /**
+   * Present the coordinates as settled: read-only field, and the preview map cannot
+   * re-set them. The pin confirmed on the map is the answer.
+   */
+  lockCoordinates?: boolean;
 }
 
 interface Region { id: number; name: string; }
@@ -194,7 +204,7 @@ const MapSection = React.memo<MapSectionProps>(
 
 // ─── Main Component ────────────────────────────────────────────────────────────
 
-const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({ isOpen, onClose, onSave, editData }) => {
+const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({ isOpen, onClose, onSave, editData, initialCoordinates, lockCoordinates = false }) => {
 
   const [currentUserEmail, setCurrentUserEmail] = useState('');
   const [formData, setFormData] = useState<FormDataState>(INITIAL_FORM);
@@ -335,11 +345,13 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({ isOpen,
         image_2: getImageUrl(editData.image2_url),
       });
     } else {
-      setFormData({ ...INITIAL_FORM, modified_by: currentUserEmail });
+      // A pin-drop hands the coordinates in already confirmed; seeded here so the blank
+      // form does not wipe them.
+      setFormData({ ...INITIAL_FORM, modified_by: currentUserEmail, coordinates: initialCoordinates || '' });
       setImagePreviews(INITIAL_PREVIEWS);
     }
     setErrors({});
-  }, [loadDropdownData, currentUserEmail, editData]);
+  }, [loadDropdownData, currentUserEmail, editData, initialCoordinates]);
 
   useEffect(() => {
     if (formData.lcp_name && formData.nap_name) {
@@ -390,10 +402,13 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({ isOpen,
   }, []);
 
   const handleMapPress = useCallback(({ latitude, longitude }: { latitude: number; longitude: number }) => {
+    // Locked coordinates came from a confirmed pin drop — the preview map stays a preview.
+    if (lockCoordinates) return;
     setFormData(prev => ({ ...prev, coordinates: `${latitude.toFixed(6)}, ${longitude.toFixed(6)}` }));
-  }, []);
+  }, [lockCoordinates]);
 
   const handleGetMyLocation = useCallback(async () => {
+    if (lockCoordinates) return;
     setLoading(true);
     try {
       // Shows the in-app location disclosure before the OS prompt, then requests.
@@ -655,7 +670,12 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({ isOpen,
                 </View>
                 <View>
                   <Text style={[styles.fieldLabel, { color: isDarkMode ? '#ffffff' : '#111827' }]}>Coordinates<Text style={{ color: '#ef4444' }}>*</Text></Text>
-                  <TextInput value={formData.coordinates} onChangeText={t => setFormData(p => ({ ...p, coordinates: t }))} style={[styles.input, { borderColor: errors.coordinates ? '#ef4444' : (isDarkMode ? '#374151' : '#d1d5db'), backgroundColor: isDarkMode ? '#1f2937' : '#ffffff', color: isDarkMode ? '#ffffff' : '#111827' }]} placeholder="14.466580, 121.201807" />
+                  <TextInput value={formData.coordinates} onChangeText={t => setFormData(p => ({ ...p, coordinates: t }))} editable={!lockCoordinates} style={[styles.input, { borderColor: errors.coordinates ? '#ef4444' : (isDarkMode ? '#374151' : '#d1d5db'), backgroundColor: lockCoordinates ? (isDarkMode ? '#111827' : '#f3f4f6') : (isDarkMode ? '#1f2937' : '#ffffff'), color: lockCoordinates ? (isDarkMode ? '#9ca3af' : '#6b7280') : (isDarkMode ? '#ffffff' : '#111827') }]} placeholder="14.466580, 121.201807" />
+                  {lockCoordinates && (
+                    <Text style={[styles.fieldLabel, { color: isDarkMode ? '#9ca3af' : '#6b7280', marginTop: 4 }]}>
+                      Pinned on the map. Cancel and drop a new pin to move it.
+                    </Text>
+                  )}
                   <MapSection onMapPress={handleMapPress} onGetMyLocation={handleGetMyLocation} isDarkMode={isDarkMode} colorPalette={colorPalette} webViewRef={webViewRef} loading={loading} onInteractionChange={setScrollEnabled} />
                 </View>
                 <ImagePreview

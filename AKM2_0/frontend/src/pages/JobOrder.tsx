@@ -90,7 +90,12 @@ const allColumns = [
   { key: 'duration', label: 'Duration', width: 'min-w-28' }
 ];
 
-const JobOrderPage: React.FC = () => {
+interface JobOrderPageProps {
+  /** Id of the job order a bell notification asked to open, if any. */
+  autoOpenJobOrderId?: string;
+}
+
+const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [currentUserOrgId, setCurrentUserOrgId] = useState<number | null>(() => {
     try {
@@ -1166,6 +1171,33 @@ const JobOrderPage: React.FC = () => {
       }
     }
   };
+
+  /**
+   * Open the job order a bell notification pointed at, once the list holding it
+   * has loaded.
+   *
+   * Routed through handleRowClick rather than setting the selection directly, so the
+   * presence broadcast and everything else opening a row normally does still happens.
+   * The ref guard makes this fire once per id: background refreshes re-run this effect
+   * whenever the list changes, and without it a panel the operator closed would spring
+   * back open on the next poll.
+   */
+  const autoOpenedIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoOpenJobOrderId) {
+      autoOpenedIdRef.current = null;
+      return;
+    }
+    if (autoOpenedIdRef.current === autoOpenJobOrderId) return;
+
+    const target = accessibleJobOrders.find((order: any) => String(order.id) === String(autoOpenJobOrderId));
+    if (!target) return;
+
+    autoOpenedIdRef.current = autoOpenJobOrderId;
+    handleRowClick(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenJobOrderId, accessibleJobOrders]);
+
 
   const handleCloseDetails = async () => {
     if (selectedJobOrder) {

@@ -7,15 +7,49 @@
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
--- 0. Idempotent index helper
+-- 0. Idempotent column & index helpers
 --
--- MySQL has no CREATE INDEX IF NOT EXISTS. This procedure adds an index only
--- when it is absent, so re-running the whole script is a no-op rather than an
--- "1061 Duplicate key name" failure.
+-- MySQL has no CREATE INDEX IF NOT EXISTS or ALTER TABLE ADD COLUMN IF NOT EXISTS
+-- in older versions. These procedures add columns/indexes only when absent, so
+-- re-running the whole script is a no-op rather than an error.
 -- -----------------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS akmiis_add_column_if_missing;
 DROP PROCEDURE IF EXISTS akmiis_add_index_if_missing;
 
 DELIMITER //
+
+CREATE PROCEDURE akmiis_add_column_if_missing(
+    IN p_table   VARCHAR(64),
+    IN p_column  VARCHAR(64),
+    IN p_col_def VARCHAR(255)
+)
+BEGIN
+    DECLARE v_table_exists INT DEFAULT 0;
+    DECLARE v_col_exists   INT DEFAULT 0;
+
+    SELECT COUNT(*) INTO v_table_exists
+    FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = p_table;
+
+    IF v_table_exists > 0 THEN
+        SELECT COUNT(*) INTO v_col_exists
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = p_table AND COLUMN_NAME = p_column;
+
+        IF v_col_exists = 0 THEN
+            SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_col_def);
+            PREPARE stmt FROM @ddl;
+            EXECUTE stmt;
+            DEALLOCATE PREPARE stmt;
+            SELECT CONCAT('ADDED COLUMN ', p_table, '.', p_column) AS result;
+        ELSE
+            SELECT CONCAT('EXISTS COLUMN ', p_table, '.', p_column) AS result;
+        END IF;
+    ELSE
+        SELECT CONCAT('SKIP table ', p_table, ' not found') AS result;
+    END IF;
+END //
+
 CREATE PROCEDURE akmiis_add_index_if_missing(
     IN p_table   VARCHAR(64),
     IN p_index   VARCHAR(64),
@@ -39,14 +73,15 @@ BEGIN
             PREPARE stmt FROM @ddl;
             EXECUTE stmt;
             DEALLOCATE PREPARE stmt;
-            SELECT CONCAT('ADDED  ', p_table, '.', p_index) AS result;
+            SELECT CONCAT('ADDED INDEX ', p_table, '.', p_index) AS result;
         ELSE
-            SELECT CONCAT('EXISTS ', p_table, '.', p_index) AS result;
+            SELECT CONCAT('EXISTS INDEX ', p_table, '.', p_index) AS result;
         END IF;
     ELSE
-        SELECT CONCAT('SKIP   table ', p_table, ' not found') AS result;
+        SELECT CONCAT('SKIP table ', p_table, ' not found') AS result;
     END IF;
 END //
+
 DELIMITER ;
 
 
@@ -59,8 +94,9 @@ DELIMITER ;
 -- ::startJob() claims with SELECT ... FOR UPDATE over the active rows so two
 -- operators cannot start overlapping runs.
 --
--- Equivalent to migration 2026_08_17_000010_create_tool_jobs_table.php — run
--- either this block or `php artisan migrate`, not both.
+-- Equivalent to migrations:
+-- - 2026_08_17_000010_create_tool_jobs_table.php
+-- - 2026_08_18_000010_add_worker_claim_to_tool_jobs.php
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `tool_jobs` (
     `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -74,12 +110,21 @@ CREATE TABLE IF NOT EXISTS `tool_jobs` (
     `summary`         LONGTEXT        NULL,
     `user_id`         BIGINT UNSIGNED NULL,
     `organization_id` BIGINT          NULL,
+    `locked_by`       VARCHAR(64)     NULL,
+    `locked_at`       DATETIME        NULL,
     `created_at`      TIMESTAMP       NULL DEFAULT NULL,
     `updated_at`      TIMESTAMP       NULL DEFAULT NULL,
     PRIMARY KEY (`id`),
     KEY `tool_jobs_tool_status_index` (`tool`, `status`),
     KEY `tool_jobs_created_at_index` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Ensure worker claim columns exist even if tool_jobs was created by an older script
+CALL akmiis_add_column_if_missing('tool_jobs', 'locked_by', 'VARCHAR(64) NULL AFTER `organization_id`');
+CALL akmiis_add_column_if_missing('tool_jobs', 'locked_at', 'DATETIME NULL AFTER `locked_by`');
+
+-- Ensure claim index exists
+CALL akmiis_add_index_if_missing('tool_jobs', 'tool_jobs_status_locked_at_index', '`status`, `locked_at`');
 
 
 -- -----------------------------------------------------------------------------
@@ -106,6 +151,8 @@ CALL akmiis_add_index_if_missing('activity_logs', 'activity_logs_resource_type_c
 -- The undo engine looks an entry up by (log_id, resource_type).
 CALL akmiis_add_index_if_missing('activity_logs', 'activity_logs_log_id_resource_type_index', '`log_id`, `resource_type`');
 
+-- Clean up helper procedures
+DROP PROCEDURE IF EXISTS akmiis_add_column_if_missing;
 DROP PROCEDURE IF EXISTS akmiis_add_index_if_missing;
 
 
@@ -160,16 +207,17 @@ WHERE TABLE_SCHEMA = DATABASE()
       'activity_logs_resource_type_created_at_index',
       'activity_logs_log_id_resource_type_index',
       'tool_jobs_tool_status_index',
-      'tool_jobs_created_at_index'
+      'tool_jobs_created_at_index',
+      'tool_jobs_status_locked_at_index'
   )
 GROUP BY TABLE_NAME, INDEX_NAME
 ORDER BY TABLE_NAME, INDEX_NAME;
 
--- 4c. Does tool_jobs exist with the expected shape?
-SELECT COUNT(*) AS tool_jobs_columns
+-- 4c. Does tool_jobs exist with the expected 14 columns?
+SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT
 FROM information_schema.COLUMNS
-WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tool_jobs';
--- Expect: 12
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tool_jobs'
+ORDER BY ORDINAL_POSITION;
 
 -- 4d. Are there RADIUS servers for the tool to target?
 SELECT id, ssl_type, ip, port, organization_id
@@ -180,3 +228,10 @@ ORDER BY id;
 SELECT id, sub_domain, CASE WHEN token IS NULL OR token = '' THEN 'MISSING' ELSE 'SET' END AS token_state
 FROM smart_olt
 LIMIT 1;
+
+-- 4f. Check if any stuck/stale jobs exist in tool_jobs
+SELECT id, tool, type, status, current, total, locked_by, locked_at, updated_at
+FROM tool_jobs
+ORDER BY id DESC
+LIMIT 10;
+

@@ -149,6 +149,13 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     const [customerAutoOpenAccountNo, setCustomerAutoOpenAccountNo] = useState('');
     const [customerAutoOpenPayModal, setCustomerAutoOpenPayModal] = useState(false);
     const [planInitialSearch, setPlanInitialSearch] = useState('');
+    // Which record a bell notification asked to open, per section. Header already
+    // passes the record's id as the `extra` argument; these carry it to the list page,
+    // which opens the matching row once it has loaded.
+    const [jobOrderAutoOpenId, setJobOrderAutoOpenId] = useState('');
+    const [applicationAutoOpenId, setApplicationAutoOpenId] = useState('');
+    const [serviceOrderAutoOpenId, setServiceOrderAutoOpenId] = useState('');
+    const [revertAutoOpenId, setRevertAutoOpenId] = useState('');
     const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
         try {
             const authData = localStorage.getItem('authData');
@@ -357,7 +364,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
             case 'group-management':
                 return <GroupManagement />;
             case 'application-management':
-                return <ApplicationManagement onNavigate={handleSectionChange} />;
+                return <ApplicationManagement onNavigate={handleSectionChange} autoOpenApplicationId={applicationAutoOpenId} />;
             case 'customer':
                 return <Customer initialSearchQuery={customerInitialSearch} autoOpenAccountNo={customerAutoOpenAccountNo} />;
             case 'transaction-list':
@@ -365,15 +372,15 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                     <TransactionList onNavigate={(section, search) => handleSectionChange(section, search)} />
                 );
             case 'transactions-revert':
-                return <TransactionsRevert />;
+                return <TransactionsRevert autoOpenRevertId={revertAutoOpenId} />;
             case 'payment-portal':
                 return <PaymentPortal />;
             case 'job-order':
-                return <JobOrder />;
+                return <JobOrder autoOpenJobOrderId={jobOrderAutoOpenId} />;
             case 'work-order':
                 return <WorkOrder />;
             case 'service-order':
-                return <ServiceOrder />;
+                return <ServiceOrder autoOpenServiceOrderId={serviceOrderAutoOpenId} />;
             case 'reports':
                 return <Reports />;
             case 'commission':
@@ -469,6 +476,14 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
             setCustomerAutoOpenAccountNo(extra || '');
         } else if (section === 'plan-list') {
             setPlanInitialSearch(extra || '');
+        } else if (section === 'job-order') {
+            setJobOrderAutoOpenId(extra || '');
+        } else if (section === 'application-management') {
+            setApplicationAutoOpenId(extra || '');
+        } else if (section === 'service-order') {
+            setServiceOrderAutoOpenId(extra || '');
+        } else if (section === 'transactions-revert') {
+            setRevertAutoOpenId(extra || '');
         }
 
         if (window.innerWidth < 768) {
