@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Check, ChevronDown, ChevronRight, Layers, Loader2, MapPin, Search, X, ChevronLeft } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Loader2, MapPin, Search, X, ChevronLeft } from 'lucide-react';
 import AddLcpNapLocationModal from '../modals/AddLcpNapLocationModal';
 import LcpNapLocationDetails from '../components/LcpNapLocationDetails';
 import { GOOGLE_MAPS_API_KEY } from '../config/maps';
@@ -52,123 +52,6 @@ interface ApiResponse<T = any> {
   message?: string;
 }
 
-/**
- * Maximum pins an LP may contribute before its markers collapse into a single cluster
- * badge. Operator-adjustable from the map toolbar; this is the default it starts on.
- *
- * 0 means every LP clusters, however few pins it has — the map opens fully grouped by
- * LP and expands on demand, which is what keeps a country-wide view readable. The
- * comparison is `count > limit`, so 0 is a real setting and not "clustering off".
- */
-const DEFAULT_CLUSTER_LIMIT = 0;
-
-/** Palette for cluster badges — one stable colour per LP, so an LP looks the same each visit. */
-const CLUSTER_COLORS = ['#7c3aed', '#2563eb', '#0891b2', '#059669', '#d97706', '#dc2626', '#db2777', '#4f46e5'];
-
-const clusterColorFor = (lpName: string): string => {
-  let hash = 0;
-  for (let i = 0; i < lpName.length; i += 1) {
-    hash = (hash * 31 + lpName.charCodeAt(i)) >>> 0;
-  }
-  return CLUSTER_COLORS[hash % CLUSTER_COLORS.length];
-};
-
-/** The badge is an inline SVG data URI, so an LP name goes in without a marker library. */
-const escapeXml = (value: string): string =>
-  value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-
-/**
- * The digits of an LCP name, and nothing else.
- *
- * Field naming is not consistent — the same LCP turns up as `LCP-001`, `LP 001`,
- * `LCP#001` and `LP-001` depending on who typed it — and at map zoom the prefix is
- * both the widest part of the badge and the least informative, since every pin on the
- * screen carries the same one. Reducing to `001` is what makes a cluster readable
- * without opening it, and it makes the differently-typed spellings of one LCP render
- * identically.
- *
- * The first run of digits is taken verbatim, so leading zeros survive: `LCP-024`
- * reads `024`, not `24`. A name with no digits at all keeps its text with the prefix
- * stripped, because showing nothing would be worse than showing an odd label.
- *
- * Shared verbatim with the mobile map so both surfaces badge an LCP the same way.
- */
-export const lcpBadgeLabel = (lcpName: string): string => {
-  const name = String(lcpName ?? '').trim();
-  const digits = name.match(/\d+/);
-
-  if (digits) return digits[0];
-
-  const stripped = name.replace(/^\s*(lcp|lp)\s*[-–—_#:.]*\s*/i, '').trim();
-  return stripped || name || '—';
-};
-
-/**
- * Badge geometry — kept in step with the mobile map, so the two surfaces match.
- *
- * A solid disc inside a translucent halo, carrying the LCP's number. It is the shape
- * the Subscriber Map already uses, so the two maps in the product read as one family,
- * and the halo is what separates a badge from the map underneath it at any zoom.
- *
- * These constants are duplicated in `MOBILEAPP/frontend/src/pages/LcpNapLocation.tsx`
- * rather than shared — the two apps have no common module — and the badge has to be
- * pixel-identical on a phone and on a desk. Change one, change the other.
- */
-
-/** Point size of the digits inside the disc. */
-const BADGE_TEXT_SIZE = 14;
-
-/** Thickness of the halo around the disc, per side. */
-const BADGE_HALO = 5;
-
-/** The solid disc: wide enough for the digits, never smaller than a comfortable target. */
-const clusterInnerSize = (label: string): number =>
-  Math.max(32, Math.ceil(Math.max(1, label.length) * 9 + 14));
-
-/** The full canvas, disc plus halo on every side. */
-const clusterOuterSize = (label: string): number => clusterInnerSize(label) + BADGE_HALO * 2;
-
-/**
- * The cluster badge, as an inline SVG data URI.
- *
- * `count` is no longer drawn — the badge carries the LCP's number alone — but it stays
- * in the signature because the marker's hover title reports it, and callers already
- * pass it.
- */
-const createClusterIcon = (lpName: string, count: number): google.maps.Icon => {
-  const color = clusterColorFor(lpName);
-  const trimmed = lcpBadgeLabel(lpName);
-  const label = escapeXml(trimmed);
-
-  const size = clusterOuterSize(trimmed);
-  const inner = clusterInnerSize(trimmed);
-  const center = size / 2;
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
-    // The halo: the disc's own hue at low opacity, legible over light and dark basemaps.
-    `<circle cx="${center}" cy="${center}" r="${center}" fill="${color}" fill-opacity="0.35"/>` +
-    `<circle cx="${center}" cy="${center}" r="${inner / 2}" fill="${color}"/>` +
-    // Baseline offset by a fraction of the point size rather than `dominant-baseline`,
-    // which Safari and older Chrome disagree about — and which mobile cannot use at all.
-    `<text x="${center}" y="${center + BADGE_TEXT_SIZE * 0.35}" text-anchor="middle" ` +
-    `font-family="Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="${BADGE_TEXT_SIZE}" ` +
-    `font-weight="700" fill="#ffffff">${label}</text>` +
-    '</svg>';
-
-  return {
-    url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
-    scaledSize: new google.maps.Size(size, size),
-    anchor: new google.maps.Point(center, center),
-  };
-};
-
-
-
 const LcpNapLocation: React.FC = () => {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [isMobile, setIsMobile] = useState<boolean>(window.innerWidth < 768);
@@ -202,9 +85,26 @@ const LcpNapLocation: React.FC = () => {
   const [pinCoords, setPinCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [pinnedCoordinates, setPinnedCoordinates] = useState<string | null>(null);
 
-  // Clustering by LP.
-  const [clusterLimit, setClusterLimit] = useState<number>(DEFAULT_CLUSTER_LIMIT);
-  const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
+  /**
+   * Cap on how many pins are drawn at once, matching the GOWISER map.
+   *
+   * Kept as a string so the input can be cleared while typing; parsed with a
+   * fallback at the point of use.
+   */
+  const [pinLimit, setPinLimit] = useState<string>('25');
+
+  /**
+   * Current map viewport, refreshed on Google Maps' `idle` event.
+   *
+   * Needed so the cap keeps the pins NEAREST to wherever the user is looking
+   * rather than an arbitrary first-N of the dataset — pan somewhere new and the
+   * pins there load in.
+   */
+  const [mapViewport, setMapViewport] = useState<{
+    center: { lat: number; lng: number };
+    bounds: { north: number; south: number; east: number; west: number } | null;
+  } | null>(null);
+
   const [displayedLocations, setDisplayedLocations] = useState<LocationMarker[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState<number>(256);
   const [isResizingSidebar, setIsResizingSidebar] = useState<boolean>(false);
@@ -225,16 +125,60 @@ const LcpNapLocation: React.FC = () => {
   const sidebarStartWidthRef = useRef<number>(0);
   const searchMarkerRef = useRef<google.maps.Marker | null>(null);
   const allMarkersMapRef = useRef<Map<number, google.maps.Marker>>(new Map());
-  const clusterMarkersRef = useRef<Map<string, google.maps.Marker>>(new Map());
   const pinMarkerRef = useRef<google.maps.Marker | null>(null);
-  /**
-   * Set when a cluster has just been expanded, so the marker re-render that follows
-   * leaves the camera alone — the click handler has already framed that LP's children
-   * and a blanket re-fit would immediately pull back out again.
-   */
-  const suppressFitRef = useRef<boolean>(false);
   const [isDataLoaded, setIsDataLoaded] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+
+  /**
+   * The pins actually drawn on the map, after the limit is applied.
+   *
+   * Mirrors the GOWISER map: start from the active set (all markers, or just the
+   * selected LCP/NAP group, which is what `displayedLocations` already holds),
+   * cull to the viewport plus a 25% buffer, then keep only the N closest to the
+   * map centre.
+   *
+   * Distance uses a plain lat/lng delta rather than a great-circle calculation —
+   * this only needs a relative ordering over a few kilometres, and it avoids
+   * thousands of trig calls on every pan.
+   */
+  const visibleLocations = React.useMemo(() => {
+    const active = displayedLocations;
+    const limit = Math.max(1, parseInt(pinLimit, 10) || 25);
+
+    // Before the first `idle` there is no viewport to measure against, so fall
+    // back to a plain cap instead of rendering everything.
+    if (!mapViewport) return active.slice(0, limit);
+
+    const { center, bounds } = mapViewport;
+
+    let candidates = active;
+    if (bounds) {
+      const latBuffer = (bounds.north - bounds.south) * 0.25;
+      const lngBuffer = (bounds.east - bounds.west) * 0.25;
+
+      candidates = active.filter(m =>
+        m.latitude >= bounds.south - latBuffer &&
+        m.latitude <= bounds.north + latBuffer &&
+        m.longitude >= bounds.west - lngBuffer &&
+        m.longitude <= bounds.east + lngBuffer
+      );
+
+      // Nothing in view (the user panned away from every pin): fall back to the
+      // nearest ones overall so the map is never mysteriously empty.
+      if (candidates.length === 0) candidates = active;
+    }
+
+    if (candidates.length <= limit) return candidates;
+
+    return candidates
+      .map(m => ({
+        m,
+        d: Math.abs(m.latitude - center.lat) + Math.abs(m.longitude - center.lng),
+      }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, limit)
+      .map(x => x.m);
+  }, [displayedLocations, pinLimit, mapViewport]);
 
   const filteredMarkers = React.useMemo(() => {
     return markers.filter(m => {
@@ -352,22 +296,30 @@ const LcpNapLocation: React.FC = () => {
   }, [isMapReady, isDataLoaded, filteredMarkers]);
 
   /**
-   * The single place markers get drawn.
+   * Frame the FULL active set whenever the selection changes.
    *
-   * Everything that changes what should be on the map — the LP selection, the cluster
-   * limit, an expanded cluster — routes through here, so clustering is applied once and
-   * the callers do not each have to remember to re-render.
+   * Framing the capped set here would zoom to an arbitrary first-N instead of the
+   * real coverage area. The cap is applied by the effect below, once the fitBounds
+   * that this triggers has settled and `idle` has reported a real viewport.
    */
   useEffect(() => {
     if (!isMapReady) return;
     updateMapMarkers(displayedLocations);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMapReady, displayedLocations, clusterLimit, expandedClusters]);
+  }, [isMapReady, displayedLocations]);
 
-  // A different LP selection or a changed limit invalidates which clusters were opened.
+  /**
+   * Re-attach the displayed pins whenever the limited set changes — a pan, a zoom
+   * or a new limit value.
+   *
+   * Never refits the camera (see updateMapMarkers): doing so here would fight the
+   * user's own panning and loop back through `idle`.
+   */
   useEffect(() => {
-    setExpandedClusters(new Set());
-  }, [selectedLcpNapId, clusterLimit]);
+    if (!isMapReady) return;
+    updateMapMarkers(visibleLocations, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMapReady, visibleLocations]);
 
   useEffect(() => {
     if (!isResizingSidebar) return;
@@ -485,6 +437,27 @@ const LcpNapLocation: React.FC = () => {
       mapInstanceRef.current = map;
       autocompleteServiceRef.current = new google.maps.places.AutocompleteService();
       placesServiceRef.current = new google.maps.places.PlacesService(map);
+
+      // Recompute which pins are nearest whenever the camera settles, so panning
+      // to a new area loads that area's pins within the configured limit.
+      map.addListener('idle', () => {
+        const center = map.getCenter();
+        const bounds = map.getBounds();
+        if (!center) return;
+
+        setMapViewport({
+          center: { lat: center.lat(), lng: center.lng() },
+          bounds: bounds
+            ? {
+                north: bounds.getNorthEast().lat(),
+                east: bounds.getNorthEast().lng(),
+                south: bounds.getSouthWest().lat(),
+                west: bounds.getSouthWest().lng(),
+              }
+            : null,
+        });
+      });
+
       setIsMapReady(true);
     } catch (error) {
       console.error('Error initializing map:', error);
@@ -663,8 +636,6 @@ const LcpNapLocation: React.FC = () => {
 
   const clearMarkers = () => {
     allMarkersMapRef.current.forEach(marker => marker.setMap(null));
-    clusterMarkersRef.current.forEach(marker => marker.setMap(null));
-    clusterMarkersRef.current.clear();
     if (searchMarkerRef.current) {
       searchMarkerRef.current.setMap(null);
       searchMarkerRef.current = null;
@@ -687,42 +658,24 @@ const LcpNapLocation: React.FC = () => {
   };
 
   /**
-   * Draw the given locations, grouping each LP that exceeds the cluster limit into one
-   * badge instead of its individual pins.
+   * Draw the given locations, hiding every other pin in the pool.
    *
-   * An LP is the unit of clustering — not a distance radius — because that is how the
-   * field team reasons about the plant: everything hanging off one LP is one thing to
-   * visit. An LP at or under the limit always draws its real pins, so a small LP is
-   * never hidden behind a badge it does not need. An LP the operator has already
-   * expanded stays expanded until the view or the limit changes.
+   * Markers are created once by initializeAllMarkers and merely attached/detached
+   * here, so panning shows different pins rather than rebuilding them.
+   *
+   * `shouldFitBounds` is false for updates driven by the pin limit: fitBounds moves
+   * the viewport, which fires `idle`, which recomputes the limited set, which would
+   * call this again — a loop that also fights the operator's own panning.
    */
-  const updateMapMarkers = (locations: LocationMarker[]) => {
+  const updateMapMarkers = (locations: LocationMarker[], shouldFitBounds: boolean = true) => {
     if (!mapInstanceRef.current || !window.google?.maps) return;
 
-    const groups = new Map<string, LocationMarker[]>();
-    locations.forEach(location => {
-      const lpName = location.lcp_name || 'Others';
-      const existing = groups.get(lpName);
-      if (existing) existing.push(location);
-      else groups.set(lpName, [location]);
-    });
-
-    const individualIds = new Set<number>();
-    const clustered: Array<{ lpName: string; locations: LocationMarker[] }> = [];
-
-    groups.forEach((groupLocations, lpName) => {
-      if (groupLocations.length > clusterLimit && !expandedClusters.has(lpName)) {
-        clustered.push({ lpName, locations: groupLocations });
-      } else {
-        groupLocations.forEach(location => individualIds.add(location.id));
-      }
-    });
-
+    const locationIds = new Set(locations.map(l => l.id));
     const bounds = new google.maps.LatLngBounds();
     let hasVisibleMarkers = false;
 
     allMarkersMapRef.current.forEach((marker, id) => {
-      if (individualIds.has(id)) {
+      if (locationIds.has(id)) {
         marker.setMap(mapInstanceRef.current);
         const pos = marker.getPosition();
         if (pos) bounds.extend(pos);
@@ -732,88 +685,12 @@ const LcpNapLocation: React.FC = () => {
       }
     });
 
-    syncClusterMarkers(clustered, bounds, () => { hasVisibleMarkers = true; });
-
-    // A freshly expanded cluster has already framed itself; re-fitting here would undo it.
-    if (suppressFitRef.current) {
-      suppressFitRef.current = false;
-      return;
-    }
-
-    if (hasVisibleMarkers && locations.length > 0) {
+    if (shouldFitBounds && hasVisibleMarkers && locations.length > 0) {
       mapInstanceRef.current.fitBounds(bounds, { top: 50, right: 50, bottom: 50, left: 50 });
       if (locations.length === 1) {
         mapInstanceRef.current.setZoom(18);
       }
     }
-  };
-
-  /** Reconcile the cluster badges on the map against the groups that should be clustered. */
-  const syncClusterMarkers = (
-    clustered: Array<{ lpName: string; locations: LocationMarker[] }>,
-    bounds: google.maps.LatLngBounds,
-    markVisible: () => void
-  ) => {
-    if (!mapInstanceRef.current || !window.google?.maps) return;
-
-    const wanted = new Set(clustered.map(group => group.lpName));
-
-    // Retire badges for LPs that are no longer clustered.
-    clusterMarkersRef.current.forEach((marker, lpName) => {
-      if (!wanted.has(lpName)) {
-        marker.setMap(null);
-        clusterMarkersRef.current.delete(lpName);
-      }
-    });
-
-    clustered.forEach(({ lpName, locations: groupLocations }) => {
-      const centroid = groupLocations.reduce(
-        (acc, location) => ({ lat: acc.lat + location.latitude, lng: acc.lng + location.longitude }),
-        { lat: 0, lng: 0 }
-      );
-      const position = {
-        lat: centroid.lat / groupLocations.length,
-        lng: centroid.lng / groupLocations.length,
-      };
-
-      // Rebuilt rather than repositioned: the badge encodes the child count, so a
-      // changed count means a new icon anyway.
-      const existing = clusterMarkersRef.current.get(lpName);
-      if (existing) existing.setMap(null);
-
-      const marker = new google.maps.Marker({
-        position,
-        map: mapInstanceRef.current,
-        icon: createClusterIcon(lpName, groupLocations.length),
-        title: `${lpName} — ${groupLocations.length} LCP/NAP locations. Click to expand.`,
-        zIndex: 1000,
-      });
-
-      marker.addListener('click', () => expandCluster(lpName, groupLocations));
-
-      clusterMarkersRef.current.set(lpName, marker);
-      bounds.extend(position);
-      markVisible();
-    });
-  };
-
-  /** Zoom to the LP's own children and let them draw individually from here on. */
-  const expandCluster = (lpName: string, groupLocations: LocationMarker[]) => {
-    if (!mapInstanceRef.current || groupLocations.length === 0) return;
-
-    const bounds = new google.maps.LatLngBounds();
-    groupLocations.forEach(location => {
-      bounds.extend({ lat: location.latitude, lng: location.longitude });
-    });
-
-    suppressFitRef.current = true;
-    mapInstanceRef.current.fitBounds(bounds, { top: 60, right: 60, bottom: 60, left: 60 });
-
-    setExpandedClusters(prev => {
-      const next = new Set(prev);
-      next.add(lpName);
-      return next;
-    });
   };
 
   const handleLcpNapSelect = (lcpName: string) => {
@@ -1306,28 +1183,34 @@ const LcpNapLocation: React.FC = () => {
               className="absolute inset-0 w-full h-full z-0"
             />
 
-            {/* Cluster size control. Sits out of the way top-right until an LP is big
-                enough for it to matter. */}
+            {/* Pin limit — caps how many markers are drawn, keeping the ones closest
+                to the map centre. Mirrors the GOWISER map's control. Hidden while a
+                pin is being placed so it cannot be mistaken for part of that flow. */}
             {!isPlacingPin && (
               <div
                 className={`absolute top-3 right-3 z-[500] flex items-center gap-2 px-3 py-2 rounded-lg shadow-lg border text-xs ${
                   isDarkMode ? 'bg-gray-900/95 border-gray-700 text-gray-200' : 'bg-white/95 border-gray-200 text-gray-700'
                 }`}
               >
-                <Layers className="h-4 w-4 flex-shrink-0" style={{ color: colorPalette?.primary || '#7c3aed' }} />
-                <label htmlFor="lcpnap-cluster-limit" className="whitespace-nowrap">Cluster over</label>
+                <MapPin className="h-4 w-4 flex-shrink-0" style={{ color: colorPalette?.primary || '#7c3aed' }} />
+                <label htmlFor="lcpnap-pin-limit" className="whitespace-nowrap">Show</label>
                 <input
-                  id="lcpnap-cluster-limit"
-                  type="number"
-                  min={0}
-                  value={clusterLimit}
-                  onChange={(e) => setClusterLimit(Math.max(0, Number(e.target.value) || 0))}
-                  title="Maximum pins an LP may show before its markers collapse into one cluster badge. 0 clusters every LP."
-                  className={`w-16 px-2 py-1 rounded border text-xs ${
+                  id="lcpnap-pin-limit"
+                  type="text"
+                  inputMode="numeric"
+                  aria-label="Maximum pins to display"
+                  title="Maximum number of pins drawn on the map"
+                  placeholder="Limit"
+                  value={pinLimit}
+                  // Digits only, so the parse at point of use can never see junk.
+                  onChange={(e) => setPinLimit(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
+                  className={`w-16 px-2 py-1 rounded border text-xs text-center ${
                     isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'
                   }`}
                 />
-                <span className="whitespace-nowrap">pins per LP</span>
+                <span className="whitespace-nowrap">
+                  {visibleLocations.length.toLocaleString()} / {displayedLocations.length.toLocaleString()} pins
+                </span>
               </div>
             )}
 
