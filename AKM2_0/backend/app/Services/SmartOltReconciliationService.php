@@ -120,10 +120,51 @@ class SmartOltReconciliationService
      */
     public const AUTOMATION_OFFLINE_DAYS = 3;
 
+    /**
+     * Ceiling on `get_onu_full_status_info` calls the unattended sweep will make in
+     * one run.
+     *
+     * That endpoint costs one call per ONU and is the hardest-throttled thing on this
+     * API, so the sweep only ever spends it on ONUs it has never read before — see
+     * automateDiscovery(). On a settled estate the queue is empty and the phase costs
+     * nothing; the cap only bites on the first run after this shipped, or after a
+     * batch of new installs, and whatever it does not reach is picked up tomorrow.
+     */
+    public const AUTOMATION_MAX_DISCOVERY = 250;
+
+    /** Ceiling on billing router/modem SN writes applied in one unattended run. */
+    public const AUTOMATION_MAX_SN_UPDATES = 200;
+
     private const LOG_CHANNEL = 'smartoltrelated';
     private const LOG_PREFIX = 'SmartOLT_Reconciliation';
     private const CACHE_PREFIX = 'smartolt_tool:';
     private const CACHE_TTL = 21600; // 6h — inventory is re-synced by an explicit job
+
+    /**
+     * Cache keys that are never allowed to expire.
+     *
+     * `optical` holds the bridge MACs discovered by the per-ONU crawl, and that crawl
+     * is the most expensive call this service makes. Letting those MACs age out of a
+     * 6h window meant a later sweep had to re-crawl the estate to rediscover facts it
+     * already held — a MAC behind an ONU does not change on its own, and when it does
+     * the ONU is re-read explicitly by a rescan. So the entry is written with no
+     * expiry and mirrored into `smart_olt_cache`, which is what carries it across a
+     * cache flush, a worker restart, and the gap between the web process and cron.
+     *
+     * Inventory and status snapshots deliberately stay on CACHE_TTL: those describe
+     * live state, and going stale is the correct behaviour for them.
+     */
+    private const PERSISTENT_CACHE_KEYS = ['optical'];
+
+    /**
+     * ONUs crawled between flushes of the discovery phase's optical snapshot.
+     *
+     * One write per ONU would push the whole snapshot into `smart_olt_cache` on every
+     * iteration; one write at the end would lose the run's work if the process were
+     * killed mid-sweep. Flushing every batch bounds both.
+     */
+    private const DISCOVERY_FLUSH_EVERY = 25;
+
     private const INVENTORY_PAGE = 100;
     private const REQUEST_TIMEOUT = 45;
     private const SUBSCRIBER_CHUNK = 500;
@@ -2123,41 +2164,7 @@ class SmartOltReconciliationService
             try {
                 // Returns the previous serial when a write happened, null when the
                 // record already carried this serial and nothing was done.
-                $previousSn = DB::transaction(function () use ($tdId, $newSn, $scopeId): ?string {
-                    $current = DB::table('technical_details')
-                        ->where('id', $tdId)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($current === null) {
-                        throw new \RuntimeException("technical_details #{$tdId} no longer exists.");
-                    }
-
-                    // Out-of-scope target: refused, not written. Mirrors the scoping
-                    // loadSubscribers() applies when building the preview, so the step
-                    // can only ever write what the caller was allowed to see.
-                    if ($scopeId !== null) {
-                        $rowOrg = $current->organization_id === null ? null : (int) $current->organization_id;
-                        if ($rowOrg !== null && $rowOrg !== (int) $scopeId) {
-                            throw new \DomainException("technical_details #{$tdId} belongs to another organization.");
-                        }
-                    }
-
-                    $stored = trim((string) ($current->router_modem_sn ?? ''));
-
-                    if ($stored !== '' && $this->normalizeSerial($stored) === $this->normalizeSerial($newSn)) {
-                        return null;
-                    }
-
-                    DB::table('technical_details')
-                        ->where('id', $tdId)
-                        ->update([
-                            'router_modem_sn' => $newSn,
-                            'updated_at' => now(),
-                        ]);
-
-                    return $stored;
-                });
+                $previousSn = $this->applySnAlignment($tdId, $newSn, $scopeId);
 
                 if ($previousSn === null) {
                     $context['skipped'] = (int) ($context['skipped'] ?? 0) + 1;
@@ -2551,10 +2558,14 @@ class SmartOltReconciliationService
      *
      * @param array{
      *     offline_days?: int,
+     *     discovery?: bool,
      *     rename?: bool,
+     *     sn_alignment?: bool,
      *     cleanup?: bool,
      *     dry_run?: bool,
+     *     max_discovery?: int,
      *     max_renames?: int,
+     *     max_sn?: int,
      *     max_deletes?: int
      * } $options
      * @return array{success:int,failed:int,skipped:int,errors:array<int,mixed>,phases:array<string,mixed>}
@@ -2564,18 +2575,26 @@ class SmartOltReconciliationService
         $result = ['success' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => [], 'phases' => []];
 
         $offlineDays = max(1, (int) ($options['offline_days'] ?? self::AUTOMATION_OFFLINE_DAYS));
+        $doDiscovery = (bool) ($options['discovery'] ?? true);
         $doRename = (bool) ($options['rename'] ?? true);
+        $doSnAlignment = (bool) ($options['sn_alignment'] ?? true);
         $doCleanup = (bool) ($options['cleanup'] ?? true);
         $dryRun = (bool) ($options['dry_run'] ?? false);
+        $maxDiscovery = max(0, (int) ($options['max_discovery'] ?? self::AUTOMATION_MAX_DISCOVERY));
         $maxRenames = max(0, (int) ($options['max_renames'] ?? 500));
+        $maxSn = max(0, (int) ($options['max_sn'] ?? self::AUTOMATION_MAX_SN_UPDATES));
         $maxDeletes = max(0, (int) ($options['max_deletes'] ?? 100));
 
         $this->log('info', 'SmartOLT daily automation starting.', [
             'offline_days' => $offlineDays,
+            'discovery' => $doDiscovery,
             'rename' => $doRename,
+            'sn_alignment' => $doSnAlignment,
             'cleanup' => $doCleanup,
             'dry_run' => $dryRun,
+            'max_discovery' => $maxDiscovery,
             'max_renames' => $maxRenames,
+            'max_sn' => $maxSn,
             'max_deletes' => $maxDeletes,
         ]);
 
@@ -2618,12 +2637,27 @@ class SmartOltReconciliationService
             $doCleanup = false;
         }
 
-        // ---- Phase 3 & 4: MAC match and rename to the RADIUS username --------
+        // ---- Phase 3: one-time bridge-MAC discovery for un-crawled ONUs ------
+        // Deliberately before the rename phase: an ONU whose MAC is discovered here
+        // is matchable in the same run rather than waiting for the next one.
+        if ($doDiscovery) {
+            $result['phases']['discovery'] = $this->automateDiscovery($result, $dryRun, $maxDiscovery);
+        }
+
+        // ---- Phase 4: MAC match and rename to the RADIUS username ------------
         if ($doRename) {
             $result['phases']['rename'] = $this->automateRenames($result, $organizationId, $dryRun, $maxRenames);
         }
 
-        // ---- Phase 5: 3-day offline / LOS / PwrFail cleanup ------------------
+        // ---- Phase 5: adopt the SmartOLT serial as the billing router/modem SN -
+        // Runs after the rename phase because it is the second half of the same
+        // alignment: the MAC binds the ONU to a live session, the session's username
+        // binds it to one billing record, and only then is the serial copied across.
+        if ($doSnAlignment) {
+            $result['phases']['sn_alignment'] = $this->automateSnAlignment($result, $organizationId, $dryRun, $maxSn);
+        }
+
+        // ---- Phase 6: 3-day offline / LOS / PwrFail cleanup ------------------
         if ($doCleanup) {
             $result['phases']['cleanup'] = $this->automateCleanup($result, $organizationId, $offlineDays, $dryRun, $maxDeletes);
         }
@@ -2749,6 +2783,363 @@ class SmartOltReconciliationService
         $this->putCache('statuses', ['items' => $statuses, 'updated_at' => now()->toIso8601String()]);
 
         return ['success' => true, 'count' => count($statuses), 'rate_limited' => false, 'error' => ''];
+    }
+
+    /**
+     * Read optical power and bridge MACs for ONUs that have never been crawled.
+     *
+     * This is the phase the whole persistent MAC store exists for. Every other pass
+     * in this service matches an ONU to a subscriber through the bridge MAC sitting
+     * behind it, and the only way to learn that MAC is `get_onu_full_status_info`,
+     * which costs one call per ONU against the hardest quota on the API. Crawling the
+     * estate nightly to rediscover MACs that were already known made the sweep scale
+     * with the size of the estate instead of with the number of new installs.
+     *
+     * So the queue is exactly the ONUs the optical snapshot has no entry for. On a
+     * settled estate that is empty and this phase makes no calls at all; after a
+     * batch of installs it is the size of that batch. An operator who genuinely wants
+     * fresh readings for already-crawled ONUs still has the `optical_scan` job with
+     * `rescan`, which is unchanged — this phase is only ever additive.
+     *
+     * Idempotency: the queue is derived from what is missing, so a second run in the
+     * same night finds nothing left to do rather than repeating the first. Nothing is
+     * enqueued and no billing row is touched; the only write is the optical snapshot.
+     *
+     * @param array<string, mixed> $result
+     * @return array<string, mixed>
+     */
+    private function automateDiscovery(array &$result, bool $dryRun, int $maxDiscovery): array
+    {
+        $phase = [
+            'pending' => 0,
+            'crawled' => 0,
+            'with_macs' => 0,
+            'failed' => 0,
+            'rate_limited' => false,
+            'capped' => false,
+        ];
+
+        $inventory = $this->cachedInventory();
+        $optical = $this->cachedOptical();
+
+        // The un-crawled set: in the inventory, absent from the optical snapshot.
+        $queue = array_values(array_diff(array_keys($inventory['items']), array_keys($optical['items'])));
+        $phase['pending'] = count($queue);
+
+        if ($queue === []) {
+            $this->log('info', 'MAC discovery had nothing to crawl — every ONU already has a stored reading.', [
+                'inventory' => count($inventory['items']),
+                'stored' => count($optical['items']),
+            ]);
+
+            return $phase;
+        }
+
+        if ($maxDiscovery > 0 && count($queue) > $maxDiscovery) {
+            $phase['capped'] = true;
+            $queue = array_slice($queue, 0, $maxDiscovery);
+        } elseif ($maxDiscovery === 0) {
+            $phase['capped'] = true;
+            $queue = [];
+        }
+
+        $this->log('info', 'MAC discovery starting for un-crawled ONUs.', [
+            'pending' => $phase['pending'],
+            'this_run' => count($queue),
+            'stored' => count($optical['items']),
+            'dry_run' => $dryRun,
+        ]);
+
+        if ($dryRun || $queue === []) {
+            $result['skipped'] += count($queue);
+
+            return $phase;
+        }
+
+        // Readings held back until the next flush. Buffered rather than written
+        // straight into the snapshot so the flush can merge against whatever the
+        // store holds at that moment — see mergeOpticalReadings().
+        $fresh = [];
+
+        foreach ($queue as $externalId) {
+            $externalId = (string) $externalId;
+
+            try {
+                $response = $this->callSmartOlt('GET', 'onu/get_onu_full_status_info/' . rawurlencode($externalId));
+
+                // A quota stop ends the phase rather than grinding through the rest of
+                // the queue collecting refusals. What was read is already flushed
+                // below, and what was not is still missing tomorrow, so the next run
+                // resumes from the same place without a cursor.
+                if (!$response['success'] && $response['rate_limited']) {
+                    $phase['rate_limited'] = true;
+                    $result['errors'][] = 'MAC discovery stopped on the SmartOLT rate limit.';
+                    $this->log('warning', 'MAC discovery stopped on the SmartOLT rate limit.', [
+                        'crawled' => $phase['crawled'],
+                        'remaining' => $phase['pending'] - $phase['crawled'],
+                    ]);
+                    break;
+                }
+
+                if (!$response['success']) {
+                    $phase['failed']++;
+                    $result['failed']++;
+                    $result['errors'][] = ['external_id' => $externalId, 'error' => $response['error']];
+                    continue;
+                }
+
+                $payload = $response['data']['full_status_json'] ?? $response['data'];
+                $reading = $this->extractOptical($payload);
+
+                $fresh[$externalId] = [
+                    // Banding is downstream ONU RX only; olt_rx is carried for display
+                    // but never decides the signal band.
+                    'onu_rx' => $reading['onu_rx'],
+                    'olt_rx' => $reading['olt_rx'],
+                    // Alias of onu_rx, kept for readers written before olt_rx existed.
+                    'rx_power' => $reading['rx_power'],
+                    'tx_power' => $reading['tx_power'],
+                    'macs' => $reading['macs'],
+                    'checked_at' => now()->toIso8601String(),
+                ];
+
+                $phase['crawled']++;
+                $result['success']++;
+
+                if ($reading['macs'] !== []) {
+                    $phase['with_macs']++;
+                }
+
+                if (count($fresh) >= self::DISCOVERY_FLUSH_EVERY) {
+                    $this->mergeOpticalReadings($fresh);
+                    $fresh = [];
+                }
+            } catch (Throwable $e) {
+                $phase['failed']++;
+                $result['failed']++;
+                $result['errors'][] = ['external_id' => $externalId, 'error' => $e->getMessage()];
+                $this->log('error', 'MAC discovery failed for an ONU.', [
+                    'external_id' => $externalId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $this->mergeOpticalReadings($fresh);
+
+        $this->log('info', 'MAC discovery finished.', $phase);
+
+        return $phase;
+    }
+
+    /**
+     * Fold freshly crawled readings into the stored optical snapshot.
+     *
+     * Re-read at flush time rather than writing back the snapshot the caller started
+     * from. An operator-driven `optical_scan` can be crawling the same estate at the
+     * same moment, and a blind write of a minutes-old copy would drop every reading it
+     * discovered in between — each of which costs another throttled call to re-earn.
+     *
+     * Merging is additive and keyed by external id, so a re-flush of the same readings
+     * overwrites its own entries and adds nothing. The read-modify-write is still not
+     * atomic; what it buys is a window measured in one flush rather than one phase,
+     * which for an additive merge is the difference between a rare lost reading and a
+     * routine one.
+     *
+     * @param array<string, array<string, mixed>> $readings
+     */
+    private function mergeOpticalReadings(array $readings): void
+    {
+        if ($readings === []) {
+            return;
+        }
+
+        $optical = $this->cachedOptical();
+        $optical['items'] = array_merge($optical['items'], $readings);
+        $optical['updated_at'] = now()->toIso8601String();
+
+        $this->putCache('optical', $optical);
+    }
+
+    /**
+     * Adopt each matched ONU's SmartOLT serial as the subscriber's router/modem SN.
+     *
+     * The second half of the alignment the rename phase starts. The binding is the
+     * same one and in the same order — bridge MAC to a live PPPoE calling-station-id,
+     * that session's username to exactly one billing record — so a serial is only
+     * ever written onto a subscriber the OLT and RADIUS agree on. Matching on the ONU
+     * name was rejected for this pass: a misnamed ONU would write its serial onto the
+     * wrong subscriber, and unlike a rename that is a change to a billing record.
+     *
+     * Direction is one-way. SmartOLT reads the serial off the device, so it is the
+     * fact; `technical_details.router_modem_sn` is the copy that drifts when a modem
+     * is swapped and only one system is updated. Rows already carrying the serial are
+     * skipped, which is also what makes a second run in the same night a no-op.
+     *
+     * The only HTTP here happens while building the preview, before the loop. Each
+     * write is its own narrow transaction inside the loop, so one refused row cannot
+     * roll back the rest of the estate.
+     *
+     * @param array<string, mixed> $result
+     * @return array<string, mixed>
+     */
+    private function automateSnAlignment(array &$result, ?int $organizationId, bool $dryRun, int $maxUpdates): array
+    {
+        $phase = ['candidates' => 0, 'updated' => 0, 'skipped' => 0, 'blocked' => 0, 'failed' => 0, 'capped' => false];
+
+        try {
+            $preview = $this->getSnAlignmentPreview($organizationId);
+        } catch (Throwable $e) {
+            $result['failed']++;
+            $result['errors'][] = 'SN alignment: ' . $e->getMessage();
+            $this->log('error', 'SN alignment preview failed.', ['error' => $e->getMessage()]);
+
+            return $phase;
+        }
+
+        foreach ($preview['errors'] as $error) {
+            $result['errors'][] = 'RADIUS: ' . $error;
+        }
+
+        foreach ($preview['rows'] as $row) {
+            if (($row['eligible'] ?? false) !== true) {
+                continue;
+            }
+
+            $phase['candidates']++;
+
+            if ($phase['updated'] >= $maxUpdates) {
+                // Budget spent. Eligibility is recomputed from current state, so the
+                // remainder is simply found again tomorrow.
+                $phase['capped'] = true;
+                $phase['skipped']++;
+                $result['skipped']++;
+                continue;
+            }
+
+            $externalId = (string) ($row['external_id'] ?? '');
+            $tdId = (int) ($row['technical_detail_id'] ?? 0);
+            $newSn = trim((string) ($row['sn'] ?? ''));
+
+            if ($tdId <= 0 || $newSn === '') {
+                $phase['failed']++;
+                $result['failed']++;
+                $this->log('warning', 'SN alignment candidate is missing its target or serial.', [
+                    'external_id' => $externalId,
+                    'technical_detail_id' => $tdId,
+                ]);
+                continue;
+            }
+
+            if ($dryRun) {
+                $phase['skipped']++;
+                $result['skipped']++;
+                continue;
+            }
+
+            try {
+                $previousSn = $this->applySnAlignment($tdId, $newSn, $organizationId);
+
+                if ($previousSn === null) {
+                    $phase['skipped']++;
+                    $result['skipped']++;
+                    continue;
+                }
+
+                $phase['updated']++;
+                $result['success']++;
+
+                $this->recordLog(
+                    'align_router_sn',
+                    "Daily automation adopted SmartOLT serial '{$newSn}' as the router/modem SN for technical_details #{$tdId}.",
+                    $externalId,
+                    ['technical_detail_id' => $tdId, 'router_modem_sn' => $previousSn],
+                    ['technical_detail_id' => $tdId, 'router_modem_sn' => $newSn],
+                    true,
+                    [
+                        'source' => 'cron:smartolt-daily-automation',
+                        'matched_mac' => $row['calling_station_id'] ?? '',
+                        'radius_username' => $row['radius_username'] ?? '',
+                    ]
+                );
+            } catch (\DomainException $e) {
+                // Refused on scope, not broken — counted apart from genuine failures.
+                $phase['blocked']++;
+                $result['skipped']++;
+                $this->log('warning', 'SN alignment target is outside the run\'s organization.', [
+                    'external_id' => $externalId,
+                    'technical_detail_id' => $tdId,
+                    'organization_id' => $organizationId,
+                ]);
+            } catch (Throwable $e) {
+                $phase['failed']++;
+                $result['failed']++;
+                $result['errors'][] = ['external_id' => $externalId, 'error' => $e->getMessage()];
+                $this->log('error', 'Automated SN alignment write failed.', [
+                    'external_id' => $externalId,
+                    'technical_detail_id' => $tdId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $this->log('info', 'SN alignment phase finished.', $phase);
+
+        return $phase;
+    }
+
+    /**
+     * Write one router/modem SN, under a lock, inside its own transaction.
+     *
+     * Shared by the operator-driven `sn_alignment` job and the unattended phase so the
+     * two cannot drift apart on what a scoped write is allowed to touch.
+     *
+     * @return string|null The serial replaced, or null when the row already carried
+     *                     this serial and nothing was written.
+     *
+     * @throws \DomainException when the row belongs to another organization.
+     * @throws \RuntimeException when the row no longer exists.
+     */
+    private function applySnAlignment(int $tdId, string $newSn, ?int $scopeId): ?string
+    {
+        return DB::transaction(function () use ($tdId, $newSn, $scopeId): ?string {
+            $current = DB::table('technical_details')
+                ->where('id', $tdId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($current === null) {
+                throw new \RuntimeException("technical_details #{$tdId} no longer exists.");
+            }
+
+            // Out-of-scope target: refused, not written. Mirrors the scoping
+            // loadSubscribers() applies when building the preview, so a write can only
+            // ever land on a record the caller was allowed to see.
+            if ($scopeId !== null) {
+                $rowOrg = $current->organization_id === null ? null : (int) $current->organization_id;
+                if ($rowOrg !== null && $rowOrg !== (int) $scopeId) {
+                    throw new \DomainException("technical_details #{$tdId} belongs to another organization.");
+                }
+            }
+
+            $stored = trim((string) ($current->router_modem_sn ?? ''));
+
+            // Already aligned. Returning null here is what makes both callers
+            // idempotent: a re-run reports a skip instead of rewriting the row and
+            // logging a second audit entry for a change that did not happen.
+            if ($stored !== '' && $this->normalizeSerial($stored) === $this->normalizeSerial($newSn)) {
+                return null;
+            }
+
+            DB::table('technical_details')
+                ->where('id', $tdId)
+                ->update([
+                    'router_modem_sn' => $newSn,
+                    'updated_at' => now(),
+                ]);
+
+            return $stored;
+        });
     }
 
     /**
@@ -3906,11 +4297,38 @@ class SmartOltReconciliationService
     {
         $value = Cache::get(self::CACHE_PREFIX . $key);
 
-        if (!is_array($value) || !isset($value['items']) || !is_array($value['items'])) {
-            return ['items' => [], 'updated_at' => null];
+        if (is_array($value) && isset($value['items']) && is_array($value['items'])) {
+            return ['items' => $value['items'], 'updated_at' => $value['updated_at'] ?? null];
         }
 
-        return ['items' => $value['items'], 'updated_at' => $value['updated_at'] ?? null];
+        // DB fallback via smart_olt_cache, so the snapshot is shared between the web
+        // process, the CLI and cron rather than living in one process's cache store.
+        // For the persistent keys this is also what outlives a cache flush.
+        try {
+            $row = DB::table('smart_olt_cache')->where('cache_key', $key)->first();
+
+            if ($row !== null && !empty($row->data)) {
+                $decoded = json_decode($row->data, true);
+
+                if (is_array($decoded) && isset($decoded['items']) && is_array($decoded['items'])) {
+                    // Repopulate L1 on the same terms the key was written under.
+                    $this->writeCacheLayer($key, $decoded);
+
+                    return ['items' => $decoded['items'], 'updated_at' => $decoded['updated_at'] ?? null];
+                }
+            }
+        } catch (Throwable $e) {
+            // A missing or unreadable table is a degraded cache, not a failed sweep:
+            // the caller gets an empty snapshot and rebuilds it. Logged rather than
+            // swallowed, because silently re-crawling 4,000 ONUs every night is
+            // exactly the symptom this table exists to prevent.
+            $this->log('warning', 'smart_olt_cache read failed; falling back to an empty snapshot.', [
+                'cache_key' => $key,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return ['items' => [], 'updated_at' => null];
     }
 
     /**
@@ -3918,6 +4336,40 @@ class SmartOltReconciliationService
      */
     private function putCache(string $key, array $value): void
     {
+        $this->writeCacheLayer($key, $value);
+
+        // Persistent DB write so state is shared across web server, CLI, and cron.
+        // Keyed on cache_key, which carries a unique index, so a re-run overwrites the
+        // row it wrote last time instead of adding another.
+        try {
+            DB::table('smart_olt_cache')->updateOrInsert(
+                ['cache_key' => $key],
+                [
+                    'data' => json_encode($value),
+                    'updated_at' => now(),
+                ]
+            );
+        } catch (Throwable $e) {
+            $this->log('warning', 'smart_olt_cache write failed; this snapshot is in-process only.', [
+                'cache_key' => $key,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Write the framework-cache copy, with no expiry for the persistent keys.
+     *
+     * @param array<string, mixed> $value
+     */
+    private function writeCacheLayer(string $key, array $value): void
+    {
+        if (in_array($key, self::PERSISTENT_CACHE_KEYS, true)) {
+            Cache::forever(self::CACHE_PREFIX . $key, $value);
+
+            return;
+        }
+
         Cache::put(self::CACHE_PREFIX . $key, $value, self::CACHE_TTL);
     }
 

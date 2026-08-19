@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, Download, Gauge, HardDrive, History, Loader2, Network, PauseCircle,
-  RefreshCw, Router, Signal, Trash2, Undo2, UserCog, X, XCircle
+  Activity, AlertTriangle, ChevronDown, ChevronUp, Download, Gauge, HardDrive, History, Loader2,
+  Network, PauseCircle, RefreshCw, Router, Signal, Trash2, Undo2, UserCog, X, XCircle
 } from 'lucide-react';
 import { useDataGrid, type DataGridColumn, type DataGridFilter } from '../hooks/useDataGrid';
 import {
@@ -16,6 +16,8 @@ import {
 import {
   smartOltReconciliationService,
   DELETE_CONFIRMATION,
+  jobProgressPercent,
+  jobTypeLabel,
   type CleanupPreview,
   type JobType,
   type MacAlignmentPreview,
@@ -350,6 +352,16 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
   const [jobLog, setJobLog] = useState<string[]>([]);
   const [jobPaused, setJobPaused] = useState(false);
   /**
+   * Whether the running job is docked to the corner instead of held behind a modal.
+   *
+   * Only presentation: the sweep is driven by pollJob's timer and by the server-side
+   * drain, neither of which renders, so docking the progress card changes nothing
+   * about how the job advances. What it changes is that the operator can work the
+   * tables, filters and other tabs while a 4,000-ONU pass runs, instead of watching a
+   * backdrop that blocks the page for as long as the sweep takes.
+   */
+  const [isMinimized, setIsMinimized] = useState(false);
+  /**
    * True once this session has a poll attached.
    *
    * A ref, not state: nothing renders from it, and the reattach effect has to read the
@@ -546,6 +558,8 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
     async (type: JobType, options: Record<string, any> = {}) => {
       setJobLog([]);
       setJobPaused(false);
+      // A newly started job always opens expanded, whatever the last one was left as.
+      setIsMinimized(false);
       const result = await smartOltReconciliationService.startJob(type, options);
 
       if (!result.success || !result.job) {
@@ -1655,50 +1669,113 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
         )}
       </div>
 
-      {/* Stepwise job modal */}
+      {/* Stepwise job progress — full modal, or docked to the corner when minimized.
+          Both branches read the same job state and the same poll; minimizing only
+          drops the backdrop and the console, never the work. */}
       {job && (job.status === 'running' || jobPaused) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className={`w-full max-w-2xl rounded-xl border p-5 ${card}`}>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className={`text-base font-bold flex items-center gap-2 ${text}`}>
-                <Loader2 className={`w-4 h-4 ${jobPaused ? '' : 'animate-spin'}`} />
-                {job.type.replace(/_/g, ' ')}
-              </h3>
-              <span className={`text-xs ${muted}`}>
-                Step {job.current} of {job.total || '?'}
-              </span>
-            </div>
-
-            <div className={`h-2 rounded-full overflow-hidden mb-2 ${isDarkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
-              <div
-                className="h-full bg-gradient-to-r from-cyan-500 to-blue-600 transition-all duration-300"
-                style={{ width: `${job.total > 0 ? Math.min(100, (job.current / job.total) * 100) : 5}%` }}
-              />
-            </div>
-            <p className={`text-sm mb-4 ${muted}`}>{job.message}</p>
-
-            <div className={`rounded-lg border p-3 mb-4 h-48 overflow-y-auto font-mono text-[11px] ${isDarkMode ? 'bg-gray-950 border-gray-800 text-gray-400' : 'bg-gray-50 border-gray-200 text-gray-600'}`}>
-              {jobLog.length === 0 ? <span>Waiting for the first step…</span> : jobLog.map((line, index) => <div key={index}>{line}</div>)}
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
-              {/* Watching is a property of this screen, not of the job. The work runs
-                  server-side either way; only Cancel stops it. */}
-              {jobPaused ? (
-                <button onClick={startWatching} className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium">
-                  Watch
+        isMinimized ? (
+          <div className="fixed bottom-5 right-5 z-50 w-80 max-w-[calc(100vw-2.5rem)]">
+            <div className={`rounded-xl border shadow-2xl p-3 ${card}`}>
+              <div className="flex items-center gap-2 mb-2">
+                <Loader2 className={`w-4 h-4 shrink-0 ${jobPaused ? '' : 'animate-spin'}`} />
+                <span className={`text-xs font-bold truncate flex-1 min-w-0 ${text}`} title={jobTypeLabel(job.type)}>
+                  {jobTypeLabel(job.type)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setIsMinimized(false)}
+                  title="Expand"
+                  aria-label="Expand job progress"
+                  className={`p-1 rounded border ${card} ${text}`}
+                >
+                  <ChevronUp className="w-3.5 h-3.5" />
                 </button>
-              ) : (
-                <button onClick={stopWatching} className={`px-4 py-2 rounded-lg border text-sm ${card} ${text}`}>
-                  Stop watching
+                <button
+                  type="button"
+                  onClick={cancelJob}
+                  title="Cancel job"
+                  aria-label="Cancel job"
+                  className="p-1 rounded bg-red-600 hover:bg-red-500 text-white"
+                >
+                  <X className="w-3.5 h-3.5" />
                 </button>
-              )}
-              <button onClick={cancelJob} className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium">
-                Cancel job
-              </button>
+              </div>
+
+              <div className={`h-1.5 rounded-full overflow-hidden mb-1.5 ${isDarkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
+                <div
+                  className="h-full bg-gradient-to-r from-cyan-500 to-blue-600 transition-all duration-300"
+                  style={{ width: `${jobProgressPercent(job)}%` }}
+                />
+              </div>
+
+              <div className="flex items-baseline justify-between gap-2">
+                <p className={`text-[11px] truncate flex-1 min-w-0 ${muted}`} title={job.message}>{job.message}</p>
+                <span className={`text-[11px] font-medium tabular-nums shrink-0 ${muted}`}>
+                  {jobProgressPercent(job)}% · {job.current}/{job.total || '?'}
+                </span>
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+            <div className={`w-full max-w-2xl rounded-xl border p-5 ${card}`}>
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <h3 className={`text-base font-bold flex items-center gap-2 min-w-0 ${text}`}>
+                  <Loader2 className={`w-4 h-4 shrink-0 ${jobPaused ? '' : 'animate-spin'}`} />
+                  <span className="truncate">{jobTypeLabel(job.type)}</span>
+                </h3>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className={`text-xs ${muted}`}>
+                    Step {job.current} of {job.total || '?'}
+                  </span>
+                  {/* Sends the job to the corner dock. The sweep is unaffected — this
+                      is what lets an operator keep working through a long pass. */}
+                  <button
+                    type="button"
+                    onClick={() => setIsMinimized(true)}
+                    title="Minimize"
+                    aria-label="Minimize job progress"
+                    className={`p-1 rounded border ${card} ${text}`}
+                  >
+                    <ChevronDown className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className={`h-2 rounded-full overflow-hidden mb-2 ${isDarkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
+                <div
+                  className="h-full bg-gradient-to-r from-cyan-500 to-blue-600 transition-all duration-300"
+                  style={{ width: `${jobProgressPercent(job)}%` }}
+                />
+              </div>
+              <p className={`text-sm mb-4 ${muted}`}>{job.message}</p>
+
+              <div className={`rounded-lg border p-3 mb-4 h-48 overflow-y-auto font-mono text-[11px] ${isDarkMode ? 'bg-gray-950 border-gray-800 text-gray-400' : 'bg-gray-50 border-gray-200 text-gray-600'}`}>
+                {jobLog.length === 0 ? <span>Waiting for the first step…</span> : jobLog.map((line, index) => <div key={index}>{line}</div>)}
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                {/* Watching is a property of this screen, not of the job. The work runs
+                    server-side either way; only Cancel stops it. */}
+                <button onClick={() => setIsMinimized(true)} className={`px-4 py-2 rounded-lg border text-sm ${card} ${text}`}>
+                  Minimize
+                </button>
+                {jobPaused ? (
+                  <button onClick={startWatching} className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium">
+                    Watch
+                  </button>
+                ) : (
+                  <button onClick={stopWatching} className={`px-4 py-2 rounded-lg border text-sm ${card} ${text}`}>
+                    Stop watching
+                  </button>
+                )}
+                <button onClick={cancelJob} className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium">
+                  Cancel job
+                </button>
+              </div>
+            </div>
+          </div>
+        )
       )}
 
       {/* Permanent deletion confirmation */}

@@ -45,6 +45,44 @@ export interface ToolJob {
   updated_at: string | null;
 }
 
+/**
+ * What each job type is called on screen.
+ *
+ * Shared by the full progress modal and its minimized dock so the two cannot end up
+ * naming the same running job differently. `mac_discovery` and `optical_scan` are the
+ * same server-side step under two names, so they read identically here.
+ */
+export const JOB_TYPE_LABELS: Record<JobType, string> = {
+  smartolt_sync: 'ONU inventory sync',
+  radius_scan: 'ONU status sync',
+  optical_scan: 'Optical power & MAC discovery',
+  mac_discovery: 'Optical power & MAC discovery',
+  rename: 'ONU rename',
+  profile_sync: 'Profile push',
+  sn_alignment: 'Router/modem SN alignment',
+  delete: 'ONU unprovision',
+};
+
+/** The on-screen name for a job, falling back to the raw type for anything newer. */
+export function jobTypeLabel(type: JobType | string): string {
+  return JOB_TYPE_LABELS[type as JobType] ?? String(type).replace(/_/g, ' ');
+}
+
+/**
+ * Completion percentage, 0-100.
+ *
+ * A job whose total is not known yet shows a sliver rather than an empty bar — at
+ * that point work has started, and a bar reading zero while the console is already
+ * logging steps reads as stuck. Rounded so the bar and the number beside it agree.
+ */
+export function jobProgressPercent(job: Pick<ToolJob, 'current' | 'total'>): number {
+  if (!job.total || job.total <= 0) {
+    return 5;
+  }
+
+  return Math.min(100, Math.round((job.current / job.total) * 100));
+}
+
 export interface OnuRow {
   /** ONU-side and OLT-side optical readings; null where never measured. */
   onu_rx?: number | null;

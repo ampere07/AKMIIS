@@ -11,11 +11,18 @@ use Throwable;
 /**
  * The unattended nightly SmartOLT pass.
  *
- * Refreshes the ONU inventory and statuses, reads the live PPPoE sessions off every
- * configured RADIUS device, matches each ONU's bridge MAC to a session's
- * calling-station-id, renames matched ONUs to their subscriber's RADIUS username,
- * and unprovisions ONUs that have been offline, in LOS or in power failure for the
- * threshold and clear every safety guard.
+ * Refreshes the ONU inventory and statuses, discovers the bridge MAC of any ONU it
+ * has never read before, reads the live PPPoE sessions off every configured RADIUS
+ * device, matches each ONU's stored MAC to a session's calling-station-id, renames
+ * matched ONUs to their subscriber's RADIUS username, adopts the SmartOLT hardware
+ * serial as that subscriber's router/modem SN, and unprovisions ONUs that have been
+ * offline, in LOS or in power failure past the threshold and clear every safety guard.
+ *
+ * What makes it cheap. The per-ONU `get_onu_full_status_info` call is the hardest
+ * throttled thing on the SmartOLT API, and it is the only way to learn the MAC behind
+ * an ONU. Those MACs are stored indefinitely, so the discovery phase queues only ONUs
+ * with no stored reading: on a settled estate it makes no calls at all, and after a
+ * batch of installs it makes one per new ONU rather than one per ONU on the OLT.
  *
  * What makes it safe to run repeatedly. Nothing here is keyed off a cursor that a
  * second run could replay: every phase recomputes what is left to do from current
@@ -35,13 +42,17 @@ class SmartOltDailyAutomationCron extends Command
 {
     protected $signature = 'cron:smartolt-daily-automation
                             {--offline-days= : Consecutive offline/LOS/PwrFail days before an ONU may be removed}
+                            {--no-discovery : Skip the bridge-MAC discovery phase for un-crawled ONUs}
                             {--no-rename : Skip the MAC-match rename phase}
+                            {--no-sn-alignment : Skip adopting SmartOLT serials as billing router/modem SNs}
                             {--no-cleanup : Skip the deletion phase}
+                            {--max-discovery= : Ceiling on per-ONU status calls made to discover new MACs}
                             {--max-renames=500 : Ceiling on renames applied in one run}
+                            {--max-sn= : Ceiling on billing router/modem SN writes in one run}
                             {--max-deletes=100 : Ceiling on ONUs unprovisioned in one run}
                             {--dry-run : Report what would change without calling SmartOLT}';
 
-    protected $description = 'Sync SmartOLT ONUs, align ONU names to RADIUS usernames by MAC, and unprovision long-dark ONUs';
+    protected $description = 'Sync SmartOLT ONUs, discover new bridge MACs, align ONU names and router SNs, and unprovision long-dark ONUs';
 
     public function __construct(private SmartOltReconciliationService $service)
     {
@@ -54,14 +65,22 @@ class SmartOltDailyAutomationCron extends Command
         $started = microtime(true);
 
         $options = [
-            'offline_days' => $this->option('offline-days') !== null
+            'offline_days'  => $this->option('offline-days') !== null
                 ? (int) $this->option('offline-days')
                 : SmartOltReconciliationService::AUTOMATION_OFFLINE_DAYS,
-            'rename'      => !$this->option('no-rename'),
-            'cleanup'     => !$this->option('no-cleanup'),
-            'dry_run'     => (bool) $this->option('dry-run'),
-            'max_renames' => (int) $this->option('max-renames'),
-            'max_deletes' => (int) $this->option('max-deletes'),
+            'discovery'     => !$this->option('no-discovery'),
+            'rename'        => !$this->option('no-rename'),
+            'sn_alignment'  => !$this->option('no-sn-alignment'),
+            'cleanup'       => !$this->option('no-cleanup'),
+            'dry_run'       => (bool) $this->option('dry-run'),
+            'max_discovery' => $this->option('max-discovery') !== null
+                ? (int) $this->option('max-discovery')
+                : SmartOltReconciliationService::AUTOMATION_MAX_DISCOVERY,
+            'max_renames'   => (int) $this->option('max-renames'),
+            'max_sn'        => $this->option('max-sn') !== null
+                ? (int) $this->option('max-sn')
+                : SmartOltReconciliationService::AUTOMATION_MAX_SN_UPDATES,
+            'max_deletes'   => (int) $this->option('max-deletes'),
         ];
 
         $this->info('===========================================');
