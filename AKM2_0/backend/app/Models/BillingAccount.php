@@ -11,6 +11,17 @@ class BillingAccount extends Model
 
     protected $table = 'billing_accounts';
 
+    /**
+     * Is this generation_type value a prepaid one, in any accepted spelling?
+     *
+     * Compared on a lower-cased, letters-only basis so 'Prepaid', 'Pre Paid', 'PRE-PAID' and
+     * 'pre paid' all resolve the same way. NULL/unknown is treated as NOT prepaid.
+     */
+    public static function isPrepaidType(?string $generationType): bool
+    {
+        return preg_replace('/[^a-z]/', '', strtolower((string) $generationType)) === 'prepaid';
+    }
+
     protected $fillable = [
         'customer_id',
         'account_no',
