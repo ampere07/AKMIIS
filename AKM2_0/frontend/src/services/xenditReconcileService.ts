@@ -39,6 +39,13 @@ export interface XenditReconcileRow {
    * has no expiry column — so it stays null until Xendit has reported on the request.
    */
   created_at: string | null;
+  /**
+   * `created_at` pre-formatted by the backend as `YYYY-MM-DD HH:MM:SS`.
+   *
+   * The Date Created column displays this and sorts on `created_at`, so what the
+   * operator reads and what the table orders by can never drift apart.
+   */
+  date_created: string | null;
   updated_at: string | null;
   expiry_date: string | null;
   payment_date: string | null;

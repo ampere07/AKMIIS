@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, List, Router, DollarSign, Receipt, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck, ReceiptText } from 'lucide-react';
+import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, FileWarning, List, Router, DollarSign, Receipt, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck, ReceiptText } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
 import {
@@ -249,7 +249,11 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
         { id: 'mikrotik-radius-tool', label: 'Mikrotik Radius Tool', icon: Router, allowedRoles: ['superadmin', 'administrator', 'headtech'] },
         // Payment reconciliation settles real money against real accounts, so it is
         // deliberately not offered to HeadTechnician the way the network tools are.
-        { id: 'xendit-reconcile-tool', label: 'Xendit Reconciliation', icon: CreditCard, allowedRoles: ['superadmin', 'administrator'] }
+        { id: 'xendit-reconcile-tool', label: 'Xendit Reconciliation', icon: CreditCard, allowedRoles: ['superadmin', 'administrator'] },
+        // Billing reconciliation decides whether a subscriber is invoiced at all, so
+        // it sits with the money tools rather than the network ones and is closed to
+        // HeadTechnician for the same reason Xendit is.
+        { id: 'billing-reconcile-tool', label: 'Billing Reconcile', icon: FileWarning, allowedRoles: ['superadmin', 'administrator'] }
       ]
     },
     { id: 'settings', label: 'Settings', icon: Settings, allowedRoles: ['superadmin'] },

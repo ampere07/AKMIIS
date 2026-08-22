@@ -160,6 +160,12 @@ return [
             'replace_placeholders' => true,
         ],
 
+        'billingreconcile' => [
+            'driver' => 'single',
+            'path' => storage_path('logs/billingreconcile.log'),
+            'level' => env('LOG_LEVEL', 'debug'),
+        ],
+
         'radiusrelated' => [
             'driver' => 'single',
             'path' => storage_path('logs/radiusrelated.log'),

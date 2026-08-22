@@ -1,11 +1,11 @@
 import apiClient from '../config/api';
 
-export type SignalBand = 'optimal' | 'warning' | 'critical' | 'offline';
-
 /**
- * `optical_scan` is the per-ONU optical-power and bridge-MAC crawl — one API call
- * per ONU, and the endpoint SmartOLT throttles hardest, so it only ever runs as a
- * background job. `mac_discovery` is its original name, still accepted server-side.
+ * `optical_scan` is the per-ONU bridge-MAC crawl — one API call per ONU, and the
+ * endpoint SmartOLT throttles hardest, so it only ever runs as a background job.
+ * `mac_discovery` is its original name, still accepted server-side. The job type
+ * keeps the `optical_scan` spelling because rows already sitting in `tool_jobs`
+ * carry it; the crawl itself no longer reads optical power.
  */
 export type JobType =
   | 'smartolt_sync'
@@ -55,8 +55,8 @@ export interface ToolJob {
 export const JOB_TYPE_LABELS: Record<JobType, string> = {
   smartolt_sync: 'ONU inventory sync',
   radius_scan: 'ONU status sync',
-  optical_scan: 'Optical power & MAC discovery',
-  mac_discovery: 'Optical power & MAC discovery',
+  optical_scan: 'Bridge MAC discovery',
+  mac_discovery: 'Bridge MAC discovery',
   rename: 'ONU rename',
   profile_sync: 'Profile push',
   sn_alignment: 'Router/modem SN alignment',
@@ -84,9 +84,6 @@ export function jobProgressPercent(job: Pick<ToolJob, 'current' | 'total'>): num
 }
 
 export interface OnuRow {
-  /** ONU-side and OLT-side optical readings; null where never measured. */
-  onu_rx?: number | null;
-  olt_rx?: number | null;
   external_id: string;
   sn: string;
   name: string;
@@ -100,10 +97,40 @@ export interface OnuRow {
   status: string;
   last_status_change: string;
   days_offline: number | null;
-  rx_power: number | null;
-  tx_power: number | null;
-  signal: SignalBand;
-  signal_checked_at: string | null;
+  /** Colon-delimited bridge MAC, or '' where the ONU has never been crawled. */
+  mac_address: string;
+  mac_checked_at: string | null;
+}
+
+/**
+ * The fifteen figures the dashboard grid renders.
+ *
+ * The first nine come from the cached inventory, status and MAC snapshots and are
+ * always present. The last six describe work the alignment, profile and cleanup
+ * passes did, and are `null` until that pass has run at least once — "not computed
+ * yet" is not the same answer as "zero", and the grid shows which one it has.
+ */
+export interface SmartOltMetrics {
+  inventory: number;
+  authorized: number;
+  offline: number;
+  los: number;
+  pwrfail: number;
+  name_not_set: number;
+  named: number;
+  mac_cached: number;
+  pending_discovery: number;
+  radius_active: number | null;
+  matched_sessions: number | null;
+  rename_required: number | null;
+  already_correct: number | null;
+  address_updates: number | null;
+  delete_candidates: number | null;
+  computed_at: {
+    mac_alignment: string | null;
+    profile: string | null;
+    cleanup: string | null;
+  };
 }
 
 export interface SmartOltState {
@@ -112,10 +139,12 @@ export interface SmartOltState {
   inventory_count: number;
   inventory_synced_at: string | null;
   status_synced_at: string | null;
+  mac_synced_at: string | null;
+  mac_cached: number;
+  /** @deprecated Alias of `mac_cached`, kept while the old key is still served. */
   optical_checked: number;
   status_counts: Record<string, number>;
-  signal_counts: Record<SignalBand, number>;
-  thresholds: { optimal_above: number; critical_below: number };
+  metrics: SmartOltMetrics;
   active_job: ToolJob | null;
   rows: OnuRow[];
 }
@@ -281,17 +310,13 @@ export interface CleanupRow {
   last_status_change: string;
   days_offline: number | null;
   /**
-   * Both ends of the PON link, as of the last optical crawl.
+   * The bridge MAC discovered behind this ONU, colon-delimited.
    *
-   * `onu_rx` is what the subscriber's ONU hears from the OLT; `olt_rx` is what the
-   * OLT hears back. Null means never measured, not zero — an ONU the optical scan
-   * has not reached yet renders as a dash rather than as a reading of 0 dBm.
+   * Empty means "never crawled", not "this ONU has no MAC" — an ONU the discovery
+   * pass has not reached yet renders as a dash.
    */
-  onu_rx: number | null;
-  olt_rx: number | null;
-  /** Legacy alias of `onu_rx`, still served for readers written before `olt_rx`. */
-  rx_power: number | null;
-  optical_checked_at: string | null;
+  mac_address: string;
+  mac_checked_at: string | null;
   /**
    * What the billing and RADIUS guards said about removing this ONU.
    *
@@ -335,7 +360,7 @@ export interface JobResult extends ActionResult {
   job: ToolJob | null;
 }
 
-export interface OpticalResult {
+export interface MacDiscoveryResult {
   success: boolean;
   checked: number;
   remaining: number;
@@ -344,9 +369,10 @@ export interface OpticalResult {
     sn: string;
     name: string;
     status: string;
-    rx_power: number | null;
-    tx_power: number | null;
-    signal: SignalBand;
+    /** The MAC shown for this ONU: the first one discovered behind it. */
+    mac_address: string;
+    /** Every MAC discovered behind this ONU, colon-delimited. */
+    macs: string[];
     checked_at: string | null;
   }>;
   errors: string[];
@@ -380,8 +406,15 @@ export const smartOltReconciliationService = {
     return response.data.data;
   },
 
-  getOpticalPower: async (externalIds: string[] = [], limit = 25): Promise<OpticalResult> => {
-    const response = await apiClient.get<OpticalResult>(`${BASE}/optical-power`, {
+  /**
+   * Read the bridge MAC behind the named ONUs, or behind every ONU never crawled.
+   *
+   * One throttled SmartOLT call per ONU, so the sweep is capped server-side and the
+   * caller repeats until `remaining` reaches zero. The background `optical_scan` job
+   * is the usual way to run this over a whole estate.
+   */
+  discoverBridgeMacs: async (externalIds: string[] = [], limit = 25): Promise<MacDiscoveryResult> => {
+    const response = await apiClient.get<MacDiscoveryResult>(`${BASE}/mac-discovery`, {
       params: { external_ids: externalIds, limit },
     });
     return response.data;

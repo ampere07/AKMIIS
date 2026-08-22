@@ -6,8 +6,7 @@ import StaggeredInstallationFormModal from '../modals/StaggeredInstallationFormM
 import { useStaggeredPaymentContext, StaggeredInstallation } from '../contexts/StaggeredPaymentContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import BillingDetails from '../components/CustomerDetails';
-import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
-import { BillingDetailRecord } from '../types/billing';
+import { getCustomerDetail, CustomerDetailData, convertCustomerDataToBillingDetail } from '../services/customerDetailService';
 import pusher from '../services/pusherService';
 import apiClient from '../config/api';
 import SessionExpiredModal from '../components/SessionExpiredModal';
@@ -16,60 +15,6 @@ import { exportToCSV } from '../utils/exportUtils';
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   return result ? `rgba(${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)}, ${opacity})` : hex;
-};
-
-const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): BillingDetailRecord => {
-  return {
-    id: customerData.billingAccount?.accountNo || '',
-    applicationId: customerData.billingAccount?.accountNo || '',
-    customerName: customerData.fullName,
-    address: customerData.address,
-    status: customerData.billingAccount?.billingStatusId === 2 ? 'Active' : 'Inactive',
-    balance: customerData.billingAccount?.accountBalance || 0,
-    onlineStatus: customerData.billingAccount?.billingStatusId === 2 ? 'Online' : 'Offline',
-    cityId: null,
-    regionId: null,
-    timestamp: customerData.updatedAt || '',
-    billingStatus: customerData.billingAccount?.billingStatusId ? ({1:'In Progress', 2:'Active', 3:'Suspended', 4:'Cancelled', 5:'Overdue', 6:'Service Account'}[customerData.billingAccount.billingStatusId] || `Status ${customerData.billingAccount.billingStatusId}`) : '',
-    dateInstalled: customerData.billingAccount?.dateInstalled || '',
-    contactNumber: customerData.contactNumberPrimary,
-    secondContactNumber: customerData.contactNumberSecondary || '',
-    emailAddress: customerData.emailAddress || '',
-    plan: customerData.desiredPlan || '',
-    username: customerData.technicalDetails?.username || '',
-    connectionType: customerData.technicalDetails?.connectionType || '',
-    routerModel: customerData.technicalDetails?.routerModel || '',
-    routerModemSN: customerData.technicalDetails?.routerModemSn || '',
-    lcpnap: customerData.technicalDetails?.lcpnap || '',
-    port: customerData.technicalDetails?.port || '',
-    vlan: customerData.technicalDetails?.vlan || '',
-    billingDay: customerData.billingAccount?.billingDay || 0,
-    totalPaid: 0,
-    provider: '',
-    lcp: customerData.technicalDetails?.lcp || '',
-    nap: customerData.technicalDetails?.nap || '',
-    modifiedBy: '',
-    modifiedDate: customerData.updatedAt || '',
-    barangay: customerData.barangay || '',
-    city: customerData.city || '',
-    region: customerData.region || '',
-
-    usageType: customerData.technicalDetails?.usageTypeId ? `Type ${customerData.technicalDetails.usageTypeId}` : '',
-    referredBy: customerData.referredBy || '',
-    referralContactNo: '',
-    groupName: customerData.groupName || '',
-    mikrotikId: '',
-    // Prefer the live RADIUS session address over the provisioned one: it is
-    // where the subscriber's router is actually reachable right now.
-    sessionIp: (customerData as any).session_ip || customerData.technicalDetails?.ipAddress || '',
-    pppoePassword: (customerData as any).pppoePassword || customerData.technicalDetails?.pppoePassword || '',
-    houseFrontPicture: customerData.houseFrontPictureUrl || '',
-    accountBalance: customerData.billingAccount?.accountBalance || 0,
-    housingStatus: customerData.housingStatus || '',
-    addressCoordinates: customerData.addressCoordinates || '',
-    vip_expiration: customerData.billingAccount?.vip_expiration || '',
-    vip_remarks: customerData.billingAccount?.vip_remarks || '',
-  };
 };
 
 const allColumns = [

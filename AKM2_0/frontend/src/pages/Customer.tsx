@@ -4,7 +4,7 @@ import pusher from '../services/pusherService';
 import BillingDetails from '../components/CustomerDetails';
 import GlobalRelatedDataOverlay from '../components/GlobalRelatedDataOverlay';
 import { BillingRecord } from '../services/billingService';
-import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
+import { getCustomerDetail, CustomerDetailData, convertCustomerDataToBillingDetail } from '../services/customerDetailService';
 import { BillingDetailRecord } from '../types/billing';
 import { getCities, City } from '../services/cityService';
 import { getRegions, Region } from '../services/regionService';
@@ -36,80 +36,6 @@ const formatDate = (dateString: string | null | undefined): string => {
   } catch (e) {
     return dateString;
   }
-};
-
-const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): BillingDetailRecord => {
-  return {
-    id: customerData.billingAccount?.accountNo || '',
-    applicationId: customerData.billingAccount?.accountNo || '',
-    customerName: customerData.fullName,
-    firstName: customerData.firstName,
-    middleInitial: customerData.middleInitial,
-    lastName: customerData.lastName,
-    address: customerData.address,
-    status: customerData.billingAccount?.billingStatusName || (customerData.billingAccount?.billingStatusId === 1 ? 'Active' : 'Disconnected'),
-    balance: customerData.billingAccount?.accountBalance || 0,
-    onlineStatus: customerData.onlineSessionStatus || 'Empty',
-    cityId: null,
-    regionId: null,
-    timestamp: customerData.updatedAt || '',
-    billingStatus: customerData.billingAccount?.billingStatusName || (customerData.billingAccount?.billingStatusId ? `Status ${customerData.billingAccount.billingStatusId}` : ''),
-    billing_status_id: customerData.billingAccount?.billingStatusId,
-    dateInstalled: customerData.billingAccount?.dateInstalled || '',
-    contactNumber: customerData.contactNumberPrimary,
-    secondContactNumber: customerData.contactNumberSecondary || '',
-    emailAddress: customerData.emailAddress || '',
-    plan: customerData.desiredPlan || '',
-    username: customerData.technicalDetails?.username || '',
-    connectionType: customerData.technicalDetails?.connectionType || '',
-    routerModel: customerData.technicalDetails?.routerModel || '',
-    routerModemSN: customerData.technicalDetails?.routerModemSn || '',
-    lcpnap: customerData.technicalDetails?.lcpnap || '',
-    port: customerData.technicalDetails?.port || '',
-    vlan: customerData.technicalDetails?.vlan || '',
-    billingDay: customerData.billingAccount?.billingDay || 0,
-    totalPaid: (customerData as any).totalPaid || (customerData as any).total_paid || 0,
-    provider: customerData.groupName || '',
-    lcp: customerData.technicalDetails?.lcp || '',
-    nap: customerData.technicalDetails?.nap || '',
-    modifiedBy: (customerData.billingAccount as any)?.updatedBy || '',
-    modifiedDate: customerData.updatedAt || '',
-    barangay: customerData.barangay || '',
-    city: customerData.city || '',
-    region: customerData.region || '',
-
-    usageType: customerData.technicalDetails?.usageType || '',
-    referredBy: customerData.referredBy || '',
-    referralContactNo: '',
-    groupName: customerData.groupName || '',
-    mikrotikId: '',
-    houseFrontPicture: customerData.houseFrontPictureUrl || '',
-    accountBalance: customerData.billingAccount?.accountBalance || 0,
-    housingStatus: customerData.housingStatus || '',
-    addressCoordinates: customerData.addressCoordinates || '',
-    lcpnapport: `${customerData.technicalDetails?.lcpnap || ''} ${customerData.technicalDetails?.port || ''}`.trim(),
-    balanceUpdateDate: customerData.billingAccount?.balanceUpdateDate || '',
-    billingAccountCreatedBy: customerData.billingAccount?.createdBy || '',
-    billingAccountCreatedAt: customerData.billingAccount?.createdAt || '',
-    billingAccountUpdatedBy: customerData.billingAccount?.updatedBy || '',
-    billingAccountUpdatedAt: customerData.billingAccount?.updatedAt || '',
-    proofOfBillingUrl: customerData.proofOfBillingUrl || '',
-    governmentValidIdUrl: customerData.governmentValidIdUrl || '',
-    secondGovernmentValidIdUrl: customerData.secondGovernmentValidIdUrl || '',
-    documentAttachmentUrl: customerData.documentAttachmentUrl || '',
-    otherIspBillUrl: customerData.otherIspBillUrl || '',
-    accountNoCustomer: customerData.accountNoCustomer || '',
-    customerUpdatedBy: customerData.updatedBy || '',
-    customerUpdatedAt: customerData.updatedAt || '',
-    techUpdatedBy: customerData.technicalDetails?.updatedBy || '',
-    techUpdatedAt: customerData.technicalDetails?.updatedAt || '',
-    sessionGroup: (customerData as any).session_group || '',
-    sessionIp: (customerData as any).session_ip || customerData.technicalDetails?.ipAddress || '',
-    pppoePassword: (customerData as any).pppoePassword || customerData.technicalDetails?.pppoePassword || '',
-    sessionIP: (customerData as any).session_ip || customerData.technicalDetails?.ipAddress || '',
-    vip_expiration: customerData.billingAccount?.vip_expiration || '',
-    vip_remarks: customerData.billingAccount?.vip_remarks || '',
-  };
 };
 
 interface LocationItem {

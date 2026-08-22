@@ -3,6 +3,7 @@ import { Check, ChevronDown, ChevronRight, Loader2, MapPin, Search, X, ChevronLe
 import AddLcpNapLocationModal from '../modals/AddLcpNapLocationModal';
 import LcpNapLocationDetails from '../components/LcpNapLocationDetails';
 import { GOOGLE_MAPS_API_KEY } from '../config/maps';
+import { mapStyleFor, isDarkThemeActive } from '../config/mapStyles';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { getAllLCPNAPsForMap, clearLCPNAPMapCache } from '../services/lcpnapService';
 import apiClient from '../config/api';
@@ -392,45 +393,11 @@ const LcpNapLocation: React.FC = () => {
         streetViewControl: true,
         fullscreenControl: true,
         zoomControl: true,
-        styles: [
-          {
-            featureType: 'all',
-            elementType: 'geometry',
-            stylers: [{ color: '#1f2937' }]
-          },
-          {
-            featureType: 'water',
-            elementType: 'geometry',
-            stylers: [{ color: '#0f172a' }]
-          },
-          {
-            featureType: 'road',
-            elementType: 'geometry',
-            stylers: [{ color: '#374151' }]
-          },
-          {
-            featureType: 'poi',
-            stylers: [{ visibility: 'off' }]
-          },
-          {
-            featureType: 'transit',
-            elementType: 'labels',
-            stylers: [{ visibility: 'off' }]
-          },
-          {
-            featureType: 'road',
-            elementType: 'labels.icon',
-            stylers: [{ visibility: 'off' }]
-          },
-          {
-            elementType: 'labels.text.fill',
-            stylers: [{ color: '#9ca3af' }]
-          },
-          {
-            elementType: 'labels.text.stroke',
-            stylers: [{ color: '#111827' }]
-          }
-        ]
+        // Read at init from the same key the isDarkMode state watches, not from that
+        // state: this runs in the Maps script's load callback, outside React's render,
+        // where the closed-over value would be whatever it was when the page mounted.
+        // The effect below keeps it in step from then on.
+        styles: mapStyleFor(isDarkThemeActive()),
       });
 
       infoWindowRef.current = new google.maps.InfoWindow();
@@ -464,6 +431,19 @@ const LcpNapLocation: React.FC = () => {
       setIsMapReady(false);
     }
   };
+
+  /**
+   * Keep the basemap on the app's theme.
+   *
+   * The map is a Google-owned canvas, so a Tailwind class switch does not reach it —
+   * without this, flipping to the light theme left a near-black map inside a white
+   * page. setOptions re-styles the live map in place; there is no remount and no
+   * reload of tiles already cached.
+   */
+  useEffect(() => {
+    if (!isMapReady || !mapInstanceRef.current) return;
+    mapInstanceRef.current.setOptions({ styles: mapStyleFor(isDarkMode) });
+  }, [isDarkMode, isMapReady]);
 
   const parseCoordinates = (coordString: string): { latitude: number; longitude: number } | null => {
     if (!coordString) return null;
@@ -1152,6 +1132,40 @@ const LcpNapLocation: React.FC = () => {
                 )}
               </div>
 
+              {/* Show pins — caps how many markers are drawn, keeping the ones closest
+                  to the map centre. Lives in the toolbar rather than floating over the
+                  map: at `absolute top-3 right-3` it overlapped Google's own fullscreen
+                  and map-type controls, which are fixed to that same corner. */}
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <div className={`flex items-center rounded-lg border px-2.5 py-1.5 ${isDarkMode
+                  ? 'bg-gray-800 border-gray-700'
+                  : 'bg-gray-50 border-gray-200'
+                  }`}>
+                  <MapPin className="h-4 w-4 mr-1.5 flex-shrink-0" style={{ color: colorPalette?.primary || '#7c3aed' }} />
+                  <label htmlFor="lcpnap-pin-limit" className={`text-xs mr-1.5 whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                    Show
+                  </label>
+                  <input
+                    id="lcpnap-pin-limit"
+                    type="text"
+                    inputMode="numeric"
+                    aria-label="Maximum pins to display"
+                    title="Maximum number of pins drawn on the map"
+                    placeholder="Limit"
+                    value={pinLimit}
+                    // Digits only, so the parse at point of use can never see junk.
+                    onChange={(e) => setPinLimit(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
+                    className={`w-14 bg-transparent text-sm text-center focus:outline-none ${isDarkMode
+                      ? 'text-white placeholder-gray-500'
+                      : 'text-gray-900 placeholder-gray-400'
+                      }`}
+                  />
+                </div>
+                <span className={`text-xs whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                  {visibleLocations.length.toLocaleString()} / {displayedLocations.length.toLocaleString()} pins
+                </span>
+              </div>
+
               {!isMobile && (
                 <button
                   onClick={startPinPlacement}
@@ -1182,37 +1196,6 @@ const LcpNapLocation: React.FC = () => {
               ref={mapRef}
               className="absolute inset-0 w-full h-full z-0"
             />
-
-            {/* Pin limit — caps how many markers are drawn, keeping the ones closest
-                to the map centre. Mirrors the GOWISER map's control. Hidden while a
-                pin is being placed so it cannot be mistaken for part of that flow. */}
-            {!isPlacingPin && (
-              <div
-                className={`absolute top-3 right-3 z-[500] flex items-center gap-2 px-3 py-2 rounded-lg shadow-lg border text-xs ${
-                  isDarkMode ? 'bg-gray-900/95 border-gray-700 text-gray-200' : 'bg-white/95 border-gray-200 text-gray-700'
-                }`}
-              >
-                <MapPin className="h-4 w-4 flex-shrink-0" style={{ color: colorPalette?.primary || '#7c3aed' }} />
-                <label htmlFor="lcpnap-pin-limit" className="whitespace-nowrap">Show</label>
-                <input
-                  id="lcpnap-pin-limit"
-                  type="text"
-                  inputMode="numeric"
-                  aria-label="Maximum pins to display"
-                  title="Maximum number of pins drawn on the map"
-                  placeholder="Limit"
-                  value={pinLimit}
-                  // Digits only, so the parse at point of use can never see junk.
-                  onChange={(e) => setPinLimit(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
-                  className={`w-16 px-2 py-1 rounded border text-xs text-center ${
-                    isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'
-                  }`}
-                />
-                <span className="whitespace-nowrap">
-                  {visibleLocations.length.toLocaleString()} / {displayedLocations.length.toLocaleString()} pins
-                </span>
-              </div>
-            )}
 
             {/* Pin-drop crosshair. Fixed to the centre of the viewport and click-through,
                 so the map underneath still pans and zooms normally. */}

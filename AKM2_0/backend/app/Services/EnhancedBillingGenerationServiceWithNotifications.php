@@ -1238,6 +1238,91 @@ class EnhancedBillingGenerationServiceWithNotifications
         return $results;
     }
 
+    /**
+     * Raise this account's bill for the current cycle, on demand.
+     *
+     * The single-account counterpart to generateUnifiedBilling(), for the Billing
+     * Reconcile tool: an operator who has found out WHY the nightly pass skipped an
+     * account, and fixed it, needs the bill raised now rather than next month.
+     *
+     * It composes the same three steps the scheduled path does - statement, invoice,
+     * one notification - through the same methods, so the VAT treatment, withholding,
+     * prorate, staggered charges, discounts and rebates are identical to a cron run.
+     * No billing arithmetic is duplicated here or in the caller.
+     *
+     * Idempotent by construction. Both per-cycle guards are honoured, so an account
+     * that already carries this month's statement or invoice is skipped rather than
+     * billed twice, and the customer is notified only when something was actually
+     * created. Running it twice in a row is a no-op the second time.
+     *
+     * Eligibility is the CALLER's business. This method bills the account it is given;
+     * BillingReconciliationService::generationBlocker() is what decides whether an
+     * account should be billed at all, and re-checks that against live state first.
+     *
+     * @return array{success:bool, statement_created:bool, invoice_created:bool, skipped:bool, error?:string}
+     */
+    public function generateCurrentCycleBilling(BillingAccount $account, int $userId): array
+    {
+        $generationDate = Carbon::now('Asia/Manila');
+        $result = [
+            'success' => false,
+            'statement_created' => false,
+            'invoice_created' => false,
+            'skipped' => false,
+        ];
+
+        $soa = null;
+        $invoice = null;
+
+        try {
+            if ($this->statementAlreadyGeneratedForCycle($account, $generationDate)) {
+                $this->log('info', 'Manual billing: statement already exists for this cycle, skipping', [
+                    'account_no' => $account->account_no,
+                    'billing_period' => $generationDate->format('Y-m'),
+                ]);
+            } else {
+                $soa = $this->createEnhancedStatement($account, $generationDate, $userId);
+                $result['statement_created'] = true;
+            }
+
+            if ($this->invoiceAlreadyGeneratedForCycle($account, $generationDate)) {
+                $this->log('info', 'Manual billing: invoice already exists for this cycle, skipping', [
+                    'account_no' => $account->account_no,
+                    'billing_period' => $generationDate->format('Y-m'),
+                ]);
+            } else {
+                $invoice = $this->createEnhancedInvoice($account, $generationDate, $userId);
+                $result['invoice_created'] = true;
+            }
+
+            // Notify once, and only for work actually done. Two operators pressing
+            // Generate on the same row must not cost the customer two texts.
+            if ($soa || $invoice) {
+                $this->queueNotification($account, $invoice, $soa);
+            } else {
+                $result['skipped'] = true;
+            }
+
+            $result['success'] = true;
+
+            $this->log('info', 'Manual billing generation completed', [
+                'account_no' => $account->account_no,
+                'billing_period' => $generationDate->format('Y-m'),
+                'statement_created' => $result['statement_created'],
+                'invoice_created' => $result['invoice_created'],
+                'skipped' => $result['skipped'],
+                'user_id' => $userId,
+            ]);
+
+            return $result;
+        } catch (\Exception $e) {
+            $this->log('error', 'Manual billing generation failed for account ' . $account->account_no . ': ' . $e->getMessage());
+            $result['error'] = $e->getMessage();
+
+            return $result;
+        }
+    }
+
     public function generateBillingsForSpecificDay(int $billingDay, int $userId): array
     {
         $today = Carbon::now('Asia/Manila');

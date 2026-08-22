@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ExternalLink, X, Info, CircleArrowRight, Loader, ChevronLeft, ChevronRight } from 'lucide-react';
 import { planService, Plan } from '../services/planService';
-import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
+import { getCustomerDetail, convertCustomerDataToBillingDetail } from '../services/customerDetailService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { BillingDetailRecord } from '../types/billing';
 import apiClient from '../config/api';
@@ -28,86 +28,6 @@ const formatDate = (dateString: string | null | undefined): string => {
 const isGoogleDriveLink = (url: string | null | undefined): boolean => {
   if (!url) return false;
   return url.includes('drive.google.com') || url.includes('docs.google.com');
-};
-
-const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): BillingDetailRecord => {
-  return {
-    id: customerData.billingAccount?.accountNo || '',
-    applicationId: customerData.billingAccount?.accountNo || '',
-    accountNo: customerData.billingAccount?.accountNo || '',
-    account_no: customerData.billingAccount?.accountNo || '',
-    customerName: customerData.fullName,
-    firstName: customerData.firstName,
-    lastName: customerData.lastName,
-    middleInitial: customerData.middleInitial,
-    address: customerData.address,
-    status: customerData.billingAccount?.billingStatusName || (customerData.billingAccount?.billingStatusId === 2 ? 'Active' : 'Inactive'),
-    balance: customerData.billingAccount?.accountBalance || 0,
-    onlineStatus: customerData.onlineSessionStatus || 'Empty',
-    cityId: null,
-    regionId: null,
-    timestamp: customerData.updatedAt || '',
-    billingStatus: customerData.billingAccount?.billingStatusName || (customerData.billingAccount?.billingStatusId ? ({ 1: 'In Progress', 2: 'Active', 3: 'Suspended', 4: 'Cancelled', 5: 'Overdue', 6: 'Service Account' }[customerData.billingAccount.billingStatusId] || `Status ${customerData.billingAccount.billingStatusId}`) : ''),
-    dateInstalled: customerData.billingAccount?.dateInstalled || '',
-    contactNumber: customerData.contactNumberPrimary,
-    secondContactNumber: customerData.contactNumberSecondary || '',
-    emailAddress: customerData.emailAddress || '',
-    email: customerData.emailAddress || '',
-    plan: customerData.desiredPlan || '',
-    username: customerData.technicalDetails?.username || '',
-    connectionType: customerData.technicalDetails?.connectionType || '',
-    routerModel: customerData.technicalDetails?.routerModel || '',
-    routerModemSN: customerData.technicalDetails?.routerModemSn || '',
-    lcpnap: customerData.technicalDetails?.lcpnap || '',
-    port: customerData.technicalDetails?.port || '',
-    vlan: customerData.technicalDetails?.vlan || '',
-    billingDay: customerData.billingAccount?.billingDay || 0,
-    totalPaid: 0,
-    provider: '',
-    lcp: customerData.technicalDetails?.lcp || '',
-    nap: customerData.technicalDetails?.nap || '',
-    modifiedBy: '',
-    modifiedDate: customerData.updatedAt || '',
-    barangay: customerData.barangay || '',
-    city: customerData.city || '',
-    region: customerData.region || '',
-    usageType: customerData.technicalDetails?.usageTypeId ? `Type ${customerData.technicalDetails.usageTypeId}` : '',
-    referredBy: customerData.referredBy || '',
-    referralContactNo: '',
-    groupName: customerData.groupName || '',
-    mikrotikId: '',
-    // Prefer the live RADIUS session address over the provisioned one: it is
-    // where the subscriber's router is actually reachable right now.
-    sessionIp: (customerData as any).session_ip || customerData.technicalDetails?.ipAddress || '',
-    pppoePassword: (customerData as any).pppoePassword || customerData.technicalDetails?.pppoePassword || '',
-    houseFrontPicture: customerData.houseFrontPictureUrl || '',
-    accountBalance: customerData.billingAccount?.accountBalance || 0,
-    housingStatus: customerData.housingStatus || '',
-    addressCoordinates: customerData.addressCoordinates || '',
-
-    // Metadata and document fields
-    accountNoCustomer: customerData.accountNoCustomer,
-    proofOfBillingUrl: customerData.proofOfBillingUrl,
-    governmentValidIdUrl: customerData.governmentValidIdUrl,
-    secondGovernmentValidIdUrl: customerData.secondGovernmentValidIdUrl,
-    documentAttachmentUrl: customerData.documentAttachmentUrl,
-    otherIspBillUrl: customerData.otherIspBillUrl,
-    customerCreatedAt: customerData.createdAt,
-    customerUpdatedAt: customerData.updatedAt,
-    customerUpdatedBy: customerData.updatedBy,
-    billingAccountCreatedAt: customerData.billingAccount?.createdAt,
-    billingAccountUpdatedAt: customerData.billingAccount?.updatedAt,
-    billingAccountCreatedBy: customerData.billingAccount?.createdBy,
-    billingAccountUpdatedBy: customerData.billingAccount?.updatedBy,
-    balanceUpdateDate: customerData.billingAccount?.balanceUpdateDate,
-    techCreatedAt: customerData.technicalDetails?.createdAt,
-    techUpdatedAt: customerData.technicalDetails?.updatedAt,
-    techCreatedBy: customerData.technicalDetails?.createdBy,
-    techUpdatedBy: customerData.technicalDetails?.updatedBy,
-    usernameStatus: customerData.technicalDetails?.usernameStatus,
-    vip_expiration: customerData.billingAccount?.vip_expiration || '',
-    vip_remarks: customerData.billingAccount?.vip_remarks || '',
-  };
 };
 
 interface SOARecord {

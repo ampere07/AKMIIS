@@ -2,321 +2,248 @@
 
 namespace App\Services;
 
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
+/**
+ * CSV twin of ReportPdfService.
+ *
+ * Both resolve their record set through ReportDataset and their summary figures
+ * through ReportMetricsService, so a CSV and the PDF generated for the same
+ * report always describe the same records with the same totals.
+ *
+ * Unlike the PDF the CSV is not row-capped: it streams the complete result set
+ * in chunks, which is why the PDF points readers here when its listing is
+ * truncated.
+ */
 class ReportCsvService
 {
-    public function generateFile($reportType, $dateRange = null)
+    /**
+     * @return string absolute path to the generated CSV
+     */
+    public function generateFile($reportType, $dateRange = null): string
     {
-        $fileName = 'Report_' . time() . '_' . str_replace(' ', '_', $reportType) . '.csv';
-        $tempPath = sys_get_temp_dir() . '/' . $fileName;
-        
-        $fileHandle = fopen($tempPath, 'w');
-
-        [$startDate, $endDate] = $this->parseDateRange($dateRange);
-
-        if (strtolower($reportType) === 'summary') {
-            $this->generateSummaryCSV($fileHandle, $dateRange);
-        } else {
-            $tableName = $this->getTableNameForType($reportType);
-            if ($tableName) {
-                $this->generateTableCSV($fileHandle, $tableName, $startDate, $endDate);
-            } else {
-                fclose($fileHandle);
-                @unlink($tempPath);
-                throw new \Exception('Unknown report type.');
-            }
+        $directory = storage_path(ReportPdfService::ATTACHMENT_DIR);
+        if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
+            throw new \RuntimeException("Unable to create attachment directory: {$directory}");
         }
 
-        fclose($fileHandle);
+        $slug = Str::slug((string) $reportType, '_') ?: 'report';
+        $tempPath = $directory . DIRECTORY_SEPARATOR
+            . $slug . '_' . now(config('reports.timezone', 'Asia/Manila'))->format('Ymd_His') . '.csv';
+
+        $handle = fopen($tempPath, 'w');
+        if ($handle === false) {
+            throw new \RuntimeException("Unable to open {$tempPath} for writing.");
+        }
+
+        // BOM so Excel opens UTF-8 content (₱, ñ) correctly.
+        fwrite($handle, "\xEF\xBB\xBF");
+
+        try {
+            if (ReportDataset::isSummary($reportType)) {
+                $this->writeSummary($handle, $dateRange);
+            } else {
+                $this->writeRecords($handle, (string) $reportType, $dateRange);
+            }
+        } catch (\Throwable $e) {
+            fclose($handle);
+            @unlink($tempPath);
+            throw $e;
+        }
+
+        fclose($handle);
+
         return $tempPath;
     }
 
-    private function getTableNameForType($type)
+    /**
+     * Full record listing plus a reconciling subtotal block.
+     */
+    private function writeRecords($handle, string $reportType, $dateRange): void
     {
-        $map = [
-            'manual transaction' => 'transactions',
-            'payment portal' => 'payment_portal_logs',
-            'inventory' => 'inventory_logs',
-            'job order' => 'job_orders',
-            'service order' => 'service_orders',
-            'work order' => 'work_order',
-        ];
+        $dataset = ReportDataset::resolve($reportType);
+        [$startDate, $endDate] = ReportDataset::parseDateRange($dateRange);
 
-        $key = strtolower($type);
-        return $map[$key] ?? null;
-    }
+        $columns = $dataset['columns'];
+        fputcsv($handle, $columns);
 
-    public function parseDateRange($dateRange)
-    {
-        $startDate = null;
-        $endDate = null;
-        if ($dateRange && strpos($dateRange, ' to ') !== false) {
-            $parts = explode(' to ', $dateRange);
-            if (count($parts) === 2) {
-                $startDate = trim($parts[0]);
-                $endDate = trim($parts[1]);
-            }
-        }
-        return [$startDate, $endDate];
-    }
+        $written = 0;
+        $sums = array_fill_keys($dataset['numeric'], 0.0);
+        $groups = [];
+        $groupBy = $dataset['group_by'];
 
-    private function getDateColumnForTable($tableName)
-    {
-        $map = [
-            'transactions' => 'payment_date',
-            'payment_portal_logs' => 'created_at',
-            'inventory_logs' => 'created_at',
-            'job_orders' => 'created_at',
-            'service_orders' => 'created_at',
-            'work_order' => 'created_at',
-            'work_orders' => 'created_at',
-        ];
-        return $map[$tableName] ?? 'created_at';
-    }
+        $query = ReportDataset::query($dataset, $startDate, $endDate)
+            ->orderBy($dataset['order_column']);
 
-    private function generateTableCSV($fileHandle, $tableName, $startDate = null, $endDate = null)
-    {
-        // For work order, fallback to work_orders if work_order doesn't exist
-        if ($tableName === 'work_order' && !Schema::hasTable($tableName)) {
-            $tableName = 'work_orders';
+        // chunk() paginates with LIMIT/OFFSET, so the ordering MUST be total or
+        // rows get skipped and duplicated across chunk boundaries. Several of
+        // these datasets order on a non-unique date column, so the dataset's
+        // tiebreakers are appended to make the order total.
+        foreach ($dataset['tiebreakers'] as $tiebreaker) {
+            $query->orderBy($tiebreaker);
         }
 
-        if (!Schema::hasTable($tableName)) {
-            fputcsv($fileHandle, ['Error: Table not found in database.']);
-            return;
-        }
+        $query
+            ->chunk(500, function ($rows) use ($handle, $columns, &$written, &$sums, &$groups, $groupBy, $dataset) {
+                foreach ($rows as $row) {
+                    $record = (array) $row;
 
-        $columns = Schema::getColumnListing($tableName);
-        fputcsv($fileHandle, $columns);
+                    $line = [];
+                    foreach ($columns as $column) {
+                        $line[] = $record[$column] ?? null;
+                    }
+                    fputcsv($handle, $line);
+                    $written++;
 
-        $query = DB::table($tableName);
+                    foreach ($dataset['numeric'] as $numericColumn) {
+                        $sums[$numericColumn] += (float) ($record[$numericColumn] ?? 0);
+                    }
 
-        if ($startDate && $endDate) {
-            $dateCol = $this->getDateColumnForTable($tableName);
-            $query->whereBetween($dateCol, [$startDate . ' 00:00:00', $endDate . ' 23:59:59']);
-        }
+                    if ($groupBy !== null) {
+                        $label = trim((string) ($record[$groupBy] ?? ''));
+                        $label = $label === '' ? 'Unspecified' : $label;
 
-        $query->orderBy('id')->chunk(500, function ($rows) use ($fileHandle, $columns) {
-            foreach ($rows as $row) {
-                $rowArray = (array) $row;
-                $csvRow = [];
-                foreach ($columns as $column) {
-                    $csvRow[] = $rowArray[$column] ?? null;
+                        if (!isset($groups[$label])) {
+                            $groups[$label] = ['count' => 0, 'sums' => array_fill_keys($dataset['numeric'], 0.0)];
+                        }
+                        $groups[$label]['count']++;
+                        foreach ($dataset['numeric'] as $numericColumn) {
+                            $groups[$label]['sums'][$numericColumn] += (float) ($record[$numericColumn] ?? 0);
+                        }
+                    }
                 }
-                fputcsv($fileHandle, $csvRow);
-            }
-        });
-    }
+            });
 
-    private function generateSummaryCSV($fileHandle, $dateRange = null)
-    {
-        $metrics = $this->getSummaryMetrics($dateRange);
-
-        // Write to CSV (Header Row)
-        fputcsv($fileHandle, array_keys($metrics));
-        
-        // Write to CSV (Data Row)
-        fputcsv($fileHandle, array_values($metrics));
-    }
-
-    public function getSummaryMetrics($dateRange = null)
-    {
-        [$startDate, $endDate] = $this->parseDateRange($dateRange);
-        $metrics = [];
-        $hasRange = $startDate && $endDate;
-        $range = $hasRange ? [$startDate . ' 00:00:00', $endDate . ' 23:59:59'] : null;
-
-        // 1. Invoices
-        if (Schema::hasTable('invoices')) {
-            $qUnpaid = DB::table('invoices')->where('status', 'Unpaid');
-            if ($hasRange) $qUnpaid->whereBetween('invoice_date', $range);
-            $metrics['Total Unpaid Invoices (Count)'] = $qUnpaid->count();
-            $metrics['Total Unpaid Invoices (Amount)'] = floatval($qUnpaid->sum('total_amount'));
-
-            $qPaid = DB::table('invoices')->where('status', 'Paid');
-            if ($hasRange) $qPaid->whereBetween('invoice_date', $range);
-            $metrics['Total Paid Invoices (Count)'] = $qPaid->count();
-            $metrics['Total Paid Invoices (Amount)'] = floatval($qPaid->sum('total_amount'));
-        } else {
-            $metrics['Total Unpaid Invoices (Count)'] = 0;
-            $metrics['Total Unpaid Invoices (Amount)'] = 0.0;
-            $metrics['Total Paid Invoices (Count)'] = 0;
-            $metrics['Total Paid Invoices (Amount)'] = 0.0;
+        // ── Totals block ─────────────────────────────────────────────────────
+        fputcsv($handle, []);
+        fputcsv($handle, ['TOTALS']);
+        fputcsv($handle, ['Total Records', $written]);
+        foreach ($dataset['numeric'] as $numericColumn) {
+            fputcsv($handle, ['Total ' . $numericColumn, round($sums[$numericColumn], 2)]);
         }
 
-        // 2. Service Orders (Pullout concern)
-        if (Schema::hasTable('service_orders')) {
-            $qPullAll = DB::table('service_orders')->where('repair_category', 'pullout');
-            $qPullProg = DB::table('service_orders')->where('repair_category', 'pullout')->where('visit_status', 'In Progress');
-            $qPullDone = DB::table('service_orders')->where('repair_category', 'pullout')->where('visit_status', 'Done');
-            $qPullFail = DB::table('service_orders')->where('repair_category', 'pullout')->where('visit_status', 'Failed');
+        if ($groups !== []) {
+            uasort($groups, fn ($a, $b) => $b['count'] <=> $a['count']);
 
-            if ($hasRange) {
-                $qPullAll->whereBetween('created_at', $range);
-                $qPullProg->whereBetween('created_at', $range);
-                $qPullDone->whereBetween('created_at', $range);
-                $qPullFail->whereBetween('created_at', $range);
-            }
+            fputcsv($handle, []);
+            fputcsv($handle, ['SUBTOTALS BY ' . strtoupper(str_replace('_', ' ', (string) $groupBy))]);
+            fputcsv($handle, array_merge([$groupBy, 'Records'], array_map(
+                fn ($c) => 'Total ' . $c,
+                $dataset['numeric']
+            )));
 
-            $metrics['Number of Pull Out Concern Service Orders'] = $qPullAll->count();
-            $metrics['Pull Out In Progress'] = $qPullProg->count();
-            $metrics['Pull Out Done'] = $qPullDone->count();
-            $metrics['Pull Out Failed'] = $qPullFail->count();
-        } else {
-            $metrics['Number of Pull Out Concern Service Orders'] = 0;
-            $metrics['Pull Out In Progress'] = 0;
-            $metrics['Pull Out Done'] = 0;
-            $metrics['Pull Out Failed'] = 0;
-        }
-
-        // 3. Payment Portal Logs
-        if (Schema::hasTable('payment_portal_logs')) {
-            $qPPL = DB::table('payment_portal_logs');
-            if ($hasRange) $qPPL->whereBetween('created_at', $range);
-            $metrics['Payment Portal Logs Count'] = $qPPL->count();
-            $metrics['Payment Portal Logs Total Amount'] = floatval($qPPL->sum('total_amount'));
-        } else {
-            $metrics['Payment Portal Logs Count'] = 0;
-            $metrics['Payment Portal Logs Total Amount'] = 0.0;
-        }
-
-        // 4. Transactions & Payment Methods
-        if (Schema::hasTable('transactions')) {
-            $qTx = DB::table('transactions');
-            if ($hasRange) $qTx->whereBetween('payment_date', $range);
-            $metrics['Transactions Count'] = $qTx->count();
-            $metrics['Transactions Total Amount'] = floatval($qTx->sum('received_payment'));
-
-            // Payment Methods breakdown
-            $qPM = DB::table('transactions')
-                ->select('payment_method', DB::raw('count(*) as count'), DB::raw('sum(received_payment) as amount'));
-            if ($hasRange) $qPM->whereBetween('payment_date', $range);
-            $pmList = $qPM->groupBy('payment_method')->get();
-
-            foreach ($pmList as $pm) {
-                $method = $pm->payment_method ?: 'Unknown';
-                $metrics["Payment Method: {$method} (Count)"] = $pm->count;
-                $metrics["Payment Method: {$method} (Amount)"] = floatval($pm->amount);
-            }
-        } else {
-            $metrics['Transactions Count'] = 0;
-            $metrics['Transactions Total Amount'] = 0.0;
-        }
-
-        // 5. Job Orders
-        if (Schema::hasTable('job_orders')) {
-            $qJO = DB::table('job_orders');
-            $qJODone = DB::table('job_orders')->where('onsite_status', 'Done');
-            $qJOProg = DB::table('job_orders')->where('onsite_status', 'In Progress');
-            $qJOFail = DB::table('job_orders')->where('onsite_status', 'Failed');
-
-            if ($hasRange) {
-                $qJO->whereBetween('created_at', $range);
-                $qJODone->whereBetween('created_at', $range);
-                $qJOProg->whereBetween('created_at', $range);
-                $qJOFail->whereBetween('created_at', $range);
-            }
-
-            $metrics['Total Job Orders'] = $qJO->count();
-            $metrics['Job Orders - Done'] = $qJODone->count();
-            $metrics['Job Orders - In Progress'] = $qJOProg->count();
-            $metrics['Job Orders - Failed'] = $qJOFail->count();
-        } else {
-            $metrics['Total Job Orders'] = 0;
-            $metrics['Job Orders - Done'] = 0;
-            $metrics['Job Orders - In Progress'] = 0;
-            $metrics['Job Orders - Failed'] = 0;
-        }
-
-        // 6. Service Orders (overall)
-        if (Schema::hasTable('service_orders')) {
-            $qSO = DB::table('service_orders');
-            $qSODone = DB::table('service_orders')->where('visit_status', 'Done');
-            $qSOProg = DB::table('service_orders')->where('visit_status', 'In Progress');
-            $qSOFail = DB::table('service_orders')->where('visit_status', 'Failed');
-
-            if ($hasRange) {
-                $qSO->whereBetween('created_at', $range);
-                $qSODone->whereBetween('created_at', $range);
-                $qSOProg->whereBetween('created_at', $range);
-                $qSOFail->whereBetween('created_at', $range);
-            }
-
-            $metrics['Total Service Orders'] = $qSO->count();
-            $metrics['Service Orders - Done'] = $qSODone->count();
-            $metrics['Service Orders - In Progress'] = $qSOProg->count();
-            $metrics['Service Orders - Failed'] = $qSOFail->count();
-
-            // Service Orders per Concern
-            $qSOC = DB::table('service_orders')->select('concern', DB::raw('count(*) as count'));
-            if ($hasRange) $qSOC->whereBetween('created_at', $range);
-            $socList = $qSOC->groupBy('concern')->get();
-
-            foreach ($socList as $soc) {
-                $concern = $soc->concern ?: 'Unknown';
-                $metrics["Service Orders per Concern: {$concern}"] = $soc->count;
-            }
-        } else {
-            $metrics['Total Service Orders'] = 0;
-            $metrics['Service Orders - Done'] = 0;
-            $metrics['Service Orders - In Progress'] = 0;
-            $metrics['Service Orders - Failed'] = 0;
-        }
-
-        // 7. LCP/NAP
-        if (Schema::hasTable('lcpnap')) {
-            $metrics['Total LCP/NAP'] = DB::table('lcpnap')->count();
-        } else {
-            $metrics['Total LCP/NAP'] = 0;
-        }
-
-        // 8. Inventory
-        $goodStock = 0;
-        $badStock = 0;
-        if (Schema::hasTable('inventory_items')) {
-            $items = DB::table('inventory_items')->get();
-            foreach ($items as $item) {
-                $qty = $item->total_quantity ?? 0;
-                $alert = $item->quantity_alert ?? 0;
-                if ($qty > $alert) {
-                    $goodStock++;
-                } else {
-                    $badStock++;
+            $checkCount = 0;
+            foreach ($groups as $label => $group) {
+                $line = [$label, $group['count']];
+                foreach ($dataset['numeric'] as $numericColumn) {
+                    $line[] = round($group['sums'][$numericColumn], 2);
                 }
+                fputcsv($handle, $line);
+                $checkCount += $group['count'];
+            }
+
+            $line = ['GRAND TOTAL', $checkCount];
+            foreach ($dataset['numeric'] as $numericColumn) {
+                $line[] = round($sums[$numericColumn], 2);
+            }
+            fputcsv($handle, $line);
+
+            if ($checkCount !== $written) {
+                fputcsv($handle, []);
+                fputcsv($handle, [
+                    'WARNING',
+                    "Subtotals total {$checkCount} records but {$written} rows were written.",
+                ]);
             }
         }
-        $metrics['Good Stock (Inventory Items)'] = $goodStock;
-        $metrics['Bad Stock (Inventory Items)'] = $badStock;
+    }
 
-        // 9. Applications per Barangay
-        if (Schema::hasTable('applications')) {
-            $qApp = DB::table('applications')->select('barangay', DB::raw('count(*) as count'));
-            if ($hasRange) $qApp->whereBetween('created_at', $range);
-            $appList = $qApp->groupBy('barangay')->get();
+    /**
+     * Summary CSV: one section at a time with its own subtotals, mirroring the
+     * PDF layout instead of the old single unreadable header/value pair of rows.
+     */
+    private function writeSummary($handle, $dateRange): void
+    {
+        $metrics = (new ReportMetricsService())->build($dateRange);
 
-            foreach ($appList as $app) {
-                $barangay = $app->barangay ?: 'Unknown';
-                $metrics["Applications: {$barangay}"] = $app->count;
+        fputcsv($handle, ['Reporting Period', $metrics['range']['label']]);
+        fputcsv($handle, ['Generated', $metrics['generated_at']]);
+        fputcsv($handle, ['Records Covered', $metrics['totals']['records']]);
+        fputcsv($handle, ['Total Collected', round($metrics['totals']['collected'], 2)]);
+
+        if (!$metrics['validation']['ok']) {
+            fputcsv($handle, []);
+            fputcsv($handle, ['VALIDATION WARNINGS']);
+            foreach ($metrics['validation']['issues'] as $issue) {
+                fputcsv($handle, ['', $issue]);
             }
         }
 
-        // 10. Subscribers Online per Barangay
-        if (Schema::hasTable('online_status') && Schema::hasTable('billing_accounts') && Schema::hasTable('customers')) {
-            $onlineList = DB::table('online_status')
-                ->join('billing_accounts', 'online_status.account_id', '=', 'billing_accounts.id')
-                ->join('customers', 'billing_accounts.customer_id', '=', 'customers.id')
-                ->select('customers.barangay', DB::raw('count(*) as count'))
-                ->groupBy('customers.barangay')
-                ->get();
+        foreach ($metrics['sections'] as $section) {
+            fputcsv($handle, []);
+            fputcsv($handle, [strtoupper($section['title'])]);
 
-            foreach ($onlineList as $online) {
-                $barangay = $online->barangay ?: 'Unknown';
-                $metrics["Subscribers Online: {$barangay}"] = $online->count;
+            if ($section['subtitle']) {
+                fputcsv($handle, ['', $section['subtitle']]);
+            }
+            if (!$section['range_applies']) {
+                fputcsv($handle, ['', 'Current state — not filtered by the reporting period.']);
+            }
+
+            fputcsv($handle, array_map(fn ($c) => $c['label'], $section['columns']));
+
+            foreach ($section['rows'] as $row) {
+                fputcsv($handle, array_map(
+                    fn ($c) => $this->csvValue($row[$c['key']] ?? null, $c),
+                    $section['columns']
+                ));
+            }
+
+            fputcsv($handle, array_map(function ($c) use ($section) {
+                if ($c['key'] === 'label') {
+                    return 'TOTAL';
+                }
+
+                return array_key_exists($c['key'], $section['total'])
+                    ? $this->csvValue($section['total'][$c['key']], $c)
+                    : '';
+            }, $section['columns']));
+
+            foreach ($section['highlights'] as $highlight) {
+                fputcsv($handle, ['', $highlight['label'], $highlight['value']]);
             }
         }
+    }
 
-        return $metrics;
+    private function csvValue($value, array $column)
+    {
+        if ($value === null) {
+            return '';
+        }
+
+        return match ($column['format'] ?? 'text') {
+            'money'   => round((float) $value, 2),
+            'percent' => round((float) $value, 1),
+            'int'     => (int) $value,
+            default   => $value,
+        };
+    }
+
+    // ── Backwards-compatible shims ────────────────────────────────────────────
+
+    /** @deprecated Use ReportDataset::parseDateRange(). */
+    public function parseDateRange($dateRange): array
+    {
+        return ReportDataset::parseDateRange($dateRange);
+    }
+
+    /**
+     * Flat "Metric => value" map, now sourced from the corrected calculations.
+     *
+     * @deprecated Prefer ReportMetricsService::build() for the structured form.
+     */
+    public function getSummaryMetrics($dateRange = null): array
+    {
+        return (new ReportMetricsService())->build($dateRange)['flat'];
     }
 }

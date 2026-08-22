@@ -249,13 +249,25 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
       seen.add(tech.user_id);
       const status = liveStatus(tech, nowTick);
       const color = STATUS_COLORS[status] || STATUS_COLORS.offline;
-      const initials = (tech.full_name || tech.username || '?')
-        .split(' ')
-        .map((p) => p[0])
-        .filter(Boolean)
-        .slice(0, 2)
-        .join('')
-        .toUpperCase();
+      // Initials = first letter of the first name + first two characters of the last
+      // name ("John Smith" -> "JSm", "Tech 10" -> "T10"). Taking one character per word
+      // rendered "Tech 10" as "T1", which is the same badge as "Tech 1" - two different
+      // technicians sharing a marker on a live dispatch map. Matches GOWISER and ATSS.
+      const nameParts = (tech.full_name || tech.username || '?')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      let initials: string;
+      if (nameParts.length >= 2) {
+        const first = nameParts[0];
+        const last = nameParts[nameParts.length - 1];
+        initials = first.charAt(0).toUpperCase()
+          + last.charAt(0).toUpperCase()
+          + last.charAt(1).toLowerCase();
+      } else {
+        const only = nameParts[0] || '?';
+        initials = only.charAt(0).toUpperCase() + only.slice(1, 3).toLowerCase();
+      }
 
       const icon = L.divIcon({
         html: markerHtml(color, status, initials, tech.profile_picture),

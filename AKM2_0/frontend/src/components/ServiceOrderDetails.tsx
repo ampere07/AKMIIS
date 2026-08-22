@@ -12,7 +12,7 @@ import { BillingDetailRecord } from '../types/billing';
 import { planService, Plan } from '../services/planService';
 import { userService } from '../services/userService';
 import { User as UserType } from '../types/api';
-import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
+import { getCustomerDetail, convertCustomerDataToBillingDetail } from '../services/customerDetailService';
 import { getAllInventoryItems } from '../services/inventoryItemService';
 import { accountStatusFrom, sessionStatusFrom } from '../utils/onlineStatus';
 
@@ -39,59 +39,6 @@ const formatDate = (dateString: string | null | undefined): string => {
   } catch (e) {
     return dateString;
   }
-};
-
-const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): BillingDetailRecord => {
-  return {
-    id: customerData.billingAccount?.accountNo || '',
-    applicationId: customerData.billingAccount?.accountNo || '',
-    customerName: customerData.fullName,
-    address: customerData.address,
-    status: accountStatusFrom(customerData),
-    balance: customerData.billingAccount?.accountBalance || 0,
-    onlineStatus: sessionStatusFrom(customerData),
-    cityId: null,
-    regionId: null,
-    timestamp: customerData.updatedAt || '',
-    billingStatus: customerData.billingAccount?.billingStatusId ? ({1:'In Progress', 2:'Active', 3:'Suspended', 4:'Cancelled', 5:'Overdue', 6:'Service Account'}[customerData.billingAccount.billingStatusId] || `Status ${customerData.billingAccount.billingStatusId}`) : '',
-    dateInstalled: customerData.billingAccount?.dateInstalled || '',
-    contactNumber: customerData.contactNumberPrimary,
-    secondContactNumber: customerData.contactNumberSecondary || '',
-    emailAddress: customerData.emailAddress || '',
-    plan: customerData.desiredPlan || '',
-    username: customerData.technicalDetails?.username || '',
-    connectionType: customerData.technicalDetails?.connectionType || '',
-    routerModel: customerData.technicalDetails?.routerModel || '',
-    routerModemSN: customerData.technicalDetails?.routerModemSn || '',
-    lcpnap: customerData.technicalDetails?.lcpnap || '',
-    port: customerData.technicalDetails?.port || '',
-    vlan: customerData.technicalDetails?.vlan || '',
-    billingDay: customerData.billingAccount?.billingDay || 0,
-    totalPaid: 0,
-    provider: '',
-    lcp: customerData.technicalDetails?.lcp || '',
-    nap: customerData.technicalDetails?.nap || '',
-    modifiedBy: '',
-    modifiedDate: customerData.updatedAt || '',
-    barangay: customerData.barangay || '',
-    city: customerData.city || '',
-    region: customerData.region || '',
-    usageType: customerData.technicalDetails?.usageTypeId ? `Type ${customerData.technicalDetails.usageTypeId}` : '',
-    referredBy: customerData.referredBy || '',
-    referralContactNo: '',
-    groupName: customerData.groupName || '',
-    mikrotikId: '',
-    // Prefer the live RADIUS session address over the provisioned one: it is
-    // where the subscriber's router is actually reachable right now.
-    sessionIp: (customerData as any).session_ip || customerData.technicalDetails?.ipAddress || '',
-    pppoePassword: (customerData as any).pppoePassword || customerData.technicalDetails?.pppoePassword || '',
-    houseFrontPicture: customerData.houseFrontPictureUrl || '',
-    accountBalance: customerData.billingAccount?.accountBalance || 0,
-    housingStatus: customerData.housingStatus || '',
-    addressCoordinates: customerData.addressCoordinates || '',
-    vip_expiration: customerData.billingAccount?.vip_expiration || '',
-    vip_remarks: customerData.billingAccount?.vip_remarks || '',
-  };
 };
 
 interface ServiceOrderDetailsProps {

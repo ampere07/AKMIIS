@@ -1111,7 +1111,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         port: updatedFormData.port,
         vlan: updatedFormData.vlan,
         support_status: updatedFormData.supportStatus,
-        
+
         // Include visit_status if visible (For Visit status) or explicitly cleared when Resolved
         ...((isForVisit || (updatedFormData.supportStatus === 'Resolved' && updatedFormData.visitStatus === '')) ? {
           visit_status: updatedFormData.visitStatus,
@@ -1137,7 +1137,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
           image2_url: imageUrls.image2_url || formData.modemSetupImage,
           image3_url: imageUrls.image3_url || formData.timeOut,
           client_signature_url: imageUrls.client_signature_url || formData.clientSignature,
-          
+
           ...(showNewRouterSN ? { new_router_modem_sn: updatedFormData.newRouterModemSN } : {}),
           ...(showNewTechDetails ? {
             new_lcpnap: updatedFormData.newLcpnap,
@@ -1264,10 +1264,10 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
           let stepMessage = '';
           const opLabel = step.operation === 'reconnect' ? 'Reconnection'
             : step.operation === 'restrict' ? 'Restriction'
-            : step.operation === 'disconnect' ? 'Disconnection'
-            : step.operation === 'pullout' ? 'Pullout'
-            : step.operation === 'migration' ? 'Migration'
-            : 'RADIUS';
+              : step.operation === 'disconnect' ? 'Disconnection'
+                : step.operation === 'pullout' ? 'Pullout'
+                  : step.operation === 'migration' ? 'Migration'
+                    : 'RADIUS';
 
           if (step.step === 'attempt_1') {
             stepMessage = `Attempting ${opLabel} via RADIUS...`;

@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use Carbon\Carbon;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -85,11 +87,11 @@ class XenditReconciliationService
      */
     private const JOIN_COLLATION = 'utf8mb4_unicode_ci';
 
-    public const FILTER_ALL      = 'all';
-    public const FILTER_PENDING  = 'pending';
+    public const FILTER_ALL = 'all';
+    public const FILTER_PENDING = 'pending';
     public const FILTER_UNPOSTED = 'unposted';
-    public const FILTER_SETTLED  = 'settled';
-    public const FILTER_EXPIRED  = 'expired';
+    public const FILTER_SETTLED = 'settled';
+    public const FILTER_EXPIRED = 'expired';
 
     /**
      * Which `pending_payments.status` values each filter tab covers.
@@ -102,11 +104,11 @@ class XenditReconciliationService
      * @var array<string, array<int, string>>
      */
     public const FILTER_STATUSES = [
-        self::FILTER_ALL      => [],
-        self::FILTER_PENDING  => ['PENDING'],
+        self::FILTER_ALL => [],
+        self::FILTER_PENDING => ['PENDING'],
         self::FILTER_UNPOSTED => ['QUEUED', 'PROCESSING', 'API_RETRY'],
-        self::FILTER_SETTLED  => ['PAID'],
-        self::FILTER_EXPIRED  => ['EXPIRED', 'FAILED'],
+        self::FILTER_SETTLED => ['PAID'],
+        self::FILTER_EXPIRED => ['EXPIRED', 'FAILED'],
     ];
 
     private string $apiKey;
@@ -270,10 +272,10 @@ class XenditReconciliationService
      */
     public function getAuditList(array $options = [], ?int $organizationId = null): array
     {
-        $filter  = (string) ($options['filter'] ?? self::FILTER_ALL);
-        $search  = trim((string) ($options['search'] ?? ''));
-        $days    = max(1, min(365, (int) ($options['days'] ?? self::AUDIT_WINDOW_DAYS)));
-        $page    = max(1, (int) ($options['page'] ?? 1));
+        $filter = (string) ($options['filter'] ?? self::FILTER_ALL);
+        $search = trim((string) ($options['search'] ?? ''));
+        $days = max(1, min(365, (int) ($options['days'] ?? self::AUDIT_WINDOW_DAYS)));
+        $page = max(1, (int) ($options['page'] ?? 1));
         $perPage = max(10, min(200, (int) ($options['per_page'] ?? 50)));
 
         if (!array_key_exists($filter, self::FILTER_STATUSES)) {
@@ -303,10 +305,10 @@ class XenditReconciliationService
             $base->where(function ($q) use ($search) {
                 $like = '%' . $search . '%';
                 $q->where('pp.reference_no', 'like', $like)
-                  ->orWhere('pp.account_no', 'like', $like)
-                  ->orWhere('pp.payment_id', 'like', $like)
-                  ->orWhere('c.first_name', 'like', $like)
-                  ->orWhere('c.last_name', 'like', $like);
+                    ->orWhere('pp.account_no', 'like', $like)
+                    ->orWhere('pp.payment_id', 'like', $like)
+                    ->orWhere('c.first_name', 'like', $like)
+                    ->orWhere('c.last_name', 'like', $like);
             });
         }
 
@@ -346,13 +348,13 @@ class XenditReconciliationService
         }
 
         return [
-            'rows'     => $rows,
-            'summary'  => $summary,
-            'total'    => $total,
-            'page'     => $page,
+            'rows' => $rows,
+            'summary' => $summary,
+            'total' => $total,
+            'page' => $page,
             'per_page' => $perPage,
-            'filter'   => $filter,
-            'days'     => $days,
+            'filter' => $filter,
+            'days' => $days,
         ];
     }
 
@@ -386,9 +388,9 @@ class XenditReconciliationService
 
         return [
             'unreconciled' => $sum(self::FILTER_STATUSES[self::FILTER_PENDING]),
-            'unposted'     => $sum(self::FILTER_STATUSES[self::FILTER_UNPOSTED]),
-            'settled'      => $sum(self::FILTER_STATUSES[self::FILTER_SETTLED]),
-            'expired'      => $sum(self::FILTER_STATUSES[self::FILTER_EXPIRED]),
+            'unposted' => $sum(self::FILTER_STATUSES[self::FILTER_UNPOSTED]),
+            'settled' => $sum(self::FILTER_STATUSES[self::FILTER_SETTLED]),
+            'expired' => $sum(self::FILTER_STATUSES[self::FILTER_EXPIRED]),
             // A payment whose account_no matches no billing account. Real, and the
             // reason a settled transaction can never be posted: there is nothing to
             // credit. Counted separately because it needs a person, not a retry.
@@ -412,35 +414,59 @@ class XenditReconciliationService
         $name = trim(($record->first_name ?? '') . ' ' . ($record->last_name ?? ''));
 
         return [
-            'id'                => (int) $record->id,
-            'reference_no'      => (string) $record->reference_no,
-            'invoice_id'        => (string) ($record->payment_id ?? ''),
+            'id' => (int) $record->id,
+            'reference_no' => (string) $record->reference_no,
+            'invoice_id' => (string) ($record->payment_id ?? ''),
             'xendit_payment_id' => $record->xendit_payment_id,
-            'account_no'        => (string) $record->account_no,
-            'subscriber_name'   => $name !== '' ? $name : null,
-            'account_exists'    => $record->billing_account_id !== null,
-            'amount'            => (float) $record->amount,
-            'currency'          => (string) ($record->currency ?: 'PHP'),
-            'channel'           => $this->extractChannel($payload, (string) ($record->provider ?? '')),
-            'xendit_status'     => strtoupper((string) ($payload['status'] ?? '')) ?: null,
-            'billing_status'    => (string) $record->status,
-            'settled_at'        => $this->extractSettledAt($payload),
-            'payment_date'      => $record->payment_date,
+            'account_no' => (string) $record->account_no,
+            'subscriber_name' => $name !== '' ? $name : null,
+            'account_exists' => $record->billing_account_id !== null,
+            'amount' => (float) $record->amount,
+            'currency' => (string) ($record->currency ?: 'PHP'),
+            'channel' => $this->extractChannel($payload, (string) ($record->provider ?? '')),
+            'xendit_status' => strtoupper((string) ($payload['status'] ?? '')) ?: null,
+            'billing_status' => (string) $record->status,
+            'settled_at' => $this->extractSettledAt($payload),
+            'payment_date' => $record->payment_date,
             // The three dates the reconciliation table sorts on.
             //
             // Created and updated come off our own row; expiry is the gateway's, and
             // only Xendit knows it — `pending_payments` has no expiry column, so it is
             // read out of the stored callback payload and is null until one arrives.
-            'created_at'        => $record->created_at,
-            'updated_at'        => $record->updated_at,
-            'expiry_date'       => $this->extractExpiryDate($payload),
-            'attempts'          => (int) ($record->reconciliation_attempts ?? 0),
-            'last_reconciled_at'  => $record->last_reconciled_at,
+            'created_at' => $record->created_at,
+            // The same instant, pre-formatted, for the Date Created column. Served
+            // beside the raw value rather than instead of it: the table sorts on the
+            // raw timestamp and displays this.
+            'date_created' => $this->formatStamp($record->created_at ?? null),
+            'updated_at' => $record->updated_at,
+            'expiry_date' => $this->extractExpiryDate($payload),
+            'attempts' => (int) ($record->reconciliation_attempts ?? 0),
+            'last_reconciled_at' => $record->last_reconciled_at,
             'next_reconciliation_at' => $record->next_reconciliation_at,
-            'reconnect_status'  => $record->reconnect_status,
-            'can_force_post'    => $this->canForcePost((string) $record->status, $payload),
-            'can_mark_expired'  => (string) $record->status === 'PENDING',
+            'reconnect_status' => $record->reconnect_status,
+            'can_force_post' => $this->canForcePost((string) $record->status, $payload),
+            'can_mark_expired' => (string) $record->status === 'PENDING',
         ];
+    }
+
+    /**
+     * A stored timestamp as `YYYY-MM-DD HH:MM:SS`, or null where there is none.
+     *
+     * Pinned rather than localised: this screen reconciles a gateway against a
+     * ledger, and an ambiguous day/month is exactly the reading that costs an hour.
+     * An unparseable value is returned as-is rather than becoming a wrong date.
+     */
+    private function formatStamp(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($value)->format('Y-m-d H:i:s');
+        } catch (Throwable $e) {
+            return (string) $value;
+        }
     }
 
     /**
@@ -547,7 +573,7 @@ class XenditReconciliationService
                 'skipped' => false,
                 'message' => "Payment {$payment->reference_no} carries no gateway id, so Xendit has nothing to look up.",
                 'outcome' => null,
-                'row'     => null,
+                'row' => null,
             ];
         }
 
@@ -558,18 +584,18 @@ class XenditReconciliationService
         } catch (Throwable $e) {
             $this->logger()->error('Manual verification failed', [
                 'reference_no' => $payment->reference_no,
-                'error'        => $e->getMessage(),
+                'error' => $e->getMessage(),
             ]);
 
             return ['success' => false, 'skipped' => false, 'message' => 'Xendit lookup failed: ' . $e->getMessage(), 'outcome' => null, 'row' => null];
         }
 
         $messages = [
-            'queued'        => 'Xendit confirmed the payment. It is queued and the payment worker will post it.',
-            'expired'       => 'Xendit reports this checkout as expired.',
-            'failed'        => 'Xendit reports this payment as failed or voided.',
+            'queued' => 'Xendit confirmed the payment. It is queued and the payment worker will post it.',
+            'expired' => 'Xendit reports this checkout as expired.',
+            'failed' => 'Xendit reports this payment as failed or voided.',
             'still_pending' => 'Xendit still shows this payment as open.',
-            'unverifiable'  => 'Xendit could not confirm this payment — it is held for review.',
+            'unverifiable' => 'Xendit could not confirm this payment — it is held for review.',
         ];
 
         return [
@@ -577,7 +603,7 @@ class XenditReconciliationService
             'skipped' => in_array($outcome, ['still_pending', 'unverifiable'], true),
             'message' => $messages[$outcome] ?? 'Verification completed.',
             'outcome' => $outcome,
-            'row'     => $this->reloadRow($pendingPaymentId),
+            'row' => $this->reloadRow($pendingPaymentId),
         ];
     }
 
@@ -613,7 +639,7 @@ class XenditReconciliationService
                 'message' => in_array($payment->status, ['PAID', 'PROCESSING'], true)
                     ? "Payment {$payment->reference_no} has already been posted."
                     : "Payment {$payment->reference_no} has no confirmed-paid record from Xendit. Verify it first — a payment the gateway has not confirmed must never be posted.",
-                'row'     => $this->reloadRow($pendingPaymentId),
+                'row' => $this->reloadRow($pendingPaymentId),
             ];
         }
 
@@ -625,15 +651,15 @@ class XenditReconciliationService
                 'success' => false,
                 'skipped' => false,
                 'message' => "No billing account carries account number {$payment->account_no}, so this payment cannot be posted.",
-                'row'     => $this->reloadRow($pendingPaymentId),
+                'row' => $this->reloadRow($pendingPaymentId),
             ];
         }
 
         $this->logger()->info('Force-post requested from the reconciliation tool', [
             'reference_no' => $payment->reference_no,
-            'account_no'   => $payment->account_no,
-            'amount'       => $payment->amount,
-            'user_id'      => auth()->id(),
+            'account_no' => $payment->account_no,
+            'amount' => $payment->amount,
+            'user_id' => auth()->id(),
         ]);
 
         $outcome = $worker->postPayment($pendingPaymentId);
@@ -642,7 +668,7 @@ class XenditReconciliationService
             'success' => (bool) $outcome['success'],
             'skipped' => (bool) $outcome['skipped'],
             'message' => $outcome['message'],
-            'row'     => $this->reloadRow($pendingPaymentId),
+            'row' => $this->reloadRow($pendingPaymentId),
         ];
     }
 
@@ -668,7 +694,7 @@ class XenditReconciliationService
                 'success' => true,
                 'skipped' => true,
                 'message' => "Payment {$payment->reference_no} is already {$payment->status}.",
-                'row'     => $this->reloadRow($pendingPaymentId),
+                'row' => $this->reloadRow($pendingPaymentId),
             ];
         }
 
@@ -683,7 +709,7 @@ class XenditReconciliationService
                 'success' => false,
                 'skipped' => false,
                 'message' => "Xendit has confirmed payment {$payment->reference_no} as paid. It cannot be expired — post it instead.",
-                'row'     => $this->reloadRow($pendingPaymentId),
+                'row' => $this->reloadRow($pendingPaymentId),
             ];
         }
 
@@ -691,10 +717,10 @@ class XenditReconciliationService
             ->where('id', $pendingPaymentId)
             ->where('status', 'PENDING')
             ->update([
-                'status'                 => 'EXPIRED',
+                'status' => 'EXPIRED',
                 'next_reconciliation_at' => null,
-                'last_reconciled_at'     => now(),
-                'updated_at'             => now(),
+                'last_reconciled_at' => now(),
+                'updated_at' => now(),
             ]);
 
         if ($affected === 0) {
@@ -703,22 +729,22 @@ class XenditReconciliationService
                 'success' => true,
                 'skipped' => true,
                 'message' => "Payment {$payment->reference_no} changed status before it could be expired.",
-                'row'     => $this->reloadRow($pendingPaymentId),
+                'row' => $this->reloadRow($pendingPaymentId),
             ];
         }
 
         $this->logger()->info('Payment manually marked expired', [
             'reference_no' => $payment->reference_no,
-            'account_no'   => $payment->account_no,
-            'reason'       => $reason,
-            'user_id'      => auth()->id(),
+            'account_no' => $payment->account_no,
+            'reason' => $reason,
+            'user_id' => auth()->id(),
         ]);
 
         return [
             'success' => true,
             'skipped' => false,
             'message' => "Payment {$payment->reference_no} marked expired.",
-            'row'     => $this->reloadRow($pendingPaymentId),
+            'row' => $this->reloadRow($pendingPaymentId),
         ];
     }
 
@@ -748,11 +774,30 @@ class XenditReconciliationService
         $record = $this->auditBase()
             ->where('pp.id', $id)
             ->select([
-                'pp.id', 'pp.reference_no', 'pp.account_no', 'pp.amount', 'pp.status',
-                'pp.provider', 'pp.payment_id', 'pp.xendit_payment_id', 'pp.payment_date',
-                'pp.currency', 'pp.callback_payload', 'pp.reconciliation_attempts',
-                'pp.last_reconciled_at', 'pp.next_reconciliation_at', 'pp.reconnect_status',
-                'pp.updated_at', 'ba.id as billing_account_id', 'c.first_name', 'c.last_name',
+                'pp.id',
+                'pp.reference_no',
+                'pp.account_no',
+                'pp.amount',
+                'pp.status',
+                'pp.provider',
+                'pp.payment_id',
+                'pp.xendit_payment_id',
+                'pp.payment_date',
+                'pp.currency',
+                'pp.callback_payload',
+                'pp.reconciliation_attempts',
+                'pp.last_reconciled_at',
+                'pp.next_reconciliation_at',
+                'pp.reconnect_status',
+                // created_at is not optional here. presentAuditRow() reads it, and a
+                // column missing from a query-builder row raises an undefined-property
+                // warning that Laravel turns into an ErrorException - which is what
+                // made Verify with Xendit report a failure after it had succeeded.
+                'pp.created_at',
+                'pp.updated_at',
+                'ba.id as billing_account_id',
+                'c.first_name',
+                'c.last_name',
             ])
             ->first();
 
@@ -773,7 +818,7 @@ class XenditReconciliationService
             ->whereNotNull('payment_id')
             ->where(function ($q) {
                 $q->whereNull('next_reconciliation_at')
-                  ->orWhere('next_reconciliation_at', '<=', now());
+                    ->orWhere('next_reconciliation_at', '<=', now());
             })
             ->select(
                 'id',
@@ -976,54 +1021,89 @@ class XenditReconciliationService
     /**
      * Read a payment's current state from Xendit.
      *
-     * Which endpoint depends on what created it. Everything AKMIIS creates today
-     * goes through POST /v2/invoices, so `payment_id` holds an invoice id and
-     * /v2/invoices/{id} is the correct lookup. Payment request ids are prefixed
-     * `pr-`, so if the create path is ever moved to the v3 Payments API this
-     * keeps reconciling both without a migration of historical rows.
+     * Two APIs can hold the record. Checkouts created with POST /v2/invoices are read
+     * back from /v2/invoices/{id}; those created through the v3 Payments API are read
+     * from /v3/payment_requests/{id}. The id's own shape says which is likely - Xendit
+     * prefixes payment-request ids `pr-` - but that is a hint, not a guarantee, and a
+     * deployment that has moved between the two create paths has historical rows of
+     * both kinds under one column.
+     *
+     * So the likely endpoint is tried first and the other one only on a 404. A 404 is
+     * the one status that means "this API does not hold this record"; any other
+     * failure is about the call itself and is raised rather than retried against an
+     * endpoint that was never going to have it either. At most one extra request is
+     * ever made, and only for a row the first endpoint disowned.
      *
      * @return array|null decoded body, or null when the state is not knowable
      */
     private function fetchRemoteStatus(string $id): ?array
     {
-        $isPaymentRequest = str_starts_with($id, 'pr-');
+        $order = $this->looksLikePaymentRequest($id)
+            ? [true, false]
+            : [false, true];
 
-        $url = $isPaymentRequest
+        foreach ($order as $asPaymentRequest) {
+            $response = $this->requestRemoteStatus($id, $asPaymentRequest);
+
+            if ($response->successful()) {
+                $body = $response->json();
+
+                return is_array($body) ? $body : null;
+            }
+
+            if ($response->status() === 404) {
+                continue;
+            }
+
+            // Body is logged because Xendit's error envelope carries the reason and
+            // never contains our key. The Authorization header is not logged.
+            $this->logger()->error('Xendit lookup failed', [
+                'payment_id' => $id,
+                'endpoint' => $asPaymentRequest ? 'payment_requests' : 'invoices',
+                'http_status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+
+            throw new Exception('Xendit lookup failed with HTTP ' . $response->status());
+        }
+
+        // Neither API has such a record. Retrying cannot change that, but neither can
+        // we call it paid - leave it for the operator.
+        $this->logger()->warning('Xendit has no record of this payment on either API', [
+            'payment_id' => $id,
+        ]);
+
+        return null;
+    }
+
+    /**
+     * Is this id shaped like a v3 payment request rather than a v2 invoice?
+     *
+     * Xendit prefixes payment-request ids `pr-` (older sandbox keys used `pr_`);
+     * invoice ids are a bare 24-character object id.
+     */
+    private function looksLikePaymentRequest(string $id): bool
+    {
+        return str_starts_with($id, 'pr-') || str_starts_with($id, 'pr_');
+    }
+
+    /**
+     * One lookup against one of the two APIs. No retry and no interpretation - the
+     * caller decides what a given status means.
+     */
+    private function requestRemoteStatus(string $id, bool $asPaymentRequest): Response
+    {
+        $url = $asPaymentRequest
             ? $this->baseUrl . '/v3/payment_requests/' . rawurlencode($id)
             : $this->baseUrl . '/v2/invoices/' . rawurlencode($id);
 
         $request = Http::withBasicAuth($this->apiKey, '')->timeout(self::HTTP_TIMEOUT);
 
-        if ($isPaymentRequest) {
+        if ($asPaymentRequest) {
             $request = $request->withHeaders(['api-version' => $this->apiVersion]);
         }
 
-        $response = $request->get($url);
-
-        if ($response->successful()) {
-            $body = $response->json();
-            return is_array($body) ? $body : null;
-        }
-
-        // A 404 means Xendit has no such record. Retrying cannot change that,
-        // but neither can we call it paid — leave it for the operator.
-        if ($response->status() === 404) {
-            $this->logger()->warning('Xendit has no record of this payment', [
-                'payment_id' => $id,
-                'endpoint' => $isPaymentRequest ? 'payment_requests' : 'invoices',
-            ]);
-            return null;
-        }
-
-        // Body is logged because Xendit's error envelope carries the reason and
-        // never contains our key. The Authorization header is not logged.
-        $this->logger()->error('Xendit lookup failed', [
-            'payment_id' => $id,
-            'http_status' => $response->status(),
-            'body' => $response->body(),
-        ]);
-
-        throw new Exception('Xendit lookup failed with HTTP ' . $response->status());
+        return $request->get($url);
     }
 
     /**

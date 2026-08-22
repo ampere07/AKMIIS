@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import {
   xenditReconcileService,
+  type XenditActionResult,
   type XenditAuditList,
   type XenditFilter,
   type XenditReconcileRow,
@@ -105,9 +106,10 @@ const COLUMNS: Array<DataGridColumn<XenditReconcileRow>> = [
   { key: 'channel', label: 'Channel', value: (row) => row.channel },
   { key: 'xendit_status', label: 'Xendit Status', value: (row) => row.xendit_status ?? '' },
   { key: 'billing_status', label: 'Billing Status', value: (row) => row.billing_status },
-  // The three dates. Created and expiry start hidden so the default table is no wider
-  // than it was; the column menu brings them in, and the choice is remembered.
-  { key: 'created_at', label: 'Transaction Created', value: (row) => dateValue(row.created_at), defaultHidden: true },
+  // Date Created is shown by default: it is what an operator matches a Xendit
+  // dashboard row against, and having to open the column menu to find it was the
+  // single most common complaint about this screen. Expiry stays behind the menu.
+  { key: 'created_at', label: 'Date Created', value: (row) => dateValue(row.created_at) },
   { key: 'settled_at', label: 'Paid / Settled', value: (row) => dateValue(row.settled_at) },
   { key: 'expiry_date', label: 'Expiry / Updated', value: (row) => dateValue(row.expiry_date ?? row.updated_at), defaultHidden: true },
   { key: 'actions', label: 'Actions', locked: true },
@@ -205,8 +207,21 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
 
   // ---- Actions -----------------------------------------------------------
 
+  /**
+   * Replace one row with the state the backend just handed back.
+   *
+   * Used where an action did not move the payment anywhere: the operator keeps their
+   * page, filter and selection instead of watching the whole table reload to show a
+   * single unchanged cell.
+   */
+  const applyRow = useCallback((updated: XenditReconcileRow) => {
+    setData((prev) => (prev
+      ? { ...prev, rows: prev.rows.map((row) => (row.id === updated.id ? updated : row)) }
+      : prev));
+  }, []);
+
   const runAction = useCallback(
-    async (key: string, action: () => Promise<{ success: boolean; skipped: boolean; message: string }>) => {
+    async (key: string, action: () => Promise<XenditActionResult>) => {
       setBusy(key);
       try {
         const result = await action();
@@ -214,12 +229,22 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
           tone: result.success ? (result.skipped ? 'info' : 'success') : 'error',
           text: result.message,
         });
-        await load();
+
+        // `skipped` is the backend saying the payment is where it was - Xendit still
+        // shows it open, or another process had already moved it. Nothing else on
+        // screen changed, so the row is patched in place. Anything that did move a
+        // payment changes the stat cards and possibly its membership of the current
+        // filter, so that still reloads the list.
+        if (result.skipped && result.row) {
+          applyRow(result.row);
+        } else {
+          await load();
+        }
       } finally {
         setBusy(null);
       }
     },
-    [load]
+    [load, applyRow]
   );
 
   const confirmForcePost = useCallback(async () => {
@@ -620,9 +645,12 @@ const XenditReconcileTool: React.FC<XenditReconcileToolProps> = ({ isDarkMode: i
                         );
 
                       case 'created_at':
+                        // The backend's formatted value where it sent one, so the
+                        // column reads identically to the CSV export; stampFull is the
+                        // fallback for a row served before that field existed.
                         return (
                           <td key={column.key} className={`px-3 py-2.5 text-xs font-mono whitespace-nowrap ${muted}`}>
-                            {stampFull(row.created_at)}
+                            {row.date_created ?? stampFull(row.created_at)}
                           </td>
                         );
 

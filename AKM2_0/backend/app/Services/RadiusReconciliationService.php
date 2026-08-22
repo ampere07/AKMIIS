@@ -732,21 +732,32 @@ class RadiusReconciliationService
      * its cleanup pass refuses to unprovision any ONU whose subscriber is online.
      *
      * Read-only, no transaction, and every device failure is reported rather than
-     * thrown — a device that cannot be reached must never be read as "nobody is
+     * thrown - a device that cannot be reached must never be read as "nobody is
      * online", because that is the reading that would delete a live subscriber.
+     *
+     * Every configured device is queried, but only the ones this deployment expects
+     * to be live decide `available`. A failover server is configured on purpose and
+     * is dark by design; counting its silence as an outage parked the SmartOLT
+     * cleanup pass and banner-ed the alignment tabs on an estate where the server
+     * that actually holds the sessions had answered in full. A standby that does
+     * answer is still merged in, and its failures are still reported - under
+     * `standby_errors`, where they read as information rather than as a fault.
      *
      * @return array{
      *     available: bool,
      *     by_mac: array<string, array<string, mixed>>,
      *     by_username: array<string, array<string, mixed>>,
      *     errors: array<int, string>,
-     *     server_count: int
+     *     standby_errors: array<int, string>,
+     *     server_count: int,
+     *     active_server_count: int
      * }
      */
     public function activeSessions(?int $organizationId = null): array
     {
         $trace  = [];
         $errors = [];
+        $standbyErrors = [];
 
         $configs = $this->targetConfigs(null, $organizationId);
 
@@ -756,16 +767,41 @@ class RadiusReconciliationService
                 'by_mac'       => [],
                 'by_username'  => [],
                 'errors'       => ['No RADIUS server is configured.'],
+                'standby_errors' => [],
                 'server_count' => 0,
+                'active_server_count' => 0,
             ];
         }
 
+        // Hoisted once: the sweep below is a membership test per device, not a
+        // resolver call per device.
+        $activeIds = $this->resolver->activeConfigs($organizationId)
+            ->map(static fn (RadiusConfig $config): int => (int) $config->id)
+            ->all();
+
         $byMac      = [];
         $byUsername = [];
+        $answered   = 0;
 
         foreach ($configs as $config) {
             $label    = $this->labelFor($config, $organizationId);
-            $sessions = $this->fetchSessions($config, $trace, $errors, $label);
+            $isActive = in_array((int) $config->id, $activeIds, true);
+
+            // Collected per device so a failure can be attributed. fetchSessions()
+            // returns an empty list both for "no sessions" and for "did not answer",
+            // and those must not be conflated.
+            $deviceErrors = [];
+            $sessions = $this->fetchSessions($config, $trace, $deviceErrors, $label);
+
+            if ($deviceErrors === []) {
+                if ($isActive) {
+                    $answered++;
+                }
+            } elseif ($isActive) {
+                $errors = array_merge($errors, $deviceErrors);
+            } else {
+                $standbyErrors = array_merge($standbyErrors, $deviceErrors);
+            }
 
             foreach ($sessions as $username => $session) {
                 $entry = [
@@ -786,14 +822,27 @@ class RadiusReconciliationService
             }
         }
 
+        if ($standbyErrors !== []) {
+            $this->log('info', 'Standby RADIUS server(s) did not answer the session sweep.', [
+                'standby_errors' => $standbyErrors,
+                'active_servers' => count($activeIds),
+                'answered'       => $answered,
+            ]);
+        }
+
         // Partial data is still usable for matching, but a caller about to delete
-        // something must be able to see that a device did not answer.
+        // something must be able to see that a device it depends on did not answer.
+        // `$answered > 0` guards the case where every live server failed: no errors
+        // would be attributed to a standby, and an empty session list must not read
+        // as "nobody is online".
         return [
-            'available'    => $errors === [],
+            'available'    => $errors === [] && $answered > 0,
             'by_mac'       => $byMac,
             'by_username'  => $byUsername,
             'errors'       => $errors,
+            'standby_errors' => $standbyErrors,
             'server_count' => $configs->count(),
+            'active_server_count' => count($activeIds),
         ];
     }
 

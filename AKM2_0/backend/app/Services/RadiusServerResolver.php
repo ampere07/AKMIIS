@@ -26,6 +26,23 @@ use Throwable;
  */
 class RadiusServerResolver
 {
+    /**
+     * How many of the configured RADIUS servers this deployment expects to be live.
+     *
+     * `all` - every radius_config record is a production server and every one of them
+     * is queried; a server that does not answer is a real fault.
+     * `primary` - radius_config #1 carries the estate and the records after it are
+     * failover targets. They are still searched by findConfigForAccount() and still
+     * merged into a session sweep when they answer, but one of them being unreachable
+     * is the normal steady state and must not be reported as an outage.
+     *
+     * DEFAULT_TOPOLOGY is this deployment's shape. `config('radius.topology')`
+     * overrides it where a client's estate changes without a code change.
+     */
+    public const TOPOLOGY_ALL = 'all';
+    public const TOPOLOGY_PRIMARY = 'primary';
+    public const DEFAULT_TOPOLOGY = self::TOPOLOGY_ALL;
+
     private string $logName = 'Radius_Resolver';
 
     /**
@@ -45,6 +62,48 @@ class RadiusServerResolver
         }
 
         return RadiusConfig::whereNull('organization_id')->orderBy('id')->get()->values();
+    }
+
+    /**
+     * The configs this deployment expects to answer.
+     *
+     * Not the same question as "which configs exist": a failover server is configured
+     * on purpose and is legitimately dark most of the time. Callers that need to
+     * decide whether a sweep succeeded judge themselves against this list, while
+     * callers that gather data still read every config - a standby that does answer
+     * is merged in, it just cannot fail the run by being absent.
+     *
+     * @return Collection<int, RadiusConfig>
+     */
+    public function activeConfigs(?int $organizationId = null): Collection
+    {
+        $configs = $this->orderedConfigs($organizationId);
+
+        if ($configs->isEmpty() || $this->topology() === self::TOPOLOGY_ALL) {
+            return $configs;
+        }
+
+        return $configs->take(1)->values();
+    }
+
+    /**
+     * Is this config one the deployment expects to answer, or a standby?
+     */
+    public function isActiveConfig(RadiusConfig $config, ?int $organizationId = null): bool
+    {
+        return $this->activeConfigs($organizationId)
+            ->contains(fn (RadiusConfig $candidate): bool => (int) $candidate->id === (int) $config->id);
+    }
+
+    /**
+     * Anything other than an explicit `all` is read as `primary`, so a typo in
+     * configuration degrades to the safer reading rather than to "everything is live".
+     */
+    private function topology(): string
+    {
+        $value = strtolower(trim((string) config('radius.topology', self::DEFAULT_TOPOLOGY)));
+
+        return $value === self::TOPOLOGY_ALL ? self::TOPOLOGY_ALL : self::TOPOLOGY_PRIMARY;
     }
 
     /**

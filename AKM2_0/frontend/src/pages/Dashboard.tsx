@@ -81,6 +81,7 @@ import ApplicationForm from './ApplicationForm';
 import SmartOltTool from './SmartOltTool';
 import MikrotikRadiusTool from './MikrotikRadiusTool';
 import XenditReconcileTool from './XenditReconcileTool';
+import BillingReconcileTool from './BillingReconcileTool';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
 
@@ -433,6 +434,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <MikrotikRadiusTool isDarkMode={isDarkMode} />;
             case 'xendit-reconcile-tool':
                 return <XenditReconcileTool isDarkMode={isDarkMode} />;
+            case 'billing-reconcile-tool':
+                return <BillingReconcileTool isDarkMode={isDarkMode} />;
             case 'settings':
                 return <Settings />;
             case 'dashboard':

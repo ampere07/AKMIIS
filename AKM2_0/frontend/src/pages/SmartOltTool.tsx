@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ChevronDown, ChevronUp, Download, Gauge, HardDrive, History, Loader2,
-  Network, PauseCircle, RefreshCw, Router, Signal, Trash2, Undo2, UserCog, X, XCircle
+  Network, PauseCircle, RefreshCw, Router, Trash2, Undo2, UserCog, X, XCircle
 } from 'lucide-react';
 import { useDataGrid, type DataGridColumn, type DataGridFilter } from '../hooks/useDataGrid';
 import {
@@ -23,7 +23,6 @@ import {
   type MacAlignmentPreview,
   type MacAlignState,
   type ProfilePreview,
-  type SignalBand,
   type SnAlignmentPreview,
   type SnAlignState,
   type SmartOltLog,
@@ -50,7 +49,7 @@ type TabId = 'inventory' | 'mac_alignment' | 'sn_alignment' | 'profile' | 'clean
  * respond — see `getAlignmentPreview` in the service, kept deprecated-in-place.
  */
 const TABS: Array<{ id: TabId; label: string; icon: React.ElementType }> = [
-  { id: 'inventory', label: 'ONU Inventory & Signal', icon: Signal },
+  { id: 'inventory', label: 'ONU Inventory', icon: Network },
   { id: 'mac_alignment', label: 'MAC & Username Alignment', icon: Router },
   { id: 'sn_alignment', label: 'Router/Modem SN', icon: HardDrive },
   { id: 'profile', label: 'Profile Sync', icon: UserCog },
@@ -82,13 +81,6 @@ const SN_STATE_BADGES: Record<SnAlignState, { label: string; classes: string }> 
   sn_no_mac: { label: 'No MAC', classes: 'bg-gray-500/15 text-gray-400 border-gray-500/30' },
 };
 
-const SIGNAL_STYLES: Record<SignalBand, { label: string; classes: string }> = {
-  optimal: { label: 'Optimal', classes: 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30' },
-  warning: { label: 'Warning', classes: 'bg-amber-500/15 text-amber-500 border-amber-500/30' },
-  critical: { label: 'Critical', classes: 'bg-red-500/15 text-red-500 border-red-500/30' },
-  offline: { label: 'Offline', classes: 'bg-gray-500/15 text-gray-400 border-gray-500/30' },
-};
-
 const PAGE_SIZE = 100;
 
 /**
@@ -103,19 +95,17 @@ const PAGE_SIZE = 100;
  */
 const TAB_COLUMNS: Record<TabId, Array<DataGridColumn<any>>> = {
   inventory: [
+    { key: 'name', label: 'Smart OLT Name', value: (row) => row.name },
     { key: 'sn', label: 'Serial', value: (row) => row.sn },
-    { key: 'name', label: 'Name', value: (row) => row.name },
+    { key: 'status', label: 'Status', value: (row) => row.status },
+    // The bridge MAC every matching pass in this tool binds on. Empty means the
+    // discovery crawl has not reached this ONU yet, not that it has no MAC.
+    { key: 'mac_address', label: 'MAC Address', value: (row) => row.mac_address },
     {
       key: 'location',
-      label: 'OLT / Board / Port',
-      value: (row) => [row.olt_name, row.board, row.port].filter(Boolean).join(' / '),
+      label: 'OLT / Board / Port / Zone',
+      value: (row) => [row.olt_name, row.board, row.port, row.zone_name].filter(Boolean).join(' / '),
     },
-    { key: 'zone_name', label: 'Zone', value: (row) => row.zone_name },
-    { key: 'status', label: 'Status', value: (row) => row.status },
-    // Numeric so the optical columns order by strength, not by digit string.
-    { key: 'rx_power', label: 'RX (dBm)', value: (row) => (row.rx_power === null || row.rx_power === undefined ? null : Number(row.rx_power)) },
-    { key: 'tx_power', label: 'TX (dBm)', value: (row) => (row.tx_power === null || row.tx_power === undefined ? null : Number(row.tx_power)) },
-    { key: 'signal', label: 'Signal', value: (row) => SIGNAL_STYLES[row.signal as SignalBand]?.label ?? row.signal },
   ],
   mac_alignment: [
     { key: 'state', label: 'State', value: (row) => MAC_STATE_BADGES[row.state as MacAlignState]?.label ?? row.state },
@@ -153,10 +143,7 @@ const TAB_COLUMNS: Record<TabId, Array<DataGridColumn<any>>> = {
     { key: 'zone', label: 'Zone / OLT', value: (row) => [row.zone_name, row.olt_name].filter(Boolean).join(' / ') },
     { key: 'status', label: 'Status', value: (row) => row.status },
     { key: 'days_offline', label: 'Days Offline', value: (row) => (row.days_offline === null || row.days_offline === undefined ? null : Number(row.days_offline)) },
-    // Both ends of the PON link. Sorting on a number, not a formatted string, so
-    // -9 dBm orders above -27 dBm instead of lexically after it.
-    { key: 'onu_rx', label: 'ONU RX (dBm)', value: (row) => (row.onu_rx === null || row.onu_rx === undefined ? null : Number(row.onu_rx)) },
-    { key: 'olt_rx', label: 'OLT RX (dBm)', value: (row) => (row.olt_rx === null || row.olt_rx === undefined ? null : Number(row.olt_rx)) },
+    { key: 'mac_address', label: 'MAC Address', value: (row) => row.mac_address },
     // The old Verdict column is gone: cleanup runs on the operator's selection, not
     // on an eligibility ruling. What the guards said is kept one toggle away rather
     // than deleted, so an override can still be read back off the table it was made
@@ -170,13 +157,25 @@ const TAB_COLUMNS: Record<TabId, Array<DataGridColumn<any>>> = {
 const TAB_FILTERS: Record<TabId, Array<DataGridFilter<any>>> = {
   inventory: [
     {
-      key: 'signal',
-      label: 'Signal',
-      options: (Object.keys(SIGNAL_STYLES) as SignalBand[]).map((band) => ({
-        value: band,
-        label: SIGNAL_STYLES[band].label,
-      })),
-      predicate: (row, value) => row.signal === value,
+      key: 'mac',
+      label: 'Bridge MAC',
+      options: [
+        { value: 'cached', label: 'Discovered' },
+        { value: 'pending', label: 'Pending discovery' },
+      ],
+      predicate: (row, value) => (value === 'cached' ? !!row.mac_address : !row.mac_address),
+    },
+    {
+      key: 'naming',
+      label: 'Naming',
+      options: [
+        { value: 'named', label: 'Named' },
+        { value: 'not_set', label: 'Name not set' },
+      ],
+      predicate: (row, value) => {
+        const notSet = !String(row.name || '').trim() || String(row.name).trim().toLowerCase() === 'not set';
+        return value === 'not_set' ? notSet : !notSet;
+      },
     },
     {
       key: 'status',
@@ -251,21 +250,18 @@ const TAB_FILTERS: Record<TabId, Array<DataGridFilter<any>>> = {
   ],
   // No verdict dropdown. The Inactive ONU table is a worklist of what has been dark
   // past the threshold, and the operator decides what comes off it; narrowing by an
-  // eligibility ruling was the gate this tool no longer applies. Optical state is the
-  // useful cut instead — a dark ONU still reporting light is a different problem from
-  // one that has gone silent.
+  // eligibility ruling was the gate this tool no longer applies. Whether a bridge MAC
+  // is known is the useful cut instead — an ONU nothing has ever authenticated behind
+  // is a different decommission decision from one that has a subscriber attached.
   cleanup: [
     {
-      key: 'optical',
-      label: 'Optical',
+      key: 'mac',
+      label: 'Bridge MAC',
       options: [
-        { value: 'measured', label: 'Has reading' },
-        { value: 'unmeasured', label: 'Never scanned' },
+        { value: 'cached', label: 'Discovered' },
+        { value: 'pending', label: 'Never crawled' },
       ],
-      predicate: (row, value) => {
-        const measured = row.onu_rx !== null && row.onu_rx !== undefined;
-        return value === 'measured' ? measured : !measured;
-      },
+      predicate: (row, value) => (value === 'cached' ? !!row.mac_address : !row.mac_address),
     },
   ],
   logs: [],
@@ -275,14 +271,13 @@ const TAB_FILTERS: Record<TabId, Array<DataGridFilter<any>>> = {
 const onuRowKey = (row: any) => String(row.external_id);
 
 /**
- * An optical reading, or a dash where there is none.
+ * A metric card's value.
  *
- * Never measured and a genuine 0 dBm are different facts, and 0 dBm on a PON link
- * would be an extraordinary one — so a missing reading renders as a dash and is never
- * coerced into a number.
+ * `null` means the pass behind it has never run, which is not the same claim as zero
+ * — a dash says "unknown", a 0 says "we looked and there is nothing".
  */
-const formatDbm = (value: number | null | undefined): string =>
-  value === null || value === undefined ? '—' : `${Number(value).toFixed(2)}`;
+const formatMetric = (value: number | null | undefined): string =>
+  value === null || value === undefined ? '—' : String(value);
 
 /**
  * Which rows a batch action may legally touch.
@@ -621,6 +616,38 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
     return [];
   }, [tab, state?.rows, macAlignment?.rows, snAlignment?.rows, profile?.rows, cleanup?.rows]);
 
+  /**
+   * The fifteen dashboard cards, in the order they are read.
+   *
+   * Derived rather than hardcoded in the markup so the labels, captions and colours
+   * stay next to the values they describe. Nothing here computes: every figure is
+   * already resolved server-side by `getState`, which is what keeps a page poll from
+   * costing a RADIUS sweep.
+   */
+  const metricCards = useMemo(() => {
+    const m = state?.metrics;
+
+    return [
+      { key: 'inventory', label: 'Inventory', caption: 'Total SmartOLT ONUs', value: m?.inventory ?? state?.inventory_count ?? 0, tone: '' },
+      { key: 'authorized', label: 'Authorized', caption: 'Online / authorized', value: m?.authorized, tone: 'text-emerald-500' },
+      { key: 'offline', label: 'Offline', caption: 'Power / link down', value: m?.offline, tone: 'text-gray-400' },
+      { key: 'los', label: 'LOS', caption: 'Fiber loss of signal', value: m?.los, tone: 'text-red-500' },
+      { key: 'pwrfail', label: 'Power Fail', caption: 'Dying gasp / off', value: m?.pwrfail, tone: 'text-amber-500' },
+      { key: 'name_not_set', label: 'Name = "Not Set"', caption: 'Unassigned names', value: m?.name_not_set, tone: 'text-amber-500' },
+
+      { key: 'named', label: 'Named ONUs', caption: 'Custom names set', value: m?.named, tone: 'text-blue-500' },
+      { key: 'radius_active', label: 'RADIUS Active', caption: 'Active user sessions', value: m?.radius_active, tone: 'text-blue-500' },
+      { key: 'mac_cached', label: 'MAC Cached', caption: 'OLT bridge MAC cache', value: m?.mac_cached, tone: 'text-blue-500' },
+      { key: 'pending_discovery', label: 'Pending Discovery', caption: 'Uncached MAC ONUs', value: m?.pending_discovery, tone: 'text-orange-500' },
+      { key: 'matched_sessions', label: 'Matched Sessions', caption: 'Exact MAC matches', value: m?.matched_sessions, tone: 'text-emerald-500' },
+      { key: 'rename_required', label: 'Rename Required', caption: 'Includes "not set"', value: m?.rename_required, tone: 'text-amber-500' },
+
+      { key: 'already_correct', label: 'Already Correct', caption: 'Name equals username', value: m?.already_correct, tone: 'text-emerald-500' },
+      { key: 'address_updates', label: 'Address Updates', caption: 'Pending DB sync', value: m?.address_updates, tone: 'text-blue-500' },
+      { key: 'delete_candidates', label: 'Delete Candidates', caption: 'Passed safety rules', value: m?.delete_candidates, tone: 'text-red-500' },
+    ];
+  }, [state]);
+
   const gridColumns = useMemo(() => TAB_COLUMNS[tab], [tab]);
   const gridFilters = useMemo(() => TAB_FILTERS[tab], [tab]);
   const selectable = useMemo(() => isRowSelectable(tab), [tab]);
@@ -648,6 +675,31 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
     setGridPage(1);
     if (tab !== 'inventory') loadTabData(tab);
   }, [tab, loadTabData, clearGridSelection, setGridPage]);
+
+  /**
+   * Re-run a matching tab against live data.
+   *
+   * Plain `loadTabData` was not enough on its own. The preview itself is recomputed
+   * server-side on every call — it re-reads the RADIUS session table and the
+   * subscriber records rather than replaying a stored result — but the figures above
+   * the table and the tick-boxes below it were left standing from the previous
+   * computation, so a re-match that had genuinely changed the answer still looked
+   * like the old one. This drops the selection first (an id from the previous pass
+   * must not carry onto a row that is no longer the same decision), recomputes the
+   * tab, then refreshes the dashboard metrics off the summary that pass just parked.
+   *
+   * The SmartOLT ONU inventory and the bridge-MAC cache are deliberately NOT
+   * re-downloaded here: both cost throttled API calls per ONU and neither changes
+   * between two presses of this button. Sync SmartOLT Inventory and Discover Bridge
+   * MACs are the buttons that spend that quota, on purpose.
+   */
+  const rematch = useCallback(async (target: TabId) => {
+    clearGridSelection();
+    setGridPage(1);
+    await loadTabData(target);
+    await loadState(true);
+    setNotice({ tone: 'info', text: 'Re-matched against the live RADIUS sessions and the current billing records.' });
+  }, [clearGridSelection, setGridPage, loadTabData, loadState]);
 
   const confirmUndo = useCallback(async () => {
     if (!undoTarget) return;
@@ -691,14 +743,14 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
       : tab === 'mac_alignment'
         ? (
           <>
-            Nothing matched. Run <strong>Sync Inventory</strong>, then <strong>Scan Optical Power</strong> to
+            Nothing matched. Run <strong>Sync Inventory</strong>, then <strong>Discover Bridge MACs</strong> to
             discover the bridge MACs this pass matches against.
           </>
         )
         : tab === 'sn_alignment'
           ? (
             <>
-              Nothing matched. Run <strong>Sync Inventory</strong>, then <strong>Scan Optical Power</strong> so the
+              Nothing matched. Run <strong>Sync Inventory</strong>, then <strong>Discover Bridge MACs</strong> so the
               bridge MACs this pass matches on are known.
             </>
           )
@@ -726,11 +778,9 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
         case 'location':
           return (
             <td className={`px-3 py-2.5 text-xs ${muted}`}>
-              {[row.olt_name, row.board, row.port].filter(Boolean).join(' / ') || '—'}
+              {[row.olt_name, row.board, row.port, row.zone_name].filter(Boolean).join(' / ') || '—'}
             </td>
           );
-        case 'zone_name':
-          return <td className={`px-3 py-2.5 text-xs ${muted}`}>{row.zone_name || '—'}</td>;
         case 'status':
           return (
             <td className={`px-3 py-2.5 text-xs ${text}`}>
@@ -740,16 +790,10 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
               )}
             </td>
           );
-        case 'rx_power':
-          return <td className={`px-3 py-2.5 text-xs font-mono ${text}`}>{row.rx_power ?? '—'}</td>;
-        case 'tx_power':
-          return <td className={`px-3 py-2.5 text-xs font-mono ${text}`}>{row.tx_power ?? '—'}</td>;
-        case 'signal':
+        case 'mac_address':
           return (
-            <td className="px-3 py-2.5">
-              <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${SIGNAL_STYLES[row.signal as SignalBand].classes}`}>
-                {SIGNAL_STYLES[row.signal as SignalBand].label}
-              </span>
+            <td className={`px-3 py-2.5 text-xs font-mono ${row.mac_address ? text : muted}`}>
+              {row.mac_address || 'pending discovery'}
             </td>
           );
         default:
@@ -953,10 +997,12 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
         return <td className={`px-3 py-2.5 text-xs ${text}`}>{row.status}</td>;
       case 'days_offline':
         return <td className={`px-3 py-2.5 text-xs ${text}`}>{row.days_offline ?? '—'}</td>;
-      case 'onu_rx':
-        return <td className={`px-3 py-2.5 text-xs font-mono ${text}`}>{formatDbm(row.onu_rx)}</td>;
-      case 'olt_rx':
-        return <td className={`px-3 py-2.5 text-xs font-mono ${text}`}>{formatDbm(row.olt_rx)}</td>;
+      case 'mac_address':
+        return (
+          <td className={`px-3 py-2.5 text-xs font-mono ${row.mac_address ? text : muted}`}>
+            {row.mac_address || '—'}
+          </td>
+        );
       case 'safety':
         return (
           <td className="px-3 py-2.5 text-xs">
@@ -989,7 +1035,7 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
           <div>
             <h1 className={`text-xl font-bold ${text}`}>SmartOLT Tool</h1>
             <p className={`text-sm ${muted}`}>
-              ONU inventory, live optical power, MAC-based name and router/modem SN alignment, profile push and safe decommissioning.
+              ONU inventory, bridge-MAC discovery, MAC-based name and router/modem SN alignment, profile push and safe decommissioning.
               {state?.inventory_synced_at && (
                 <> Inventory synced {new Date(state.inventory_synced_at).toLocaleString()}.</>
               )}
@@ -1012,16 +1058,16 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
           >
             <Activity className="w-4 h-4" /> Sync RADIUS
           </button>
-          {/* Background optical-power / MAC crawl. One API call per ONU against a
-              hard quota, so it runs as a bounded background job and never inline.
-              Default queues only ONUs never read; hold Shift to force a full rescan. */}
+          {/* Background bridge-MAC crawl. One API call per ONU against a hard quota,
+              so it runs as a bounded background job and never inline. Default queues
+              only ONUs never read; hold Shift to force a full rescan. */}
           <button
             onClick={(e) => startJob('optical_scan', { rescan: e.shiftKey })}
             disabled={jobRunning || !state?.configured}
-            title="Scan optical power and bridge MACs in the background. Shift-click to re-read every ONU."
+            title="Discover bridge MACs in the background. Shift-click to re-read every ONU."
             className={`px-3 py-2 rounded-lg border text-sm font-medium flex items-center gap-2 disabled:opacity-50 ${card} ${text}`}
           >
-            <Gauge className="w-4 h-4" /> Scan MAC / Optical Power
+            <Gauge className="w-4 h-4" /> Discover Bridge MACs
           </button>
           <button
             onClick={() => smartOltReconciliationService.exportCsv(exportDataset)}
@@ -1126,29 +1172,19 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
         </div>
       )}
 
-      {/* Signal summary */}
+      {/* Metrics grid. Fifteen cards in three rows of six, six and three: the estate
+          as SmartOLT reports it, then what RADIUS and the MAC cache make of it, then
+          what there is to act on. A dash rather than a zero means the pass behind that
+          figure has not run yet — open its tab, or wait for the nightly automation. */}
       {state && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
-          <div className={`rounded-xl border p-3 ${card}`}>
-            <div className={`text-xs font-medium ${muted}`}>Total ONUs</div>
-            <div className={`text-2xl font-bold mt-1 ${text}`}>{state.inventory_count}</div>
-          </div>
-          {(Object.keys(SIGNAL_STYLES) as SignalBand[]).map((band) => (
-            <div key={band} className={`rounded-xl border p-3 ${card}`}>
-              <div className={`text-xs font-medium ${muted}`}>
-                {SIGNAL_STYLES[band].label}
-                {band === 'optimal' && <span className="opacity-60"> &gt; {state.thresholds.optimal_above} dBm</span>}
-                {band === 'critical' && <span className="opacity-60"> &lt; {state.thresholds.critical_below} dBm</span>}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+          {metricCards.map(({ key, label, caption, value, tone }) => (
+            <div key={key} className={`rounded-xl border p-3 ${card}`} title={caption}>
+              <div className={`text-[10px] font-semibold tracking-wide uppercase ${muted}`}>{label}</div>
+              <div className={`text-2xl font-bold mt-1 ${value === null || value === undefined ? muted : (tone || text)}`}>
+                {formatMetric(value)}
               </div>
-              <div
-                className={`text-2xl font-bold mt-1 ${band === 'optimal' ? 'text-emerald-500'
-                    : band === 'warning' ? 'text-amber-500'
-                      : band === 'critical' ? 'text-red-500'
-                        : 'text-gray-400'
-                  }`}
-              >
-                {state.signal_counts[band] ?? 0}
-              </div>
+              <div className={`text-[10px] mt-0.5 truncate ${muted}`}>{caption}</div>
             </div>
           ))}
         </div>
@@ -1234,11 +1270,12 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
           {tab === 'mac_alignment' && (
             <div className="flex items-center gap-2">
               <button
-                onClick={() => loadTabData('mac_alignment')}
+                onClick={() => rematch('mac_alignment')}
                 disabled={loading}
+                title="Recompute this table against the live RADIUS sessions and current billing records."
                 className={`px-3 py-2 rounded-lg border text-xs font-medium disabled:opacity-50 ${card} ${text}`}
               >
-                Re-match
+                {loading ? 'Re-matching…' : 'Re-match'}
               </button>
 
               {/* Batch actions. `Align All Matched` deliberately ignores the checkbox
@@ -1303,11 +1340,12 @@ const SmartOltTool: React.FC<SmartOltToolProps> = ({ isDarkMode: isDarkModeProp 
           {tab === 'sn_alignment' && (
             <div className="flex items-center gap-2">
               <button
-                onClick={() => loadTabData('sn_alignment')}
+                onClick={() => rematch('sn_alignment')}
                 disabled={loading}
+                title="Recompute this table against the live RADIUS sessions and current billing records."
                 className={`px-3 py-2 rounded-lg border text-xs font-medium disabled:opacity-50 ${card} ${text}`}
               >
-                Re-match
+                {loading ? 'Re-matching…' : 'Re-match'}
               </button>
 
               {/* `Write All Missing` is offered separately from `All Eligible` on purpose:

@@ -1,13 +1,15 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
     RefreshCw, Filter, ArrowUp, ArrowDown, ExternalLink,
     ChevronLeft, ChevronRight, X, Settings2, FileText, Plus, DownloadCloud,
-    Trash2, ToggleLeft, ToggleRight, CheckCircle2, AlertCircle
+    ToggleLeft, ToggleRight, Trash2, Loader2, AlertTriangle
 } from 'lucide-react';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import apiClient from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import AddReportModal from '../modals/AddReportModal';
+import TableFunnelFilter, { FunnelColumn } from '../filter/TableFunnelFilter';
+import { useFunnelFilter } from '../filter/useFunnelFilter';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,12 +19,28 @@ interface ReportData {
     report_type: string;
     report_schedule: string;
     report_time: string;
-    day: string;
+    day: string | null;
+    /** Only set when the schedule is weekly. */
+    report_weekday?: string | null;
+    /** 1–12; only set for quarterly and yearly schedules. */
+    report_month?: number | string | null;
     send_to: string;
     date_range: string;
     created_by: string;
     created_at: string;
     file_url?: string;
+    is_active?: boolean | number | null;
+    last_dispatched_at?: string | null;
+}
+
+interface ModalConfig {
+    isOpen: boolean;
+    type: 'success' | 'error' | 'confirm';
+    title: string;
+    message: string;
+    /** Label for the primary button on a confirm dialog. */
+    confirmLabel?: string;
+    onConfirm?: () => void;
 }
 
 const ALL_COLUMNS = [
@@ -32,14 +50,47 @@ const ALL_COLUMNS = [
     { key: 'report_schedule', label: 'Schedule' },
     { key: 'report_time', label: 'Time' },
     { key: 'day', label: 'Day' },
+    { key: 'report_weekday', label: 'Weekday' },
+    { key: 'report_month', label: 'Month' },
     { key: 'send_to', label: 'Send To' },
     { key: 'date_range', label: 'Date Range' },
+    { key: 'last_dispatched_at', label: 'Last Sent' },
     { key: 'created_by', label: 'Created By' },
     { key: 'created_at', label: 'Created At' },
 ];
 
+/**
+ * One filter entry per column in ALL_COLUMNS, so every column the table can show is filterable.
+ * Keys match exactly - the table renders each cell from row[key] and the filter reads the same
+ * key. The schedule/type columns offer the values present in the loaded reports rather than
+ * requiring a lookup endpoint.
+ */
+const FUNNEL_COLUMNS: FunnelColumn[] = [
+    { key: 'id', label: 'ID', dataType: 'varchar' },
+    { key: 'report_name', label: 'Report Name', dataType: 'varchar' },
+    { key: 'report_type', label: 'Report Type', dataType: 'checklist' },
+    { key: 'report_schedule', label: 'Schedule', dataType: 'checklist' },
+    { key: 'report_time', label: 'Time', dataType: 'varchar' },
+    { key: 'day', label: 'Day', dataType: 'varchar' },
+    { key: 'report_weekday', label: 'Weekday', dataType: 'checklist' },
+    { key: 'report_month', label: 'Month', dataType: 'checklist' },
+    { key: 'send_to', label: 'Send To', dataType: 'varchar' },
+    { key: 'date_range', label: 'Date Range', dataType: 'varchar' },
+    { key: 'last_dispatched_at', label: 'Last Sent', dataType: 'datetime' },
+    { key: 'created_by', label: 'Created By', dataType: 'varchar' },
+    { key: 'created_at', label: 'Created At', dataType: 'datetime' },
+];
+
+// Weekday and Month are hidden by default: they only apply to some schedules,
+// and the Schedule column already spells the whole cadence out in words.
 const DEFAULT_VISIBLE = [
-    'id', 'report_name', 'report_type', 'report_schedule', 'day', 'report_time', 'send_to', 'date_range', 'created_by', 'created_at'
+    'id', 'report_name', 'report_type', 'report_schedule', 'report_time',
+    'send_to', 'date_range', 'last_dispatched_at', 'created_by', 'created_at',
+];
+
+const MONTH_NAMES = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
 ];
 
 // itemsPerPage is now managed as state inside the component
@@ -66,23 +117,68 @@ const formatDate = (d?: string | null) => {
     }
 };
 
-const getCellValue = (row: ReportData, key: string): string => {
-    const raw = (row as any)[key];
-    if (raw == null) return '—';
-    if (key === 'created_at') return formatDate(raw);
+const formatTime12h = (raw: string): string => {
+    const match = /^(\d{1,2}):(\d{2})/.exec(String(raw).trim());
+    if (!match) return String(raw);
 
-    if (key === 'report_time' && raw) {
-        // Simple 24h to 12h formatting if needed, or return raw
-        try {
-            const [h, m] = String(raw).split(':');
-            let hours = parseInt(h, 10);
-            const ampm = hours >= 12 ? 'PM' : 'AM';
-            hours = hours % 12;
-            hours = hours ? hours : 12;
-            return `${hours}:${m} ${ampm} GMT+8`;
-        } catch {
-            return String(raw);
-        }
+    const hours24 = Number(match[1]);
+    if (Number.isNaN(hours24) || hours24 > 23) return String(raw);
+
+    const ampm = hours24 >= 12 ? 'PM' : 'AM';
+    const hours12 = hours24 % 12 === 0 ? 12 : hours24 % 12;
+    return `${hours12}:${match[2]} ${ampm} GMT+8`;
+};
+
+/**
+ * Spell the cadence out in full, e.g. "Every Year on December 25".
+ *
+ * Reading a schedule used to require cross-referencing the Schedule and Day
+ * columns, and Day was meaningless for daily and weekly reports.
+ */
+const describeSchedule = (row: ReportData): string => {
+    const schedule = (row.report_schedule || '').trim();
+    if (!schedule) return '—';
+
+    const day = row.day ? Number(row.day) : null;
+    const monthIndex = row.report_month ? Number(row.report_month) - 1 : null;
+    const month = monthIndex !== null && monthIndex >= 0 && monthIndex < 12
+        ? MONTH_NAMES[monthIndex]
+        : null;
+
+    switch (schedule) {
+        case 'Every Week':
+            return row.report_weekday ? `Every ${row.report_weekday}` : schedule;
+        case 'Every Month':
+            return day ? `Every Month on day ${day}` : schedule;
+        case 'Every 3 Months':
+            if (month && day) return `Every 3 Months from ${month}, day ${day}`;
+            return day ? `Every 3 Months on day ${day}` : schedule;
+        case 'Every Year':
+            return month && day ? `Every Year on ${month} ${day}` : schedule;
+        default:
+            return schedule;
+    }
+};
+
+const getCellValue = (row: ReportData, key: string): string => {
+    if (key === 'report_schedule') return describeSchedule(row);
+
+    const raw = (row as any)[key];
+
+    // A blank day / weekday / month is correct for schedules that don't use it,
+    // rather than missing data.
+    if (raw == null || raw === '') {
+        return key === 'day' || key === 'report_weekday' || key === 'report_month'
+            ? 'n/a'
+            : '—';
+    }
+
+    if (key === 'created_at' || key === 'last_dispatched_at') return formatDate(raw);
+    if (key === 'report_time') return formatTime12h(String(raw));
+
+    if (key === 'report_month') {
+        const index = Number(raw) - 1;
+        return index >= 0 && index < 12 ? MONTH_NAMES[index] : String(raw);
     }
 
     return String(raw);
@@ -103,17 +199,34 @@ const hasReportsAccess = (): boolean => {
     }
 };
 
+/**
+ * Deleting a report is Super Admin only.
+ *
+ * The role name is compared lower-cased because the login endpoint sends it
+ * that way ("superadmin"); comparing against 'SuperAdmin' elsewhere in the app
+ * silently never matches and leaves only the role_id branch working.
+ *
+ * This hides the control. The route is separately gated server-side, so a user
+ * who forges authData still gets a 403.
+ */
 const isSuperAdmin = (): boolean => {
     try {
         const authData = localStorage.getItem('authData');
         if (!authData) return false;
         const user = JSON.parse(authData);
-        const roleId = String(user.role_id ?? '');
-        const role = (user.role ?? '').toLowerCase().trim();
-        return roleId === '7' || role === 'superadmin';
+        return String(user.role_id ?? '') === '7'
+            || (user.role ?? '').toLowerCase().trim() === 'superadmin';
     } catch {
         return false;
     }
+};
+
+const errorMessage = (err: any): string => {
+    const status = err?.response?.status;
+    if (status === 401) return 'Your session has expired. Please sign in again.';
+    return err?.response?.data?.message
+        || err?.message
+        || 'An unexpected error occurred. Please try again.';
 };
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -131,17 +244,18 @@ const Reports: React.FC = () => {
     const [isLoading, setIsLoading] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
 
-    // Auto Send Report toggle
-    const [autoSendEnabled, setAutoSendEnabled] = useState<boolean | null>(null);
-    const [autoSendLoading, setAutoSendLoading] = useState(false);
-
-    // Delete confirmation
-    const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+    // Auto Send Report master switch. null until the setting has loaded, so the
+    // control is never rendered showing a state that may not be the real one.
+    const [autoSend, setAutoSend] = useState<boolean | null>(null);
+    const [isSavingAutoSend, setIsSavingAutoSend] = useState(false);
     const [deletingId, setDeletingId] = useState<number | null>(null);
 
-    // Toast notifications
-    const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-    const toastTimerRef = useRef<number | null>(null);
+    const [modal, setModal] = useState<ModalConfig>({
+        isOpen: false,
+        type: 'success',
+        title: '',
+        message: '',
+    });
 
     // UI state
     const [searchQuery, setSearchQuery] = useState('');
@@ -211,63 +325,120 @@ const Reports: React.FC = () => {
         }
     };
 
-    const fetchAutoSendSetting = async () => {
+    const fetchSettings = useCallback(async () => {
         try {
-            const res = await apiClient.get<{ success: boolean; data: { is_enabled: boolean } }>('/settings/auto-report');
-            if (res.data.success) setAutoSendEnabled(!!res.data.data.is_enabled);
+            const res = await apiClient.get<{
+                success: boolean;
+                data: { auto_send_enabled: boolean };
+            }>('/reports/settings');
+
+            if (res.data?.success) {
+                setAutoSend(Boolean(res.data.data?.auto_send_enabled));
+            }
         } catch (err) {
-            console.error('Failed to fetch Auto Send Report setting:', err);
+            // Leaving this null hides the toggle rather than showing a state we
+            // cannot vouch for.
+            console.error('Failed to load report settings:', err);
+            setAutoSend(null);
         }
-    };
+    }, []);
 
     useEffect(() => {
         if (!accessDenied) {
             fetchReports();
-            fetchAutoSendSetting();
+            fetchSettings();
         }
-    }, [accessDenied]);
+    }, [accessDenied, fetchSettings]);
 
-    // ── Toast helper ───────────────────────────────────────────────────────────
-
-    const showToast = (type: 'success' | 'error', message: string) => {
-        if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-        setToast({ type, message });
-        toastTimerRef.current = window.setTimeout(() => setToast(null), 4000);
-    };
-
-    // ── Auto Send Report toggle ────────────────────────────────────────────────
+    // ── Auto Send Report ───────────────────────────────────────────────────────
 
     const handleToggleAutoSend = async () => {
-        if (autoSendEnabled === null || autoSendLoading) return;
-        const next = !autoSendEnabled;
-        setAutoSendLoading(true);
+        if (autoSend === null || isSavingAutoSend) return;
+
+        const next = !autoSend;
+        setIsSavingAutoSend(true);
+
         try {
-            const res = await apiClient.put<{ success: boolean; message?: string }>('/settings/auto-report', { is_enabled: next });
-            if (!res.data.success) throw new Error(res.data.message || 'Failed to update setting.');
-            setAutoSendEnabled(next);
-            showToast('success', `Auto Send Report ${next ? 'enabled' : 'disabled'}.`);
+            const res = await apiClient.put<{
+                success: boolean;
+                message?: string;
+                data: { auto_send_enabled: boolean };
+            }>('/reports/settings', { auto_send_enabled: next });
+
+            if (!res.data?.success) {
+                throw new Error(res.data?.message || 'Failed to update the setting.');
+            }
+
+            setAutoSend(Boolean(res.data.data?.auto_send_enabled));
+            await fetchReports(true);
+
+            setModal({
+                isOpen: true,
+                type: 'success',
+                title: next ? 'Auto Send Enabled' : 'Auto Send Disabled',
+                message: res.data.message
+                    || (next
+                        ? 'Scheduled reports will be sent automatically.'
+                        : 'Scheduled reports will no longer be sent automatically.'),
+            });
         } catch (err: any) {
-            showToast('error', err?.response?.data?.message || err?.message || 'Failed to update Auto Send Report setting.');
+            setModal({
+                isOpen: true,
+                type: 'error',
+                title: 'Could Not Update Auto Send',
+                message: errorMessage(err),
+            });
         } finally {
-            setAutoSendLoading(false);
+            setIsSavingAutoSend(false);
         }
     };
 
-    // ── Delete report (Super Admin only) ──────────────────────────────────────
+    // ── Delete (Super Admin only) ──────────────────────────────────────────────
 
-    const handleDeleteReport = async (id: number) => {
-        setDeletingId(id);
+    const performDelete = async (row: ReportData) => {
+        setDeletingId(row.id);
+
         try {
-            const res = await apiClient.delete<{ success: boolean; message?: string }>(`/reports/${id}`);
-            if (!res.data.success) throw new Error(res.data.message || 'Failed to delete report.');
-            setRows(prev => prev.filter(r => r.id !== id));
-            showToast('success', 'Report deleted successfully.');
+            const res = await apiClient.delete<{ success: boolean; message?: string }>(
+                `/reports/${row.id}`
+            );
+
+            if (!res.data?.success) {
+                throw new Error(res.data?.message || 'Failed to delete the report.');
+            }
+
+            await fetchReports(true);
+
+            setModal({
+                isOpen: true,
+                type: 'success',
+                title: 'Report Deleted',
+                message: res.data.message || `"${row.report_name}" has been deleted.`,
+            });
         } catch (err: any) {
-            showToast('error', err?.response?.data?.message || err?.message || 'Failed to delete report.');
+            setModal({
+                isOpen: true,
+                type: 'error',
+                title: 'Delete Failed',
+                message: errorMessage(err),
+            });
         } finally {
             setDeletingId(null);
-            setConfirmDeleteId(null);
         }
+    };
+
+    const requestDelete = (row: ReportData) => {
+        setModal({
+            isOpen: true,
+            type: 'confirm',
+            title: 'Delete this report?',
+            message: `"${row.report_name}" will be removed, along with its delivery history and any emails still waiting to go out.\n\nThis cannot be undone.`,
+            confirmLabel: 'Delete Report',
+            onConfirm: () => {
+                setModal(prev => ({ ...prev, isOpen: false }));
+                void performDelete(row);
+            },
+        });
     };
 
     // ── Toggle columns ─────────────────────────────────────────────────────────
@@ -293,7 +464,7 @@ const Reports: React.FC = () => {
 
     // ── Derived Data ──────────────────────────────────────────────────────────
 
-    const filtered = useMemo(() => {
+    const searched = useMemo(() => {
         let f = rows;
 
         // Search
@@ -306,9 +477,10 @@ const Reports: React.FC = () => {
             );
         }
 
-        // Sort
+        // Sort on a copy: sorting `f` in place mutated the `rows` state array
+        // whenever no search filter had produced a new array.
         if (sortColumn) {
-            f.sort((a, b) => {
+            f = [...f].sort((a, b) => {
                 const va = (a as any)[sortColumn];
                 const vb = (b as any)[sortColumn];
                 if (va == null && vb == null) return 0;
@@ -329,6 +501,16 @@ const Reports: React.FC = () => {
         }
         return f;
     }, [rows, searchQuery, sortColumn, sortDir]);
+
+    // Applied on the searched set so the counts and the table describe the same rows - the point
+    // Customer.tsx applies its own funnel.
+    const funnel = useFunnelFilter({
+        storageKey: 'reportsFunnelFilters',
+        columns: FUNNEL_COLUMNS,
+        rows: searched,
+    });
+
+    const filtered = funnel.filteredRows;
 
     const paginated = useMemo(() => {
         const start = (currentPage - 1) * itemsPerPage;
@@ -401,23 +583,6 @@ const Reports: React.FC = () => {
                             <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
                                 {filtered.length.toLocaleString()} records
                             </span>
-                            {autoSendEnabled !== null && (
-                                <button
-                                    onClick={handleToggleAutoSend}
-                                    disabled={autoSendLoading}
-                                    title={autoSendEnabled ? 'Auto Send Report is enabled — click to disable' : 'Auto Send Report is disabled — click to enable'}
-                                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-opacity disabled:opacity-60 ${isDarkMode ? 'border-gray-700' : 'border-gray-300'}`}
-                                >
-                                    {autoSendEnabled ? (
-                                        <ToggleRight size={16} style={{ color: primary }} />
-                                    ) : (
-                                        <ToggleLeft size={16} className={subText} />
-                                    )}
-                                    <span className={autoSendEnabled ? text : subText}>
-                                        Auto Send Report: {autoSendEnabled ? 'On' : 'Off'}
-                                    </span>
-                                </button>
-                            )}
                         </div>
                         {isMobile && (
                             <button
@@ -453,6 +618,21 @@ const Reports: React.FC = () => {
                                 placeholder="Search reports…"
                             />
                         </div>
+
+                        <button
+                            onClick={funnel.open}
+                            title={funnel.activeCount > 0
+                                ? `Active Filters:\n${Object.keys(funnel.activeFilters).map(funnel.labelFor).join('\n')}`
+                                : 'Column Filters'}
+                            className={`flex items-center gap-1.5 px-3 py-2 text-sm border rounded-md transition-colors flex-shrink-0 ${funnel.activeCount > 0
+                                ? 'text-white'
+                                : isDarkMode ? 'text-gray-300 border-gray-600 hover:bg-gray-700' : 'text-gray-600 border-gray-300 hover:bg-gray-100'
+                                }`}
+                            style={funnel.activeCount > 0 ? { backgroundColor: primary, borderColor: primary } : {}}
+                        >
+                            <Filter size={14} />
+                            Filters{funnel.activeCount > 0 ? ` (${funnel.activeCount})` : ''}
+                        </button>
 
                         {/* Column picker */}
                         <div className="relative flex-shrink-0" ref={columnPickerRef}>
@@ -496,6 +676,33 @@ const Reports: React.FC = () => {
                             )}
                         </div>
 
+                        {/* Auto Send Report master switch */}
+                        {autoSend !== null && (
+                            <button
+                                onClick={handleToggleAutoSend}
+                                disabled={isSavingAutoSend}
+                                title={autoSend
+                                    ? 'Scheduled reports are being emailed automatically. Click to turn this off.'
+                                    : 'Scheduled reports are NOT being emailed. Click to turn automatic sending back on.'}
+                                className={`flex items-center gap-1.5 px-3 py-2 text-sm border rounded-md transition-colors flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${autoSend
+                                    ? 'text-white'
+                                    : isDarkMode
+                                        ? 'text-amber-300 border-amber-700/60 bg-amber-500/10 hover:bg-amber-500/20'
+                                        : 'text-amber-700 border-amber-300 bg-amber-50 hover:bg-amber-100'
+                                    }`}
+                                style={autoSend ? { backgroundColor: primary, borderColor: primary } : undefined}
+                            >
+                                {isSavingAutoSend
+                                    ? <Loader2 size={14} className="animate-spin" />
+                                    : autoSend
+                                        ? <ToggleRight size={14} />
+                                        : <ToggleLeft size={14} />}
+                                <span className="whitespace-nowrap">
+                                    Auto Send: {autoSend ? 'On' : 'Off'}
+                                </span>
+                            </button>
+                        )}
+
                         {/* Refresh */}
                         <button
                             onClick={() => fetchReports(true)}
@@ -508,6 +715,22 @@ const Reports: React.FC = () => {
                         </button>
                     </div>
                 </div>
+
+                {/* A disabled master switch is easy to forget about, so it is
+                    stated on the page rather than only in the toolbar pill. */}
+                {autoSend === false && (
+                    <div className={`flex items-start gap-2 px-5 py-2.5 border-b text-xs flex-shrink-0 ${isDarkMode
+                        ? 'bg-amber-500/10 border-amber-800/50 text-amber-200'
+                        : 'bg-amber-50 border-amber-200 text-amber-800'}`}
+                    >
+                        <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
+                        <span>
+                            <strong className="font-semibold">Automatic sending is off.</strong>{' '}
+                            The schedules below are saved but no reports are being emailed. Turn
+                            "Auto Send" back on to resume.
+                        </span>
+                    </div>
+                )}
 
                 {/* ── Table area ──────────────────────────────────────────────────────── */}
                 <div className="flex-1 min-h-0 overflow-auto" ref={scrollRef}>
@@ -561,15 +784,10 @@ const Reports: React.FC = () => {
                                             </div>
                                         </th>
                                     ))}
-                                    {/* Action column (Download) */}
+                                    {/* Action column: Download, plus Delete for Super Admin */}
                                     <th className={`sticky top-0 z-20 px-3 py-2.5 text-center font-semibold border-b text-xs ${thCls} whitespace-nowrap`}>
-                                        Download
+                                        {canDelete ? 'Actions' : 'Download'}
                                     </th>
-                                    {canDelete && (
-                                        <th className={`sticky top-0 z-20 px-3 py-2.5 text-center font-semibold border-b text-xs ${thCls} whitespace-nowrap`}>
-                                            Delete
-                                        </th>
-                                    )}
                                 </tr>
                             </thead>
                             <tbody>
@@ -598,7 +816,7 @@ const Reports: React.FC = () => {
                                                 </td>
                                             ))}
                                             <td className={`px-3 py-2 border-b text-center ${tdCls}`}>
-                                                <div className="flex justify-center">
+                                                <div className="flex justify-center items-center gap-2">
                                                     {row.file_url ? (
                                                         <a
                                                             href={row.file_url}
@@ -616,25 +834,26 @@ const Reports: React.FC = () => {
                                                     ) : (
                                                         <span className="text-gray-400 italic text-[11px]">No file</span>
                                                     )}
+
+                                                    {canDelete && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => requestDelete(row)}
+                                                            disabled={deletingId !== null}
+                                                            title="Delete this report"
+                                                            aria-label={`Delete ${row.report_name}`}
+                                                            className={`p-1.5 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${isDarkMode
+                                                                ? 'border-gray-700 text-red-400 hover:bg-red-500/10 hover:border-red-800'
+                                                                : 'border-gray-300 text-red-500 hover:bg-red-50 hover:border-red-300'
+                                                                }`}
+                                                        >
+                                                            {deletingId === row.id
+                                                                ? <Loader2 size={14} className="animate-spin" />
+                                                                : <Trash2 size={14} />}
+                                                        </button>
+                                                    )}
                                                 </div>
                                             </td>
-                                            {canDelete && (
-                                                <td className={`px-3 py-2 border-b text-center ${tdCls}`}>
-                                                    <div className="flex justify-center">
-                                                        <button
-                                                            onClick={() => setConfirmDeleteId(row.id)}
-                                                            disabled={deletingId === row.id}
-                                                            className={`p-1.5 rounded-lg transition-colors border disabled:opacity-50 ${isDarkMode
-                                                                ? 'hover:bg-red-900/30 border-gray-700 text-red-400'
-                                                                : 'hover:bg-red-50 border-gray-300 text-red-500'
-                                                                }`}
-                                                            title="Delete report"
-                                                        >
-                                                            <Trash2 size={14} />
-                                                        </button>
-                                                    </div>
-                                                </td>
-                                            )}
                                         </tr>
                                     );
                                 })}
@@ -738,45 +957,58 @@ const Reports: React.FC = () => {
                 onSaved={() => fetchReports(true)}
             />
 
-            {/* ── Delete Confirmation Dialog ─────────────────────── */}
-            {confirmDeleteId !== null && (
-                <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-[10000]">
-                    <div className={`border rounded-lg p-6 max-w-sm w-full mx-4 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
-                        <h3 className={`text-lg font-semibold mb-2 ${text}`}>Delete Report</h3>
-                        <p className={`text-sm mb-6 ${subText}`}>
-                            Are you sure you want to delete this report configuration? This action cannot be undone.
+            <TableFunnelFilter
+                {...funnel.panelProps}
+                title="Report Filters"
+                subtitle="Refine your scheduled report results"
+            />
+
+            {/* ── Confirmation / result dialog ─────────────────────────── */}
+            {modal.isOpen && (
+                <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-[10000] p-4">
+                    <div className={`border rounded-lg p-6 max-w-md w-full ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
+                        <div className="flex items-start gap-3 mb-4">
+                            {modal.type !== 'success' && (
+                                <div
+                                    className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
+                                    style={{ backgroundColor: '#ef444420' }}
+                                >
+                                    <AlertTriangle size={18} stroke="#ef4444" />
+                                </div>
+                            )}
+                            <h3 className={`text-lg font-semibold ${text} ${modal.type !== 'success' ? 'mt-1' : ''}`}>
+                                {modal.title}
+                            </h3>
+                        </div>
+
+                        <p className={`mb-6 text-sm whitespace-pre-line ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                            {modal.message}
                         </p>
+
                         <div className="flex items-center justify-end gap-3">
+                            {modal.type === 'confirm' && (
+                                <button
+                                    type="button"
+                                    onClick={() => setModal(prev => ({ ...prev, isOpen: false }))}
+                                    className={`px-4 py-2 rounded text-sm font-medium transition-colors ${isDarkMode
+                                        ? 'bg-gray-700 hover:bg-gray-600 text-white'
+                                        : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
+                                >
+                                    Cancel
+                                </button>
+                            )}
                             <button
-                                onClick={() => setConfirmDeleteId(null)}
-                                disabled={deletingId !== null}
-                                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${isDarkMode ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
+                                type="button"
+                                onClick={() => {
+                                    if (modal.onConfirm) modal.onConfirm();
+                                    else setModal(prev => ({ ...prev, isOpen: false }));
+                                }}
+                                className="px-4 py-2 text-white rounded text-sm font-medium transition-opacity hover:opacity-90"
+                                style={{ backgroundColor: modal.type === 'confirm' ? '#dc2626' : primary }}
                             >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={() => handleDeleteReport(confirmDeleteId)}
-                                disabled={deletingId !== null}
-                                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                            >
-                                {deletingId !== null ? 'Deleting…' : 'Delete'}
+                                {modal.type === 'confirm' ? (modal.confirmLabel ?? 'Confirm') : 'OK'}
                             </button>
                         </div>
-                    </div>
-                </div>
-            )}
-
-            {/* ── Toast Notification ──────────────────────────────── */}
-            {toast && (
-                <div className="fixed bottom-6 right-6 z-[10001]">
-                    <div
-                        className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-2xl border text-sm font-medium ${toast.type === 'success'
-                            ? (isDarkMode ? 'bg-green-900/90 border-green-700 text-green-200' : 'bg-green-50 border-green-300 text-green-800')
-                            : (isDarkMode ? 'bg-red-900/90 border-red-700 text-red-200' : 'bg-red-50 border-red-300 text-red-800')
-                            }`}
-                    >
-                        {toast.type === 'success' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-                        {toast.message}
                     </div>
                 </div>
             )}

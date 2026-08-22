@@ -39,9 +39,14 @@ class SmartOltReconciliationController extends Controller
     }
 
     /**
-     * GET /api/smartolt-reconciliation/optical-power
+     * GET /api/smartolt-reconciliation/mac-discovery
+     *
+     * Read the bridge MAC behind each named ONU, or behind every ONU that has never
+     * been crawled. One SmartOLT call per ONU against the hardest-throttled endpoint
+     * on the API, so the sweep is capped and the caller repeats until `remaining`
+     * reaches zero.
      */
-    public function opticalPower(Request $request): JsonResponse
+    public function macDiscovery(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'external_ids'   => ['nullable', 'array', 'max:200'],
@@ -49,12 +54,23 @@ class SmartOltReconciliationController extends Controller
             'limit'          => ['nullable', 'integer', 'min:1', 'max:100'],
         ]);
 
-        $result = $this->service->getOpticalPower(
+        $result = $this->service->discoverBridgeMacs(
             $validated['external_ids'] ?? [],
             $validated['limit'] ?? 25
         );
 
         return response()->json($result, $result['success'] ? 200 : 422);
+    }
+
+    /**
+     * GET /api/smartolt-reconciliation/optical-power
+     *
+     * @deprecated The crawl no longer reads optical power. Kept as an alias of
+     * macDiscovery() so anything still pointed at the old path keeps working.
+     */
+    public function opticalPower(Request $request): JsonResponse
+    {
+        return $this->macDiscovery($request);
     }
 
     /**
