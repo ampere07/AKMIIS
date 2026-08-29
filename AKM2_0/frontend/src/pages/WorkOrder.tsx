@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Plus, Loader2, RefreshCw, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, Download, Columns3, ArrowUp, ArrowDown } from 'lucide-react';
 import { API_BASE_URL } from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import DropdownPortal from '../components/common/DropdownPortal';
 import { useWorkOrderStore } from '../store/workOrderStore';
 import { WorkOrder } from '../types/workOrder';
 import WorkOrderDetails from '../components/WorkOrderDetails';
@@ -169,6 +170,18 @@ const WorkOrderPage: React.FC = () => {
   const [resizingColumn, setResizingColumn] = useState<string | null>(null);
   const [columnDropdownOpen, setColumnDropdownOpen] = useState(false);
   const columnDropdownRef = useRef<HTMLDivElement>(null);
+  /**
+   * The Column Visibility trigger.
+   *
+   * The menu renders through DropdownPortal, so it needs a handle on the button
+   * rather than on a wrapper: the panel lives in <body> and measures its position
+   * from this element on every open, scroll and resize. It replaces a
+   * `position: fixed` panel offset by a hardcoded
+   * `-translate-x-[calc(100%-3.5rem)]`, which escaped the toolbar clipping box but
+   * drifted away from its button at other window widths and stayed put when the
+   * toolbar scrolled sideways.
+   */
+  const columnsButtonRef = useRef<HTMLButtonElement>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const startXRef = useRef<number>(0);
@@ -667,6 +680,13 @@ const WorkOrderPage: React.FC = () => {
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
+      // A click inside a portalled dropdown is inside the menu, even though the DOM
+      // says it landed in <body>. Without this the Column Visibility checkboxes would
+      // close the menu they live in.
+      if ((event.target as Element)?.closest?.('[data-dropdown-portal]')) {
+        return;
+      }
+
       if (columnDropdownRef.current && !columnDropdownRef.current.contains(event.target as Node)) {
         setColumnDropdownOpen(false);
       }
@@ -735,6 +755,7 @@ const WorkOrderPage: React.FC = () => {
                 {displayMode === 'table' && (
                   <div className="relative z-50 flex-shrink-0" ref={columnDropdownRef}>
                     <button
+                      ref={columnsButtonRef}
                       className={`px-4 py-2 rounded text-sm transition-colors flex items-center ${isDarkMode
                         ? 'hover:bg-gray-800 text-white'
                         : 'hover:bg-gray-100 text-gray-900'
@@ -744,9 +765,14 @@ const WorkOrderPage: React.FC = () => {
                     >
                       <Columns3 className="h-5 w-5" />
                     </button>
-                    {columnDropdownOpen && (
-                      <div className={`fixed mt-10 w-80 border rounded shadow-lg z-50 max-h-96 flex flex-col -translate-x-[calc(100%-3.5rem)] ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'
-                        }`}>
+                      <DropdownPortal
+                        anchorRef={columnsButtonRef}
+                        open={columnDropdownOpen}
+                        onClose={() => setColumnDropdownOpen(false)}
+                        align="right"
+                        width={320}
+                        className={`border rounded shadow-lg flex flex-col ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'}`}
+                      >
                         <div className={`p-3 border-b flex items-center justify-between ${isDarkMode ? 'border-gray-700' : 'border-gray-200'
                           }`}>
                           <span className={`text-sm font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'
@@ -795,8 +821,7 @@ const WorkOrderPage: React.FC = () => {
                             </label>
                           ))}
                         </div>
-                      </div>
-                    )}
+                      </DropdownPortal>
                   </div>
                 )}
                 <div className="relative z-50 flex-shrink-0" ref={dropdownRef}>

@@ -4,10 +4,10 @@ namespace App\Services;
 
 use App\Models\ActivityLog;
 use App\Models\RadiusConfig;
+use App\Support\PlanGroup;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -30,9 +30,11 @@ use Throwable;
  * `radius_config` via RadiusServerResolver, and the billing database comes from the
  * framework connection. Nothing here reads or writes a secret to the log.
  *
- * Endpoint note: the User Manager session collection is `/rest/user-manage/session`.
- * That is what the live devices answer on and what ManualRadiusOperationsService
- * already uses; `/rest/user-manage/active-user` does not exist on this RouterOS build.
+ * Transport note: device I/O runs over the native RouterOS API socket (RouterosApiService,
+ * ports 8728/8729), not REST. The `/rest/user-manage/...` strings that remain are this
+ * service's INTERNAL routing keys — callDevice() translates each into a User Manager API
+ * command — kept so the mutation sites and their activity_logs reversal snapshots did not
+ * have to be rewritten alongside the transport.
  */
 class RadiusReconciliationService
 {
@@ -2002,7 +2004,14 @@ class RadiusReconciliationService
     // =========================================================================
 
     /**
-     * Call one RADIUS device, trying its configured protocol then the alternate.
+     * Call one RADIUS device over the native RouterOS API.
+     *
+     * The (method, path, payload) tuple is retained as this service's internal calling
+     * convention — every mutation site already speaks it, and the reversal snapshots in
+     * activity_logs are written around it — but it is now TRANSLATED into RouterosApiService
+     * calls rather than issued as REST. `status` keeps its HTTP-like shape so callers and
+     * the trace stay readable: 200 for a successful read, 204 for a successful mutation,
+     * 0 when the device could not be reached at all.
      *
      * Always outside a database transaction — every caller here either takes no
      * transaction at all or closes it before reaching this method.
@@ -2019,59 +2028,223 @@ class RadiusReconciliationService
         ?array &$trace = null,
         string $label = ''
     ): array {
-        $lastError = 'No RADIUS endpoint responded.';
+        $method  = strtoupper($method);
+        $payload = $payload ?? [];
+        $api     = app(RouterosApiService::class);
 
-        foreach ($this->resolver->baseUrlsFor($config) as $baseUrl) {
-            try {
-                $request = Http::withOptions(['verify' => false])
-                    ->withBasicAuth($config->username, $config->password)
-                    ->connectTimeout(self::CONNECT_TIMEOUT)
-                    ->timeout(self::REQUEST_TIMEOUT)
-                    ->acceptJson();
+        try {
+            if (!$api->connect($config)) {
+                $error = $api->getLastError() !== '' ? $api->getLastError() : 'No RADIUS endpoint responded.';
 
-                $url = $baseUrl . $path;
-
-                $response = match (strtoupper($method)) {
-                    'GET'    => $request->get($url),
-                    'PUT'    => $request->put($url, $payload ?? []),
-                    'PATCH'  => $request->patch($url, $payload ?? []),
-                    'POST'   => $request->post($url, $payload ?? []),
-                    'DELETE' => $request->delete($url),
-                    default  => throw new \InvalidArgumentException("Unsupported HTTP method '{$method}'."),
-                };
-
-                if ($response->successful()) {
-                    if ($trace !== null) {
-                        $this->trace($trace, trim($label . ' ' . strtoupper($method) . ' ' . $path) . ' → HTTP ' . $response->status(), 'DEBUG');
-                    }
-                    return ['success' => true, 'status' => $response->status(), 'data' => $response->json(), 'error' => ''];
-                }
-
-                $lastError = 'HTTP ' . $response->status() . ' — ' . $this->briefBody($response->body());
-
-                // The device answered; a different protocol will not change its verdict.
                 if ($trace !== null) {
-                    $this->trace($trace, trim($label . ' ' . strtoupper($method) . ' ' . $path) . ' → ' . $lastError, 'WARNING');
+                    $this->trace($trace, trim($label . ' ' . $config->ip . ' unreachable: ' . $error), 'ERROR');
                 }
-                return ['success' => false, 'status' => $response->status(), 'data' => $response->json(), 'error' => $lastError];
-            } catch (Throwable $e) {
-                // Connection or TLS failure — worth retrying on the alternate protocol.
-                $lastError = $e->getMessage();
-                if ($trace !== null) {
-                    $this->trace($trace, trim($label . ' ' . $baseUrl . ' unreachable: ' . $lastError), 'ERROR');
-                }
+
+                $this->log('error', 'RADIUS device unreachable.', [
+                    'radius_config_id' => $config->id,
+                    'radius_ip'        => $config->ip,
+                    'method'           => $method,
+                    'path'             => $path,
+                    'error'            => $error,
+                ]);
+
+                return ['success' => false, 'status' => 0, 'data' => null, 'error' => $error];
+            }
+
+            $outcome = $this->dispatchDeviceCall($api, $config, $method, $path, $payload);
+        } catch (Throwable $e) {
+            $outcome = ['success' => false, 'status' => 0, 'data' => null, 'error' => $e->getMessage()];
+        }
+
+        if ($trace !== null) {
+            $this->trace(
+                $trace,
+                trim($label . ' ' . $method . ' ' . $path) . ' → ' . ($outcome['success'] ? 'OK ' . $outcome['status'] : $outcome['error']),
+                $outcome['success'] ? 'DEBUG' : 'WARNING'
+            );
+        }
+
+        if (!$outcome['success']) {
+            $this->log('error', 'RADIUS device call failed.', [
+                'radius_config_id' => $config->id,
+                'radius_ip'        => $config->ip,
+                'method'           => $method,
+                'path'             => $path,
+                'error'            => $outcome['error'],
+            ]);
+        }
+
+        return $outcome;
+    }
+
+    /**
+     * Translate one (method, path, payload) tuple into a RouterosApiService call.
+     *
+     * @param array<string, mixed> $payload
+     * @return array{success: bool, status: int, data: mixed, error: string}
+     */
+    private function dispatchDeviceCall(
+        RouterosApiService $api,
+        RadiusConfig $config,
+        string $method,
+        string $path,
+        array $payload
+    ): array {
+        $route = strtok($path, '?');
+        $route = $route === false ? $path : $route;
+        $route = rtrim($route, '/');
+
+        // Reads
+        if ($method === 'GET') {
+            if ($route === '/rest/user-manage/user') {
+                $name = $this->pathQueryValue($path, 'name');
+                $rows = $name !== null
+                    ? array_values(array_filter(
+                        [$api->findUser($config, $name)],
+                        static fn ($row): bool => $row !== null
+                    ))
+                    : $api->getAllUsers($config);
+
+                return $this->deviceSuccess(array_map([$this, 'restShapeUser'], $rows));
+            }
+
+            if ($route === '/rest/user-manage/session') {
+                $user     = $this->pathQueryValue($path, 'user');
+                $sessions = $api->getActiveSessions($config, $user);
+
+                return $this->deviceSuccess(array_map([$this, 'restShapeSession'], $sessions));
             }
         }
 
-        $this->log('error', 'RADIUS device unreachable.', [
-            'radius_config_id' => $config->id,
-            'radius_ip'        => $config->ip,
-            'method'           => strtoupper($method),
-            'path'             => $path,
-            'error'            => $lastError,
-        ]);
+        // Create
+        if ($method === 'PUT' && $route === '/rest/user-manage/user') {
+            $created = $api->addUser(
+                $config,
+                (string) ($payload['name'] ?? ''),
+                (string) ($payload['password'] ?? ''),
+                (string) ($payload['group'] ?? ''),
+                ($payload['disabled'] ?? 'false') === 'true' || ($payload['disabled'] ?? false) === true
+            );
 
-        return ['success' => false, 'status' => 0, 'data' => null, 'error' => $lastError];
+            if (!$created) {
+                return $this->deviceFailure($api);
+            }
+
+            $user = $api->findUser($config, (string) ($payload['name'] ?? ''));
+
+            return ['success' => true, 'status' => 204, 'data' => $user !== null ? $this->restShapeUser($user) : null, 'error' => ''];
+        }
+
+        // Update by RouterOS id, e.g. /rest/user-manage/user/*1A
+        if ($method === 'PATCH' && strpos($route, '/rest/user-manage/user/') === 0) {
+            $radiusId = rawurldecode(substr($route, strlen('/rest/user-manage/user/')));
+
+            if (!$api->updateUser($config, $radiusId, $payload)) {
+                return $this->deviceFailure($api);
+            }
+
+            return ['success' => true, 'status' => 204, 'data' => null, 'error' => ''];
+        }
+
+        // Removals — the REST collection used POST .../remove with a `numbers` id.
+        if ($method === 'POST' && $route === '/rest/user-manage/user/remove') {
+            if (!$api->removeUser($config, (string) ($payload['numbers'] ?? ''))) {
+                return $this->deviceFailure($api);
+            }
+
+            return ['success' => true, 'status' => 204, 'data' => null, 'error' => ''];
+        }
+
+        if ($method === 'POST' && $route === '/rest/user-manage/session/remove') {
+            if (!$api->killSession($config, (string) ($payload['numbers'] ?? ''))) {
+                return $this->deviceFailure($api);
+            }
+
+            return ['success' => true, 'status' => 204, 'data' => null, 'error' => ''];
+        }
+
+        return [
+            'success' => false,
+            'status'  => 0,
+            'data'    => null,
+            'error'   => "Unsupported RADIUS operation '{$method} {$path}'.",
+        ];
+    }
+
+    /**
+     * @param array<int, mixed> $data
+     * @return array{success: bool, status: int, data: mixed, error: string}
+     */
+    private function deviceSuccess(array $data): array
+    {
+        return ['success' => true, 'status' => 200, 'data' => $data, 'error' => ''];
+    }
+
+    /**
+     * @return array{success: bool, status: int, data: mixed, error: string}
+     */
+    private function deviceFailure(RouterosApiService $api): array
+    {
+        $error = $api->getLastError();
+
+        return [
+            'success' => false,
+            'status'  => $api->isConnected() ? 400 : 0,
+            'data'    => null,
+            'error'   => $error !== '' ? $error : 'The RADIUS device rejected the operation.',
+        ];
+    }
+
+    /**
+     * Read one query-string value out of an internal route path.
+     */
+    private function pathQueryValue(string $path, string $key): ?string
+    {
+        $query = parse_url($path, PHP_URL_QUERY);
+
+        if (!is_string($query) || $query === '') {
+            return null;
+        }
+
+        parse_str($query, $parsed);
+
+        $value = $parsed[$key] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    /**
+     * Re-shape a normalised API user into the REST field names this service parses.
+     *
+     * @param array<string, mixed> $user
+     * @return array<string, mixed>
+     */
+    private function restShapeUser(array $user): array
+    {
+        return [
+            '.id'      => (string) ($user['.id'] ?? ''),
+            'name'     => (string) ($user['username'] ?? ''),
+            'group'    => (string) ($user['group'] ?? ''),
+            'disabled' => !empty($user['disabled']) ? 'true' : 'false',
+            'password' => (string) ($user['password'] ?? ''),
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $session
+     * @return array<string, mixed>
+     */
+    private function restShapeSession(array $session): array
+    {
+        return [
+            '.id'                => (string) ($session['.id'] ?? ''),
+            'user'               => (string) ($session['username'] ?? ''),
+            'user-address'       => (string) ($session['ip'] ?? ''),
+            'calling-station-id' => (string) ($session['mac'] ?? ''),
+            'upload'             => $session['upload'] ?? 0,
+            'download'           => $session['download'] ?? 0,
+            'uptime'             => (string) ($session['uptime'] ?? ''),
+        ];
     }
 
     /**
@@ -2081,27 +2254,31 @@ class RadiusReconciliationService
      */
     private function findUserOnConfig(RadiusConfig $config, string $username): ?array
     {
-        $response = $this->callDevice($config, 'GET', '/rest/user-manage/user?name=' . urlencode($username));
+        $username = trim($username);
 
-        if (!$response['success'] || !is_array($response['data'])) {
+        try {
+            $user = app(RouterosApiService::class)->findUser($config, $username);
+        } catch (Throwable $e) {
+            $this->log('error', 'RADIUS account lookup failed.', [
+                'radius_config_id' => $config->id,
+                'radius_ip'        => $config->ip,
+                'username'         => $username,
+                'error'            => $e->getMessage(),
+            ]);
+
             return null;
         }
 
-        foreach ($response['data'] as $user) {
-            if (!is_array($user)) {
-                continue;
-            }
-            if (strcasecmp(trim((string) ($user['name'] ?? '')), $username) === 0) {
-                return [
-                    'id'       => (string) ($user['.id'] ?? ''),
-                    'group'    => trim((string) ($user['group'] ?? '')),
-                    'disabled' => ($user['disabled'] ?? 'false') === 'true' || ($user['disabled'] ?? false) === true,
-                    'password' => (string) ($user['password'] ?? ''),
-                ];
-            }
+        if ($user === null) {
+            return null;
         }
 
-        return null;
+        return [
+            'id'       => $user['.id'],
+            'group'    => $user['group'],
+            'disabled' => $user['disabled'],
+            'password' => $user['password'],
+        ];
     }
 
     /**
@@ -2145,28 +2322,20 @@ class RadiusReconciliationService
      */
     private function killSessions(RadiusConfig $config, string $username): int
     {
-        $response = $this->callDevice($config, 'GET', '/rest/user-manage/session?user=' . urlencode($username));
-
-        if (!$response['success'] || !is_array($response['data'])) {
-            return 0;
-        }
-
-        $killed = 0;
-        foreach ($response['data'] as $session) {
-            if (!is_array($session) || empty($session['.id'])) {
-                continue;
-            }
-
-            $removal = $this->callDevice($config, 'POST', '/rest/user-manage/session/remove', [
-                'numbers' => (string) $session['.id'],
+        try {
+            return app(RouterosApiService::class)->killSessionsForUser($config, $username);
+        } catch (Throwable $e) {
+            // Cutting sessions is a follow-up to a change that already landed; a device
+            // that will not answer here must not turn that change into a reported failure.
+            $this->log('warning', 'Could not terminate live sessions.', [
+                'radius_config_id' => $config->id,
+                'radius_ip'        => $config->ip,
+                'username'         => $username,
+                'error'            => $e->getMessage(),
             ]);
 
-            if ($removal['success']) {
-                $killed++;
-            }
+            return 0;
         }
-
-        return $killed;
     }
 
     // =========================================================================
@@ -2174,44 +2343,30 @@ class RadiusReconciliationService
     // =========================================================================
 
     /**
-     * Two group names agree if they match outright, or once the priced billing
-     * label is reduced to its bare group ("LITE - P699.00" -> "LITE").
+     * Two group names agree if they name the same plan.
+     *
+     * Delegated to {@see PlanGroup::matches()}, which settles it on the *first word*
+     * of each label — the same reduction Job Order account creation applies when it
+     * picks the User Manager group to create a subscriber in. That is the fix for
+     * `group_mismatch` being raised against healthy accounts: the device stores
+     * "SWIFT", billing stores "SWIFT 1000", and a whole-label comparison called that
+     * a discrepancy on every sweep. Whole-label and bare-group agreement are still
+     * accepted, so nothing that matched before stops matching.
      */
     private function groupsAgree(string $radGroup, string $billLabel): bool
     {
-        $radGroup  = trim($radGroup);
-        $billLabel = trim($billLabel);
-
-        if ($radGroup === '' && $billLabel === '') {
-            return true;
-        }
-
-        if (strcasecmp($radGroup, $billLabel) === 0) {
-            return true;
-        }
-
-        $billBare = $this->bareGroup($billLabel);
-        $radBare  = $this->bareGroup($radGroup);
-
-        return strcasecmp($radGroup, $billBare) === 0 || strcasecmp($radBare, $billBare) === 0;
+        return PlanGroup::matches($radGroup, $billLabel);
     }
 
     /**
      * Reduce a priced plan label to the bare group name the device stores.
+     *
+     * @see PlanGroup::bare() the shared implementation; this stays as the name the
+     *      rest of this service calls it by.
      */
     private function bareGroup(string $label): string
     {
-        $label = trim($label);
-
-        if ($label === '') {
-            return '';
-        }
-
-        if (str_contains($label, ' - ')) {
-            return trim(explode(' - ', $label, 2)[0]);
-        }
-
-        return trim(strtok($label, ' ') ?: $label);
+        return PlanGroup::bare($label);
     }
 
     /**

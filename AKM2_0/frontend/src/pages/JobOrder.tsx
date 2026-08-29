@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { ChevronDown, ChevronRight, Columns3, ArrowUp, ArrowDown, Menu, X, RefreshCw, ChevronLeft ,Filter, ChevronsLeft, ChevronsRight, Globe, Calendar, Download } from 'lucide-react';
 import GlobalSearch from './globalfunctions/GlobalSearch';
+import DropdownPortal from '../components/common/DropdownPortal';
 import JobOrderDetails from '../components/JobOrderDetails';
 import GlobalRelatedDataOverlay from '../components/GlobalRelatedDataOverlay';
 import JobOrderFunnelFilter, { FilterValues, allColumns as filterColumns } from '../filter/JobOrderFunnelFilter';
@@ -162,6 +163,19 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
   const [dateInstalledTo, setDateInstalledTo] = useState<string>('');
   const dropdownRef = useRef<HTMLDivElement>(null);
   const filterDropdownRef = useRef<HTMLDivElement>(null);
+  /**
+   * The Column Visibility trigger.
+   *
+   * The menu renders through DropdownPortal now, so it needs a handle on the button
+   * rather than on a wrapper: the panel lives in <body> and measures its position
+   * from this element on every open, scroll and resize. What it replaces is a
+   * `position: fixed` panel offset by a hardcoded
+   * `-translate-x-[calc(100%-3.5rem)]`, which escaped the toolbar clipping box but
+   * drifted away from its button at other window widths and stayed put when the
+   * toolbar scrolled sideways.
+   */
+  const columnsButtonRef = useRef<HTMLButtonElement>(null);
+
   const tableRef = useRef<HTMLTableElement>(null);
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
@@ -269,6 +283,13 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setDropdownOpen(false);
       }
+      // A click inside a portalled dropdown is inside the menu, even though the DOM
+      // says it landed in <body>. Without this the Column Visibility checkboxes would
+      // close the menu they live in.
+      if ((event.target as Element)?.closest?.('[data-dropdown-portal]')) {
+        return;
+      }
+
       if (filterDropdownRef.current && !filterDropdownRef.current.contains(event.target as Node)) {
         setFilterDropdownOpen(false);
       }
@@ -1999,6 +2020,7 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
                 {!(userRole.toLowerCase() === 'agent' || String(roleId) === '4') && displayMode === 'table' && (
                   <div className="relative z-50 flex-shrink-0" ref={filterDropdownRef}>
                     <button
+                      ref={columnsButtonRef}
                       className={`px-4 py-2 rounded text-sm transition-colors flex items-center ${isDarkMode
                         ? 'hover:bg-gray-800 text-white'
                         : 'hover:bg-gray-100 text-gray-900'
@@ -2078,8 +2100,14 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
                         </div>
 
                         {/* Desktop Dropdown */}
-                        <div className={`hidden md:flex fixed mt-10 w-80 border rounded shadow-lg z-50 max-h-96 flex-col -translate-x-[calc(100%-3.5rem)] ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'
-                          }`}>
+                        <DropdownPortal
+                          anchorRef={columnsButtonRef}
+                          open={filterDropdownOpen}
+                          onClose={() => setFilterDropdownOpen(false)}
+                          align="right"
+                          width={320}
+                          className={`hidden md:flex border rounded shadow-lg flex flex-col ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'}`}
+                        >
                           <div className={`p-3 border-b flex items-center justify-between ${isDarkMode ? 'border-gray-700' : 'border-gray-200'
                             }`}>
                             <span className={`text-sm font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'
@@ -2148,7 +2176,7 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
                               </label>
                             ))}
                           </div>
-                        </div>
+                        </DropdownPortal>
                       </>
                     )}
                   </div>

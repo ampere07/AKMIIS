@@ -11,8 +11,8 @@ use App\Models\EmailTemplate;
 use App\Services\EmailQueueService;
 use App\Services\RadiusQueueService;
 use App\Services\RadiusServerResolver;
+use App\Services\RouterosApiService;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 use Throwable;
@@ -600,16 +600,15 @@ class AutoDisconnectService
      * actually reachable, BEFORE any mutating RADIUS call is attempted.
      *
      * Walks radius_config #1, #2, ... (organization-specific first, shared as fallback)
-     * and, for each, tries the configured protocol then the alternate — the same strategy
-     * the rest of the app uses. A read-only GET is issued, so probing never mutates state
-     * and never duplicates the operation it is guarding.
+     * over the native RouterOS API. A read-only User Manager lookup is issued, so probing
+     * never mutates state and never duplicates the operation it is guarding.
      *
      * Reachability rules:
-     *   - HTTP 200 carrying the account  => reachable, account located on that config.
-     *   - HTTP 404 / 200 without the account => reachable, account simply lives elsewhere.
-     *   - HTTP 401 / 403 => treated as UNREACHABLE (bad credentials are a connection-level
+     *   - Login succeeded and the account is there => reachable, located on that config.
+     *   - Login succeeded, account absent => reachable, the account simply lives elsewhere.
+     *   - Login REJECTED => treated as UNREACHABLE (bad credentials are a connection-level
      *     failure the operator must fix; the operation is queued rather than lost).
-     *   - Timeout / DNS / TLS / refused connection => unreachable, try the next endpoint.
+     *   - Timeout / DNS / TLS / refused connection => unreachable, try the next config.
      *
      * @return array{reachable: bool, account_found: bool, config_id: int|null, config_ip: string|null,
      *               base_url: string|null, error: string|null, attempts: array}
@@ -640,57 +639,47 @@ class AutoDisconnectService
             return $result;
         }
 
-        $path = '/rest/user-manage/user/' . urlencode($username);
         $errors = [];
+        $api    = app(RouterosApiService::class);
 
         foreach ($configs as $config) {
-            foreach ($this->radiusResolver->baseUrlsFor($config) as $baseUrl) {
-                try {
-                    $response = Http::withOptions(['verify' => false])
-                        ->withBasicAuth($config->username, $config->password)
-                        ->connectTimeout(self::RADIUS_PROBE_CONNECT_TIMEOUT)
-                        ->timeout(self::RADIUS_PROBE_TIMEOUT)
-                        ->get($baseUrl . $path);
+            $label = (string) $config->ip;
 
-                    $status = $response->status();
-                    $result['attempts'][] = ['base_url' => $baseUrl, 'status' => $status];
-                    $this->writeVerbose("RADIUS probe {$baseUrl} => HTTP {$status}");
-
-                    // Authentication failure: the socket opened but we cannot operate.
-                    if ($status === 401 || $status === 403) {
-                        $errors[] = "{$baseUrl}: authentication failed (HTTP {$status})";
-                        continue;
-                    }
-
-                    // Anything else means the server answered — it is reachable.
-                    if (!$result['reachable']) {
-                        $result['reachable'] = true;
-                        $result['config_id'] = $config->id;
-                        $result['config_ip'] = $config->ip;
-                        $result['base_url'] = $baseUrl;
-                    }
-
-                    if ($response->successful()) {
-                        $data = $response->json();
-                        if (is_array($data) && isset($data['.id'])) {
-                            // Account located: pin the probe result to THIS server.
-                            $result['account_found'] = true;
-                            $result['config_id'] = $config->id;
-                            $result['config_ip'] = $config->ip;
-                            $result['base_url'] = $baseUrl;
-                            return $result;
-                        }
-                    }
-
-                    // Reachable but the account is not on this config — no point retrying
-                    // the alternate protocol for the same server.
-                    break;
-
-                } catch (Throwable $e) {
-                    $errors[] = "{$baseUrl}: " . $e->getMessage();
-                    $result['attempts'][] = ['base_url' => $baseUrl, 'error' => $e->getMessage()];
-                    $this->writeVerbose("RADIUS probe {$baseUrl} => EXCEPTION: " . $e->getMessage());
+            try {
+                // Connecting IS the probe: it opens the socket and logs in, so a refused
+                // connection and a rejected credential both land in the same branch.
+                if (!$api->connect($config, null, null, null, null, self::RADIUS_PROBE_CONNECT_TIMEOUT)) {
+                    $error = $api->getLastError();
+                    $errors[] = "{$label}: " . $error;
+                    $result['attempts'][] = ['base_url' => $label, 'error' => $error];
+                    $this->writeVerbose("RADIUS probe {$label} => UNREACHABLE: " . $error);
+                    continue;
                 }
+
+                $endpoint = $api->getUserManagerPrefix() . '@' . $label;
+                $result['attempts'][] = ['base_url' => $endpoint, 'status' => 'connected'];
+                $this->writeVerbose("RADIUS probe {$endpoint} => connected");
+
+                // The device answered — it is reachable regardless of where the account lives.
+                if (!$result['reachable']) {
+                    $result['reachable'] = true;
+                    $result['config_id'] = $config->id;
+                    $result['config_ip'] = $config->ip;
+                    $result['base_url'] = $endpoint;
+                }
+
+                if ($api->findUser($config, $username) !== null) {
+                    // Account located: pin the probe result to THIS server.
+                    $result['account_found'] = true;
+                    $result['config_id'] = $config->id;
+                    $result['config_ip'] = $config->ip;
+                    $result['base_url'] = $endpoint;
+                    return $result;
+                }
+            } catch (Throwable $e) {
+                $errors[] = "{$label}: " . $e->getMessage();
+                $result['attempts'][] = ['base_url' => $label, 'error' => $e->getMessage()];
+                $this->writeVerbose("RADIUS probe {$label} => EXCEPTION: " . $e->getMessage());
             }
         }
 

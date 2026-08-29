@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { FileText, X, Columns3, ArrowUp, ArrowDown, Menu, Filter, RefreshCw, ChevronDown, ChevronRight, ChevronLeft, ChevronsLeft, ChevronsRight, Download } from 'lucide-react';
 import GlobalSearch from './globalfunctions/GlobalSearch';
+import DropdownPortal from '../components/common/DropdownPortal';
 import ServiceOrderDetails from '../components/ServiceOrderDetails';
 import ServiceOrderFunnelFilter, { allColumns as filterColumns } from '../filter/ServiceOrderFunnelFilter';
 import SessionExpiredModal from '../components/SessionExpiredModal';
@@ -156,6 +157,19 @@ const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrde
   const [isFunnelFilterOpen, setIsFunnelFilterOpen] = useState<boolean>(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const filterDropdownRef = useRef<HTMLDivElement>(null);
+  /**
+   * The Column Visibility trigger.
+   *
+   * The menu is rendered through DropdownPortal now, so it needs a handle on the
+   * button rather than on a wrapper: the panel lives in <body> and measures its
+   * position from this element on every open, scroll and resize. What it replaces is
+   * a `position: fixed` panel offset by a hardcoded
+   * `-translate-x-[calc(100%-3.5rem)]`, which escaped the toolbar's clipping box but
+   * drifted away from its button at other window widths and stayed put when the
+   * toolbar scrolled sideways.
+   */
+  const columnsButtonRef = useRef<HTMLButtonElement>(null);
+
   const tableRef = useRef<HTMLTableElement>(null);
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
@@ -270,6 +284,13 @@ const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrde
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
+      // A click inside a portalled dropdown is inside the menu, even though the DOM
+      // says it landed in <body>. Without this the Column Visibility checkboxes would
+      // close the menu they live in.
+      if ((event.target as Element)?.closest?.('[data-dropdown-portal]')) {
+        return;
+      }
+
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setDropdownOpen(false);
       }
@@ -1631,6 +1652,7 @@ const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrde
                 {displayMode === 'table' && (
                   <div className="relative z-50 flex-shrink-0" ref={filterDropdownRef}>
                     <button
+                      ref={columnsButtonRef}
                       className={`px-4 py-2 rounded text-sm transition-colors flex items-center ${isDarkMode
                         ? 'hover:bg-gray-800 text-white'
                         : 'hover:bg-gray-100 text-gray-900'
@@ -1640,9 +1662,14 @@ const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrde
                     >
                       <Columns3 className="h-5 w-5" />
                     </button>
-                    {filterDropdownOpen && (
-                      <div className={`fixed mt-10 w-80 border rounded shadow-lg z-50 max-h-96 flex flex-col -translate-x-[calc(100%-3.5rem)] ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'
-                        }`}>
+                      <DropdownPortal
+                        anchorRef={columnsButtonRef}
+                        open={filterDropdownOpen}
+                        onClose={() => setFilterDropdownOpen(false)}
+                        align="right"
+                        width={320}
+                        className={`border rounded shadow-lg flex flex-col ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'}`}
+                      >
                         <div className={`p-3 border-b flex items-center justify-between ${isDarkMode ? 'border-gray-700' : 'border-gray-200'
                           }`}>
                           <span className={`text-sm font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'
@@ -1711,8 +1738,7 @@ const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrde
                             </label>
                           ))}
                         </div>
-                      </div>
-                    )}
+                      </DropdownPortal>
                   </div>
                 )}
                 <div className="relative z-50 flex-shrink-0" ref={dropdownRef}>

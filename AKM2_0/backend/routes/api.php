@@ -1758,6 +1758,10 @@ Route::get('/plans/{id}', [\App\Http\Controllers\Api\PlanApiController::class , 
 Route::put('/plans/{id}', [\App\Http\Controllers\Api\PlanApiController::class , 'update']);
 Route::delete('/plans/{id}', [\App\Http\Controllers\Api\PlanApiController::class , 'destroy']);
 
+// User Manager groups read live off the MikroTik router — backs the plan form so an
+// operator picks a group the router will actually authenticate against.
+Route::get('/radius/user-groups', [\App\Http\Controllers\Api\PlanApiController::class , 'getMikrotikGroups']);
+
 // Plan Related Data - fetch applications, job orders, customers by plan name
 Route::get('/plans/{id}/related', function ($id) {
     try {
@@ -3906,6 +3910,10 @@ Route::middleware('auth:sanctum')->prefix('smartolt-reconciliation')->group(func
     Route::post('/start-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'startJob']);
     Route::post('/process-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'processJob']);
     Route::post('/abort-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'abortJob']);
+    // Hardware swap for one ONU. Not a job: it is a single call the operator makes
+    // from a confirmation modal and needs the answer to immediately, unlike the
+    // sweeps above which run in slices against a quota.
+    Route::post('/replace-sn', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'replaceSn']);
     Route::post('/undo', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'undo']);
 });
 

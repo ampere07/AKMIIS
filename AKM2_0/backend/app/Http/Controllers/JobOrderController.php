@@ -28,6 +28,7 @@ use Illuminate\Support\Facades\Hash;
 use App\Services\GoogleDriveService;
 use App\Services\PppoeUsernameService;
 use App\Services\RadiusServerResolver;
+use App\Services\RouterosApiService;
 use App\Models\RadiusConfig;
 use App\Models\ActivityLog;
 use App\Events\JobOrderViewingUpdate;
@@ -1991,20 +1992,16 @@ class JobOrderController extends Controller
                 $plan = trim($plan);
             }
             
-            $payload = [
-                'name' => $pppoeUsername,
-                'group' => $plan,
-                'password' => $pppoePassword
-            ];
-
             // Create the account on the barangay's assigned server only, retrying up to 3
             // times. There is no fallback to another radius_config.
+            //
+            // addUser() is read-then-write: if an earlier attempt already landed the account
+            // on the device, the retry reports success and leaves it alone rather than
+            // creating a second copy of the subscriber.
             $maxAttempts = 3;
             $lastFailureWasConnection = false;
 
-            $radiusUrl = $radiusConfig->ssl_type . '://' . $radiusConfig->ip . ':' . $radiusConfig->port . '/rest/user-manage/user';
-            $radiusUsername = $radiusConfig->username;
-            $radiusPassword = $radiusConfig->password;
+            $api = app(RouterosApiService::class);
 
             \Log::channel('radiusrelated')->info('RADIUS server selected for JobOrder account creation', [
                 'job_order_id'     => $id,
@@ -2016,31 +2013,26 @@ class JobOrderController extends Controller
 
             for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
                 try {
-                    $response = Http::withOptions([
-                        'verify' => false
-                    ])
-                    ->withBasicAuth($radiusUsername, $radiusPassword)
-                    ->put($radiusUrl, $payload);
-
-                    $statusCode = $response->status();
-
-                    if ($statusCode === 204 || $response->successful()) {
+                    if ($api->addUser($radiusConfig, $pppoeUsername, $pppoePassword, $plan)) {
                         $radiusSubmitted = true;
                         $radiusError = null;
                         break;
                     }
 
-                    $radiusError = 'HTTP ' . $statusCode . ': ' . $response->body();
-                    $lastFailureWasConnection = false;
+                    $radiusError = $api->getLastError();
+                    // No live connection means the device never answered; anything else is
+                    // the device refusing the create, which a retry will not fix by itself.
+                    $lastFailureWasConnection = !$api->isConnected();
+
                     \Log::channel('radiusrelated')->error('RADIUS API Error for JobOrder: ' . $id, [
-                        'status' => $statusCode,
-                        'response' => $response->body(),
-                        'payload' => $payload,
+                        'error' => $radiusError,
+                        'username' => $pppoeUsername,
+                        'group' => $plan,
                         'attempt' => $attempt,
                         'radius_config_id' => $radiusConfig->id,
                         'radius_ip' => $radiusConfig->ip,
                     ]);
-                } catch (\Exception $mikrotikException) {
+                } catch (\Throwable $mikrotikException) {
                     $radiusError = $mikrotikException->getMessage();
                     $lastFailureWasConnection = true;
                     \Log::channel('radiusrelated')->error('RADIUS Connection Exception for JobOrder: ' . $id, [

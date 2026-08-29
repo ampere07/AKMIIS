@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Receipt, ChevronLeft, ChevronDown, CheckCheck, X, Check, ChevronRight, Menu, FileText, Globe, Filter, ChevronsLeft, ChevronsRight, RefreshCw, Loader2, ArrowUp, ArrowDown, Columns3, Download } from 'lucide-react';
 import GlobalSearch from './globalfunctions/GlobalSearch';
+import DropdownPortal from '../components/common/DropdownPortal';
 import TransactionListDetails from '../components/TransactionListDetails';
 import { transactionService } from '../services/transactionService';
 import { getCities, City } from '../services/cityService';
@@ -344,6 +345,19 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
   });
   const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
   const filterDropdownRef = useRef<HTMLDivElement>(null);
+  /**
+   * The Column Visibility trigger.
+   *
+   * The menu renders through DropdownPortal now, so it needs a handle on the button
+   * rather than on a wrapper: the panel lives in <body> and measures its position
+   * from this element on every open, scroll and resize. What it replaces is a
+   * `position: fixed` panel offset by a hardcoded
+   * `-translate-x-[calc(100%-3.5rem)]`, which escaped the toolbar clipping box but
+   * drifted away from its button at other window widths and stayed put when the
+   * toolbar scrolled sideways.
+   */
+  const columnsButtonRef = useRef<HTMLButtonElement>(null);
+
   const colStartXRef = useRef<number>(0);
   const colStartWidthRef = useRef<number>(0);
 
@@ -584,6 +598,13 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
+      // A click inside a portalled dropdown is inside the menu, even though the DOM
+      // says it landed in <body>. Without this the Column Visibility checkboxes would
+      // close the menu they live in.
+      if ((event.target as Element)?.closest?.('[data-dropdown-portal]')) {
+        return;
+      }
+
       if (filterDropdownRef.current && !filterDropdownRef.current.contains(event.target as Node)) {
         setFilterDropdownOpen(false);
       }
@@ -1738,14 +1759,21 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
             </button>
             <div className="relative z-50 flex-shrink-0" ref={filterDropdownRef}>
               <button
+                ref={columnsButtonRef}
                 className={`px-4 py-2 rounded text-sm transition-colors flex items-center ${isDarkMode ? 'hover:bg-gray-700 text-white' : 'hover:bg-gray-200 text-gray-900 border border-gray-300'}`}
                 onClick={() => setFilterDropdownOpen(!filterDropdownOpen)}
                 title="Column Visibility"
               >
                 <Columns3 className="h-5 w-5" />
               </button>
-              {filterDropdownOpen && (
-                <div className={`fixed mt-10 w-72 rounded shadow-lg z-50 max-h-[70vh] flex flex-col -translate-x-[calc(100%-3.5rem)] ${isDarkMode ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200'}`}>
+                <DropdownPortal
+                  anchorRef={columnsButtonRef}
+                  open={filterDropdownOpen}
+                  onClose={() => setFilterDropdownOpen(false)}
+                  align="right"
+                  width={288}
+                  className={`border rounded shadow-lg flex flex-col ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}
+                >
                   <div className={`p-3 border-b flex items-center justify-between ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`}>
                     <span className={`text-sm font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>Column Visibility</span>
                     <div className="flex space-x-2">
@@ -1771,8 +1799,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
                       </label>
                     ))}
                   </div>
-                </div>
-              )}
+                </DropdownPortal>
             </div>
             <button
               onClick={handleExport}
