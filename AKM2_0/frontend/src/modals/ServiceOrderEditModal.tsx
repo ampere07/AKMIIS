@@ -50,6 +50,7 @@ interface ServiceOrderEditFormData {
   plan: string;
 
   username: string;
+  pppoePassword?: string;
   connectionType: string;
   routerModemSN: string;
   lcp: string;
@@ -153,6 +154,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     plan: '',
 
     username: '',
+    pppoePassword: '',
     connectionType: '',
     routerModemSN: '',
     lcp: '',
@@ -558,6 +560,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         plan: serviceOrderData.plan || '',
 
         username: serviceOrderData.username || '',
+        pppoePassword: serviceOrderData.pppoePassword || serviceOrderData.pppoe_password || '',
         connectionType: serviceOrderData.connectionType || serviceOrderData.connection_type || '',
         routerModemSN: serviceOrderData.routerModemSN || serviceOrderData.router_modem_sn || '',
         lcp: serviceOrderData.lcp || '',
@@ -921,6 +924,8 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       } else {
         updatedFormData.visitStatus = originalVisitStatus;
       }
+    } else if (updatedFormData.supportStatus === 'Failed') {
+      updatedFormData.visitStatus = 'Failed';
     }
 
     if (updatedFormData.visitStatus === 'Reschedule') {
@@ -1112,8 +1117,8 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         vlan: updatedFormData.vlan,
         support_status: updatedFormData.supportStatus,
 
-        // Include visit_status if visible (For Visit status) or explicitly cleared when Resolved
-        ...((isForVisit || (updatedFormData.supportStatus === 'Resolved' && updatedFormData.visitStatus === '')) ? {
+        // Include visit_status if visible (For Visit status) or explicitly updated when Resolved/Failed
+        ...((isForVisit || ['Resolved', 'Failed'].includes(updatedFormData.supportStatus) || updatedFormData.visitStatus === '') ? {
           visit_status: updatedFormData.visitStatus,
         } : {}),
         ...(isForVisit ? {
@@ -1540,6 +1545,18 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                 readOnly
                 className={`w-full px-3 py-2 border rounded focus:outline-none focus-primary cursor-not-allowed ${isDarkMode ? 'bg-gray-800 text-gray-400 border-gray-700' : 'bg-gray-100 text-gray-500 border-gray-300'
                   } ${errors.username ? 'border-red-500' : ''}`}
+              />
+            </div>
+
+            <div>
+              <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                }`}>PPPOE Password</label>
+              <input
+                type="text"
+                value={formData.pppoePassword || ''}
+                readOnly
+                className={`w-full px-3 py-2 border rounded focus:outline-none focus-primary cursor-not-allowed ${isDarkMode ? 'bg-gray-800 text-gray-400 border-gray-700' : 'bg-gray-100 text-gray-500 border-gray-300'
+                  }`}
               />
             </div>
 

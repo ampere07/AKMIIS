@@ -206,6 +206,11 @@ const LcpNapLocation: React.FC = () => {
   // Pin-drop: the Add action arms the map instead of opening the form.
   const [isPlacingPin, setIsPlacingPin] = useState(false);
   const [pinCoords, setPinCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  // The confirmation card's measured height. Measured rather than assumed
+  // because the card grows with its content — "Waiting for the map…" and a
+  // coordinate pair are different heights — and the map's action buttons have to
+  // clear whatever it actually is.
+  const [pinBarHeight, setPinBarHeight] = useState(0);
   const [pinnedCoordinates, setPinnedCoordinates] = useState<string | null>(null);
 
   const [searchSuggestions, setSearchSuggestions] = useState<any[]>([]);
@@ -772,7 +777,10 @@ const LcpNapLocation: React.FC = () => {
 
             {/* Floating confirmation bar for the pin-drop. */}
             {isPlacingPin && (
-              <View style={styles.pinBar}>
+              <View
+                style={styles.pinBar}
+                onLayout={(e) => setPinBarHeight(e.nativeEvent.layout.height)}
+              >
                 <View style={styles.pinBarHeader}>
                   <MapPin size={16} color={primaryColor} />
                   <View style={styles.pinBarText}>
@@ -803,16 +811,24 @@ const LcpNapLocation: React.FC = () => {
               </View>
             )}
 
-            {!isPlacingPin && (
-              <View style={styles.mapActionButtons}>
-                <Pressable onPress={startPinPlacement} style={[styles.mapActionButton, { backgroundColor: primaryColor }]}>
-                  <Plus size={24} color="white" />
-                </Pressable>
-                <Pressable onPress={handleGetMyLocation} style={[styles.mapActionButton, { backgroundColor: '#ffffff', marginTop: 12 }]}>
-                  <Navigation size={24} color={'#111827'} />
-                </Pressable>
-              </View>
-            )}
+            {/* While the confirmation card is up, these move above it. Raising
+                the card above the tab bar put it where these buttons already
+                were, so without this they would sit behind it. */}
+            <View
+              style={[
+                styles.mapActionButtons,
+                isPlacingPin && pinBarHeight > 0
+                  ? { bottom: TAB_BAR_TOP + 12 + pinBarHeight + 12 }
+                  : null,
+              ]}
+            >
+              <Pressable onPress={startPinPlacement} style={[styles.mapActionButton, { backgroundColor: primaryColor }]}>
+                <Plus size={24} color="white" />
+              </Pressable>
+              <Pressable onPress={handleGetMyLocation} style={[styles.mapActionButton, { backgroundColor: '#ffffff', marginTop: 12 }]}>
+                <Navigation size={24} color={'#111827'} />
+              </Pressable>
+            </View>
 
             {/* Map attribution — required by tile provider */}
             <View style={styles.osmAttribution}>
@@ -865,6 +881,16 @@ const LcpNapLocation: React.FC = () => {
   );
 };
 
+/**
+ * The bottom tab bar's geometry, mirrored from pages/Sidebar.tsx.
+ *
+ * Anything anchored to the bottom of the map has to clear it. Kept here as named
+ * values so a change to the bar has one obvious place to be reflected.
+ */
+const TAB_BAR_BOTTOM_OFFSET = 25;   // Sidebar: position absolute, bottom: 25
+const TAB_BAR_HEIGHT = 68;          // Sidebar: collapsed container height
+const TAB_BAR_TOP = TAB_BAR_BOTTOM_OFFSET + TAB_BAR_HEIGHT;   // 93
+
 const styles = StyleSheet.create({
   container: { flex: 1, overflow: 'hidden' },
   flex1: { flex: 1 },
@@ -898,7 +924,16 @@ const styles = StyleSheet.create({
   crosshairRing: { width: 40, height: 40, borderRadius: 20, borderWidth: 2, opacity: 0.7 },
   crosshairVertical: { position: 'absolute', width: 2, height: 32 },
   crosshairHorizontal: { position: 'absolute', height: 2, width: 32 },
-  pinBar: { position: 'absolute', left: 16, right: 16, bottom: 24, backgroundColor: '#ffffff', borderRadius: 14, borderWidth: 1, borderColor: '#e5e7eb', padding: 12, zIndex: 700, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 6 },
+  // Clear of the bottom tab bar. That bar (pages/Sidebar.tsx) is positioned
+  // absolute at bottom: 25 with a collapsed height of 68, so it occupies 25-93px
+  // from the screen edge. At bottom: 24 this card sat entirely underneath it and
+  // the Confirm button could not be reached — the map's own action buttons at
+  // bottom: 100 were already compensating for the same bar.
+  //
+  // No safe-area inset is added: the tab bar uses a fixed 25px offset rather
+  // than insets, so matching its geometry is what keeps the two aligned on every
+  // device. Adding an inset here would lift this card away from the bar instead.
+  pinBar: { position: 'absolute', left: 16, right: 16, bottom: TAB_BAR_TOP + 12, backgroundColor: '#ffffff', borderRadius: 14, borderWidth: 1, borderColor: '#e5e7eb', padding: 12, zIndex: 700, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 6 },
   pinBarHeader: { flexDirection: 'row', alignItems: 'flex-start' },
   pinBarText: { flex: 1, marginLeft: 8 },
   pinBarTitle: { fontSize: 14, fontWeight: '600', color: '#111827' },

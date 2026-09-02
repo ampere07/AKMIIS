@@ -38,6 +38,7 @@ interface ServiceOrderDetailsProps {
     plan: string;
     affiliate?: string;
     username: string;
+    pppoePassword?: string;
     connectionType: string;
     routerModemSN: string;
     lcp: string;
@@ -225,6 +226,7 @@ const getFieldLabel = (fieldKey: string): string => {
     emailAddress: 'Email Address',
     plan: 'Plan',
     username: 'Username',
+    pppoePassword: 'PPPOE Password',
     connectionType: 'Connection Type',
     routerModemSN: 'Router/Modem SN',
     lcp: 'LCP',
@@ -718,6 +720,7 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({
     emailAddress: () => <Text style={valStyle} selectable={true}>{serviceOrder.emailAddress}</Text>,
     plan: () => <Text style={valStyle} selectable={true}>{serviceOrder.plan}</Text>,
     username: () => <Text style={valStyle} selectable={true}>{serviceOrder.username}</Text>,
+    pppoePassword: () => <Text style={valStyle} selectable={true}>{serviceOrder.pppoePassword || '-'}</Text>,
     connectionType: () => <Text style={valStyle} selectable={true}>{serviceOrder.connectionType}</Text>,
     routerModemSN: () => <Text style={valStyle} selectable={true}>{serviceOrder.routerModemSN}</Text>,
     lcp: () => <Text style={valStyle} selectable={true}>{serviceOrder.lcp}</Text>,

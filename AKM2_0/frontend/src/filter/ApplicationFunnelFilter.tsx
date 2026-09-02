@@ -62,6 +62,7 @@ export const allColumns: Column[] = [
   { key: 'visit_with_other', label: 'Visit With(Other)', dataType: 'varchar' },
   { key: 'remarks', label: 'Remarks', dataType: 'text' },
   { key: 'updated_by', label: 'Modified By', dataType: 'varchar' },
+  { key: 'updated_at', label: 'Modified Date', dataType: 'datetime' },
   { key: 'user_email', label: 'User Email', dataType: 'varchar' },
   { key: 'computed_time', label: '_ComputedTime', dataType: 'datetime' },
   { key: 'installation_address', label: 'Full Address', dataType: 'varchar' },

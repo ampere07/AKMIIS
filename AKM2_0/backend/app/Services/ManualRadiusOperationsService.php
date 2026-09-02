@@ -506,7 +506,8 @@ class ManualRadiusOperationsService
                 $accountNo,
                 $oldUsername,
                 $newUsername,
-                $updatedBy
+                $updatedBy,
+                $newPassword
             );
 
             // Step 2: Update RADIUS credentials
@@ -737,9 +738,9 @@ class ManualRadiusOperationsService
     }
 
     /**
-     * Update database credentials (username only)
+     * Update database credentials (username and optional password)
      */
-    private function updateDatabaseCredentials(string $accountNo, string $oldUsername, string $newUsername, string $updatedBy): void
+    private function updateDatabaseCredentials(string $accountNo, string $oldUsername, string $newUsername, string $updatedBy, ?string $newPassword = null): void
     {
         $rowsUpdated = 0;
         $accountId = null;
@@ -788,15 +789,20 @@ class ManualRadiusOperationsService
         // If technical_details was updated successfully, also sync job_orders
         if ($rowsUpdated > 0) {
             if ($accountId) {
+                $joUpdate = [
+                    'pppoe_username' => $newUsername,
+                    'username' => $newUsername,
+                    'updated_at' => now()
+                ];
+                if (!empty($newPassword)) {
+                    $joUpdate['pppoe_password'] = $newPassword;
+                }
+
                 $joUpdated = DB::table('job_orders')
                     ->where('account_id', $accountId)
-                    ->update([
-                        'pppoe_username' => $newUsername,
-                        'username' => $newUsername,
-                        'updated_at' => now()
-                    ]);
+                    ->update($joUpdate);
                 
-                $this->writeLog("[DB] Synced job_orders username & pppoe_username for Account ID: $accountId ($joUpdated rows affected)");
+                $this->writeLog("[DB] Synced job_orders username, pppoe_username & password for Account ID: $accountId ($joUpdated rows affected)");
             } else {
                 $this->writeLog("[WARNING] Could not determine account_id to sync job_orders table");
             }

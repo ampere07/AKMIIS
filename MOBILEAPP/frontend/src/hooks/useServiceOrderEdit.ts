@@ -43,6 +43,7 @@ export interface ServiceOrderEditFormData {
   emailAddress: string;
   plan: string;
   username: string;
+  pppoePassword: string;
   connectionType: string;
   routerModemSN: string;
   lcp: string;
@@ -769,6 +770,7 @@ const mapApiToForm = (d: any): Partial<ServiceOrderEditFormData> => {
     emailAddress: d.emailAddress || d.email_address || '',
     plan: d.plan || '',
     username: d.username || '',
+    pppoePassword: d.pppoePassword || d.pppoe_password || '',
     connectionType: (() => {
       const t = (d.connectionType || d.connection_type || 'Fiber').toLowerCase();
       if (t === 'antenna') return 'Antenna';

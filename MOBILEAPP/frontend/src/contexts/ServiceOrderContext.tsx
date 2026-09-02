@@ -18,6 +18,7 @@ interface ServiceOrder {
     provider: string;
     affiliate: string;
     username: string;
+    pppoePassword?: string;
     connectionType: string;
     routerModemSN: string;
     lcp: string;
@@ -114,6 +115,7 @@ const transformServiceOrder = (order: ServiceOrderData): ServiceOrder => {
         provider: '',
         affiliate: order.group_name || '',
         username: order.username || '',
+        pppoePassword: (order as any).pppoe_password || (order as any).pppoePassword || '',
         connectionType: order.connection_type || '',
         routerModemSN: order.router_modem_sn || '',
         lcp: order.lcp || '',

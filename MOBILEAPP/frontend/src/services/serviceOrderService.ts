@@ -25,6 +25,7 @@ export interface ServiceOrderData {
   plan?: string;
   group_name?: string;
   username?: string;
+  pppoe_password?: string;
   connection_type?: string;
   router_modem_sn?: string;
   lcp?: string;

@@ -34,7 +34,7 @@ class ApplicationController extends Controller
             $columns = [
                 'id', 'first_name', 'middle_initial', 'last_name', 
                 'timestamp', 'status', 'city', 'installation_address', 
-                'organization_id', 'created_at', 'updated_at'
+                'organization_id', 'created_at', 'updated_at', 'updated_by'
             ];
 
             if (!$fastMode) {

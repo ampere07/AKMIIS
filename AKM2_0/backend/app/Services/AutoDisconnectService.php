@@ -967,7 +967,7 @@ class AutoDisconnectService
      *
      * @return array{success:bool, charged:int, skipped:int, errors:array, duration:int}
      */
-    public function processGracePeriodCharge(): array
+    public function processGracePeriodCharge(?Carbon $customTargetDate = null): array
     {
         $this->writeLog("");
         $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
@@ -991,15 +991,15 @@ class AutoDisconnectService
             return ['success' => true, 'charged' => 0, 'skipped' => 0, 'errors' => [], 'duration' => $duration];
         }
 
-        // Grace window: disconnections written exactly this many days ago are charged today.
+        // Grace window: disconnections written exactly this many days ago are charged today (or custom target DC date).
         $graceDays = $off['grace_after_dc'] > 0 ? $off['grace_after_dc'] : self::ADDITIONAL_INVOICE_OFFSET_DAYS;
-        $targetDcDate = $today->copy()->subDays($graceDays);
+        $targetDcDate = $customTargetDate ? $customTargetDate->copy()->startOfDay() : $today->copy()->subDays($graceDays);
 
         // Penalty coverage window (due date -> DC), always divided by the fixed 30-day cycle.
         $coverageDays = $off['coverage'] > 0 ? $off['coverage'] : self::DC_OFFSET_DAYS;
         $invoiceRemark = ' | GP Charge (' . $coverageDays . ' Days)';
 
-        $this->writeLog("[GRACE] Target disconnection date (today - {$graceDays} days): " . $targetDcDate->format('Y-m-d'));
+        $this->writeLog("[GRACE] Target disconnection date" . ($customTargetDate ? " (explicit override)" : " (today - {$graceDays} days)") . ": " . $targetDcDate->format('Y-m-d'));
         $this->writeLog("[GRACE] Coverage days: {$coverageDays} (fixed divisor " . self::PRORATE_DIVISOR_DAYS . ")");
 
         // 1. Auto-DC entries written on the target date. Range-bound rather than DATE() so
@@ -1029,6 +1029,9 @@ class AutoDisconnectService
             ->whereIn('id', $dcLogs->pluck('account_id')->unique()->all())
             ->get()
             ->keyBy('id');
+
+        // Hoist lookup map of all active plans to resolve desired_plan fallbacks efficiently.
+        $allPlans = DB::table('plan_list')->get()->keyBy('plan_name');
 
         $accountNos = $accounts->pluck('account_no')->filter()->unique()->values()->all();
 
@@ -1082,9 +1085,20 @@ class AutoDisconnectService
                 continue;
             }
 
+            // Primary: plan relation via billing_accounts.plan_id
             $planPrice = floatval($billingAccount->plan?->price ?? 0);
+
+            // Fallback: resolve from customers.desired_plan if plan_id is not set
+            if ($planPrice <= 0 && !empty($billingAccount->customer?->desired_plan)) {
+                $desiredPlan = (string) $billingAccount->customer->desired_plan;
+                $extractedName = $this->extractPlanName($desiredPlan);
+                if (isset($allPlans[$extractedName])) {
+                    $planPrice = floatval($allPlans[$extractedName]->price ?? 0);
+                }
+            }
+
             if ($planPrice <= 0) {
-                $this->writeLog("  [SKIP] Plan price unavailable or zero");
+                $this->writeLog("  [SKIP] Plan price unavailable or zero (plan_id: " . ($billingAccount->plan_id ?? 'NULL') . ", desired_plan: " . ($billingAccount->customer?->desired_plan ?? 'NULL') . ")");
                 $skipped++;
                 continue;
             }
@@ -1898,4 +1912,25 @@ class AutoDisconnectService
             }
         }
     }
+
+    /**
+     * Extract clean plan name from customers.desired_plan string
+     */
+    protected function extractPlanName(string $desiredPlan): string
+    {
+        // First handle " - " separator (e.g., "50Mbps - P800.00" -> "50Mbps")
+        if (strpos($desiredPlan, ' - ') !== false) {
+            $parts = explode(' - ', $desiredPlan);
+            $desiredPlan = trim($parts[0]);
+        }
+
+        // Then handle space separator (e.g., "SWIFT 1000" -> "SWIFT")
+        if (strpos($desiredPlan, ' ') !== false) {
+            $parts = explode(' ', $desiredPlan);
+            return trim($parts[0]);
+        }
+
+        return trim($desiredPlan);
+    }
 }
+

@@ -16,6 +16,8 @@ class ProcessAutoDisconnectPullout extends Command
     protected $signature = 'cron:auto-disconnect-pullout 
                             {--dc-only : Process only disconnections}
                             {--pullout-only : Process only pullout requests}
+                            {--grace-only : Process only grace period charges}
+                            {--grace-dc-date= : Specific disconnection date for grace period charges (YYYY-MM-DD)}
                             {--dry-run : Run without making changes}';
 
     /**
@@ -59,6 +61,8 @@ class ProcessAutoDisconnectPullout extends Command
 
         $dcOnly = $this->option('dc-only');
         $pulloutOnly = $this->option('pullout-only');
+        $graceOnly = $this->option('grace-only');
+        $graceDcDate = $this->option('grace-dc-date');
         $dryRun = $this->option('dry-run');
 
         if ($dryRun) {
@@ -69,9 +73,10 @@ class ProcessAutoDisconnectPullout extends Command
         try {
             $dcResult = null;
             $pulloutResult = null;
+            $graceResult = null;
 
             // Process Auto Disconnection
-            if (!$pulloutOnly) {
+            if (!$pulloutOnly && !$graceOnly) {
                 $this->info("─────────────────────────────────────────────────────────");
                 $this->info("[PROCESS] Processing Auto Disconnection...");
                 $this->info("─────────────────────────────────────────────────────────");
@@ -104,13 +109,21 @@ class ProcessAutoDisconnectPullout extends Command
                 }
 
                 $this->newLine();
+            }
 
-                // Process Grace Period Charges (7-day delayed charging for DC'd accounts)
+            // Process Grace Period Charges (7-day delayed charging for DC'd accounts)
+            if (!$dcOnly && !$pulloutOnly) {
                 $this->info("─────────────────────────────────────────────────────────");
                 $this->info("[PROCESS] Processing Grace Period Charges...");
                 $this->info("─────────────────────────────────────────────────────────");
 
-                $graceResult = $this->autoDisconnectService->processGracePeriodCharge();
+                $targetDcDate = null;
+                if (!empty($graceDcDate)) {
+                    $targetDcDate = Carbon::parse($graceDcDate);
+                    $this->info("[TARGET DC DATE] " . $targetDcDate->format('Y-m-d'));
+                }
+
+                $graceResult = $this->autoDisconnectService->processGracePeriodCharge($targetDcDate);
 
                 if ($graceResult['success']) {
                     $this->newLine();
@@ -140,7 +153,7 @@ class ProcessAutoDisconnectPullout extends Command
             }
 
             // Process Auto Pullout
-            if (!$dcOnly) {
+            if (!$dcOnly && !$graceOnly) {
                 $this->info("─────────────────────────────────────────────────────────");
                 $this->info("[PROCESS] Processing Auto Pullout...");
                 $this->info("─────────────────────────────────────────────────────────");

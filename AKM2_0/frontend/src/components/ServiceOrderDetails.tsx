@@ -57,6 +57,7 @@ interface ServiceOrderDetailsProps {
     plan: string;
     affiliate: string;
     username: string;
+    pppoePassword?: string;
     connectionType: string;
     routerModemSN: string;
     lcp: string;
@@ -181,6 +182,7 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
     'plan',
     'affiliate',
     'username',
+    'pppoePassword',
     'connectionType',
     'routerModemSN',
     'lcp',
@@ -377,6 +379,7 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
       plan: 'Plan',
       affiliate: 'Affiliate',
       username: 'Username',
+      pppoePassword: 'PPPOE Password',
       connectionType: 'Connection Type',
       routerModemSN: 'Router/Modem SN',
       lcp: 'LCP',
@@ -681,6 +684,18 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
         return renderField('Affiliate', serviceOrder.affiliate);
       case 'username':
         return renderField('Username', serviceOrder.username);
+      case 'pppoePassword':
+        return (
+          <div className={`flex py-2 ${isDarkMode ? 'border-b border-gray-800' : 'border-b border-gray-300'
+            }`}>
+            <div className={`w-40 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+              }`}>PPPOE Password</div>
+            <div className={`flex-1 font-mono ${isDarkMode ? 'text-white' : 'text-gray-900'
+              }`}>
+              {serviceOrder.pppoePassword || '-'}
+            </div>
+          </div>
+        );
       case 'connectionType':
         return renderField('Connection Type', serviceOrder.connectionType);
       case 'routerModemSN':

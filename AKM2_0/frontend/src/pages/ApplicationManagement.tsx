@@ -52,7 +52,9 @@ const allColumns = [
   { key: 'promo', label: 'Promo', width: 'min-w-28' },
   { key: 'referredBy', label: 'Referred By', width: 'min-w-32' },
   { key: 'createDate', label: 'Create Date', width: 'min-w-32' },
-  { key: 'createTime', label: 'Create Time', width: 'min-w-28' }
+  { key: 'createTime', label: 'Create Time', width: 'min-w-28' },
+  { key: 'updated_by', label: 'Modified By', width: 'min-w-32' },
+  { key: 'updated_at', label: 'Modified Date', width: 'min-w-40' }
 ];
 
 interface ApplicationManagementProps {
@@ -592,15 +594,26 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
           }
           else if (typedFilter.type === 'date') {
             if (appValue) {
-              const dateValue = new Date(appValue).getTime();
+              const normalizeDate = (d: any, isEnd: boolean = false) => {
+                if (!d) return NaN;
+                let s = String(d).trim().replace(' ', 'T');
+                if (s.length === 10) {
+                  s = isEnd ? `${s}T23:59:59.999` : `${s}T00:00:00`;
+                } else if (s.length === 16) {
+                  s = isEnd ? `${s}:59.999` : `${s}:00`;
+                }
+                return new Date(s).getTime();
+              };
+
+              const dateValue = normalizeDate(appValue);
               if (!isNaN(dateValue)) {
                 if (typedFilter.from) {
-                  const fromDate = new Date(typedFilter.from).getTime();
-                  if (dateValue < fromDate) { matchesFunnel = false; break; }
+                  const fromDate = normalizeDate(typedFilter.from, false);
+                  if (!isNaN(fromDate) && dateValue < fromDate) { matchesFunnel = false; break; }
                 }
                 if (typedFilter.to) {
-                  const toDate = new Date(typedFilter.to).getTime();
-                  if (dateValue > toDate + 86400000) { matchesFunnel = false; break; }
+                  const toDate = normalizeDate(typedFilter.to, true);
+                  if (!isNaN(toDate) && dateValue > toDate) { matchesFunnel = false; break; }
                 }
               } else {
                 matchesFunnel = false; break;
@@ -818,6 +831,14 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
           case 'createTime':
             aValue = a.create_time || '';
             bValue = b.create_time || '';
+            break;
+          case 'updated_by':
+            aValue = a.updated_by || '';
+            bValue = b.updated_by || '';
+            break;
+          case 'updated_at':
+            aValue = a.updated_at || '';
+            bValue = b.updated_at || '';
             break;
           default:
             return 0;
@@ -1157,6 +1178,10 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
         return formatDate(application.create_date) || '-';
       case 'createTime':
         return application.create_time || '-';
+      case 'updated_by':
+        return application.updated_by || '-';
+      case 'updated_at':
+        return application.updated_at ? formatDate(application.updated_at) : '-';
       default:
         return '-';
     }

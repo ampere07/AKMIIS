@@ -584,6 +584,8 @@ const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrde
       case 'emailAddress': return item.emailAddress;
       case 'fullAddress': return item.fullAddress ?? (item as any).full_address ?? '';
       case 'plan': return item.plan;
+      case 'username': return item.username ?? (item as any).username ?? '';
+      case 'pppoePassword': return item.pppoePassword ?? (item as any).pppoe_password ?? '';
       case 'lcp': return item.lcp;
       case 'nap': return item.nap;
       case 'port': return item.port;
@@ -598,8 +600,8 @@ const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrde
       case 'visitStatus': return item.visitStatus;
       case 'timestamp': return item.timestamp;
       case 'dateInstalled': return item.dateInstalled;
-      case 'modifiedBy': return item.modifiedBy ?? (item as any).updated_by_user ?? '';
-      case 'modifiedDate': return item.modifiedDate ?? (item as any).updated_at ?? '';
+      case 'modifiedBy': return item.modifiedBy ?? (item as any).updated_by_user ?? (item as any).Updated_By_User ?? '';
+      case 'modifiedDate': return item.modifiedDate ?? item.rawUpdatedAt ?? (item as any).updated_at ?? (item as any).Updated_At ?? '';
       case 'assignedEmail':
         const email = item.assignedEmail || '';
         if (!email) return '-';
@@ -730,15 +732,26 @@ const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrde
           }
           else if (typedFilter.type === 'date') {
             if (orderValue) {
-              const dateValue = new Date(orderValue).getTime();
+              const normalizeDate = (d: any, isEnd: boolean = false) => {
+                if (!d) return NaN;
+                let s = String(d).trim().replace(' ', 'T');
+                if (s.length === 10) {
+                  s = isEnd ? `${s}T23:59:59.999` : `${s}T00:00:00`;
+                } else if (s.length === 16) {
+                  s = isEnd ? `${s}:59.999` : `${s}:00`;
+                }
+                return new Date(s).getTime();
+              };
+
+              const dateValue = normalizeDate(orderValue);
               if (!isNaN(dateValue)) {
                 if (typedFilter.from) {
-                  const fromDate = new Date(typedFilter.from).getTime();
-                  if (dateValue < fromDate) { matchesFunnel = false; break; }
+                  const fromDate = normalizeDate(typedFilter.from, false);
+                  if (!isNaN(fromDate) && dateValue < fromDate) { matchesFunnel = false; break; }
                 }
                 if (typedFilter.to) {
-                  const toDate = new Date(typedFilter.to).getTime();
-                  if (dateValue > toDate + 86400000) { matchesFunnel = false; break; }
+                  const toDate = normalizeDate(typedFilter.to, true);
+                  if (!isNaN(toDate) && dateValue > toDate) { matchesFunnel = false; break; }
                 }
               } else {
                 matchesFunnel = false; break;
@@ -934,8 +947,8 @@ const ServiceOrderPage: React.FC<ServiceOrderPageProps> = ({ autoOpenServiceOrde
         // Special handling for date columns to ensure accurate chronological sorting
         const dateFields = ['timestamp', 'modifiedDate', 'dateInstalled', 'startTime', 'endTime', 'modified_at', 'created_at', 'rawUpdatedAt'];
         if (dateFields.includes(sortColumn)) {
-          const timeA = aValue ? new Date(aValue).getTime() : 0;
-          const timeB = bValue ? new Date(bValue).getTime() : 0;
+          const timeA = aValue ? new Date(String(aValue).replace(' ', 'T')).getTime() : 0;
+          const timeB = bValue ? new Date(String(bValue).replace(' ', 'T')).getTime() : 0;
           
           if (!isNaN(timeA) && !isNaN(timeB)) {
             if (timeA !== timeB) {

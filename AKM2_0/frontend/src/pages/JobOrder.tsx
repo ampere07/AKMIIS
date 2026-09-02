@@ -828,7 +828,8 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
       case 'addressCoordinates': return jo.address_coordinates || jo.Address_Coordinates || '';
       case 'computedTime': return jo.computed_time || jo._ComputedTime || (jo as any).computedTime || '';
       case 'modifiedBy': return jo.Modified_By || jo.modified_by || jo.updated_by_user_email || '';
-      case 'modifiedDate': return jo.Modified_Date || jo.modified_date || jo.updated_at || '';
+      case 'modifiedDate': return jo.Modified_Date || jo.modified_date || jo.updated_at || jo.Updated_At || '';
+      case 'updatedAt': return jo.updated_at || jo.Updated_At || jo.Modified_Date || jo.modified_date || '';
       default: return (jo as any)[key] || '';
     }
   };
@@ -866,20 +867,27 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
           if (!orderValue) match = false;
           else {
             const normalizeDate = (d: any, isEnd: boolean = false) => {
+              if (!d) return NaN;
               let s = String(d).trim().replace(' ', 'T');
               if (s.length === 10) {
                 s = isEnd ? `${s}T23:59:59.999` : `${s}T00:00:00`;
+              } else if (s.length === 16) {
+                s = isEnd ? `${s}:59.999` : `${s}:00`;
               }
               return new Date(s).getTime();
             };
 
             const orderTime = normalizeDate(orderValue);
-            const fromTime = filter.from ? normalizeDate(filter.from) : null;
-            const toTime = filter.to ? normalizeDate(filter.to, true) : null;
+            if (!isNaN(orderTime)) {
+              const fromTime = filter.from ? normalizeDate(filter.from, false) : null;
+              const toTime = filter.to ? normalizeDate(filter.to, true) : null;
 
-            if (fromTime && orderTime < fromTime) match = false;
-            else if (toTime && orderTime > toTime) match = false;
-            else match = true;
+              if (fromTime !== null && !isNaN(fromTime) && orderTime < fromTime) match = false;
+              else if (toTime !== null && !isNaN(toTime) && orderTime > toTime) match = false;
+              else match = true;
+            } else {
+              match = false;
+            }
           }
         }
 

@@ -158,6 +158,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                   {renderInput('emailAddress', 'Email Address', false)}
                   {renderInput('plan', 'Plan', false)}
                   {renderInput('username', 'Username', false)}
+                  {renderInput('pppoePassword', 'PPPOE Password', false)}
                   {renderInput('fullAddress', 'Full Address', false, 'default', true)}
 
                   {/* Connection Type */}
