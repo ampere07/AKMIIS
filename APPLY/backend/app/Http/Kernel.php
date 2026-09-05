@@ -19,6 +19,9 @@ class Kernel extends HttpKernel
         \Illuminate\Http\Middleware\HandleCors::class,
         \App\Http\Middleware\PreventRequestsDuringMaintenance::class,
         \Illuminate\Foundation\Http\Middleware\ValidatePostSize::class,
+        // Runs before TrimStrings so that styled/invisible characters are folded to
+        // plain text first, and any whitespace that exposes is then trimmed away.
+        \App\Http\Middleware\NormalizeUnicodeInput::class,
         \App\Http\Middleware\TrimStrings::class,
         \Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull::class,
     ];
