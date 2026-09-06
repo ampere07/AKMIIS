@@ -806,16 +806,53 @@ class ServiceOrderController extends Controller
                 Log::info('Visit status changed to Done, will add service charge to account balance');
             }
 
-            if ($shouldAddServiceCharge && $statusChanged && $request->has('service_charge')) {
+            // A service order's charge is posted to the customer's balance ONCE — see the
+            // matching guard in Api\ServiceOrderApiController. Both transitions above fire
+            // on a normal visit (visit_status Done, then support_status Resolved) and each
+            // one used to add the charge again, billing the customer twice.
+            // service_charge_status on the row records that the charge has been posted, and
+            // is shared with the API controller so a save from either side counts as one.
+            $serviceChargeAlreadyAdded = strtolower(trim((string) ($order->service_charge_status ?? ''))) === 'added';
+
+            if ($shouldAddServiceCharge && $statusChanged && $serviceChargeAlreadyAdded) {
+                Log::info('Service charge already added for this service order, skipping balance update.', [
+                    'service_order_id' => $id,
+                    'account_no' => $order->account_no,
+                    'service_charge_status' => $order->service_charge_status
+                ]);
+            }
+
+            if ($shouldAddServiceCharge && $statusChanged && !$serviceChargeAlreadyAdded && $request->has('service_charge')) {
                 $serviceCharge = floatval($request->service_charge);
                 if ($serviceCharge > 0) {
                     $billingAccount = DB::selectOne("SELECT account_balance FROM billing_accounts WHERE account_no = ?", [$order->account_no]);
                     if ($billingAccount) {
-                        $currentBalance = floatval($billingAccount->account_balance);
-                        $newBalance = $currentBalance + $serviceCharge;
-                        DB::update("UPDATE billing_accounts SET account_balance = ?, balance_update_date = ? WHERE account_no = ?",
-                        [$newBalance, now(), $order->account_no]);
-                        Log::info("Updated account balance from {$currentBalance} to {$newBalance} (added service charge: {$serviceCharge})");
+                        // Claim the charge before touching the balance: only the request that
+                        // actually flips the row from "not added" to "added" may bill. The read
+                        // above cannot stop two saves arriving together from both seeing a blank
+                        // status; this conditional UPDATE can, because only one of them comes
+                        // back with a non-zero affected-row count.
+                        $claimed = DB::update(
+                            "UPDATE service_orders SET service_charge_status = 'added', updated_at = ? WHERE id = ? AND (service_charge_status IS NULL OR service_charge_status <> 'added')",
+                            [now(), $id]
+                        );
+
+                        if ($claimed === 0) {
+                            Log::info('Service charge claim lost to a concurrent update, skipping balance update.', [
+                                'service_order_id' => $id,
+                                'account_no' => $order->account_no
+                            ]);
+                        }
+                        else {
+                            $currentBalance = floatval($billingAccount->account_balance);
+                            $newBalance = $currentBalance + $serviceCharge;
+                            DB::update("UPDATE billing_accounts SET account_balance = ?, balance_update_date = ? WHERE account_no = ?",
+                            [$newBalance, now(), $order->account_no]);
+                            // Carried in $updateData as well so the row the change log reads back
+                            // matches the claim, and the transition is logged.
+                            $updateData['service_charge_status'] = 'added';
+                            Log::info("Updated account balance from {$currentBalance} to {$newBalance} (added service charge: {$serviceCharge}). service_charge_status set to 'added'.");
+                        }
                     }
                 }
             }

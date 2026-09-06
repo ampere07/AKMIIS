@@ -800,7 +800,23 @@ class ServiceOrderApiController extends Controller
                 Log::info('Visit status changed to Done, will add service charge to account balance');
             }
 
-            if ($shouldAddServiceCharge && $statusChanged && $request->has('service_charge')) {
+            // A service order's charge is posted to the customer's balance ONCE.
+            // Both transitions above fire on a normal visit — the technician sets
+            // visit_status Done, then support_status Resolved — and each one used to
+            // add the charge again, billing the customer twice. service_charge_status
+            // on the row records that the charge has already been posted, so whichever
+            // transition arrives second is a no-op.
+            $serviceChargeAlreadyAdded = strtolower(trim((string) ($serviceOrder->service_charge_status ?? ''))) === 'added';
+
+            if ($shouldAddServiceCharge && $statusChanged && $serviceChargeAlreadyAdded) {
+                Log::info('Service charge already added for this service order, skipping balance update.', [
+                    'service_order_id' => $id,
+                    'account_no' => $serviceOrder->account_no,
+                    'service_charge_status' => $serviceOrder->service_charge_status
+                ]);
+            }
+
+            if ($shouldAddServiceCharge && $statusChanged && !$serviceChargeAlreadyAdded && $request->has('service_charge')) {
                 $serviceCharge = floatval($request->input('service_charge'));
                 if ($serviceCharge > 0) {
                     $billingAccount = DB::table('billing_accounts')
@@ -808,37 +824,65 @@ class ServiceOrderApiController extends Controller
                         ->first();
 
                     if ($billingAccount) {
-                        $currentBalance = floatval($billingAccount->account_balance);
-                        $newBalance = $currentBalance + $serviceCharge;
-
-                        DB::table('billing_accounts')
-                            ->where('account_no', $serviceOrder->account_no)
+                        // Claim the charge before touching the balance: only the request
+                        // that actually flips the row from "not added" to "added" is
+                        // allowed to bill. The read above cannot stop two saves that
+                        // arrive together (Done and Resolved submitted back to back)
+                        // from both seeing a blank status; this conditional UPDATE can,
+                        // because only one of them gets a non-zero affected-row count.
+                        $claimed = DB::table('service_orders')
+                            ->where('id', $id)
+                            ->where(function ($query) {
+                                $query->whereNull('service_charge_status')
+                                    ->orWhere('service_charge_status', '!=', 'added');
+                            })
                             ->update([
-                            'account_balance' => $newBalance,
-                            'balance_update_date' => now(),
-                            'updated_at' => now()
-                        ]);
+                                'service_charge_status' => 'added',
+                                'updated_at' => now()
+                            ]);
 
-                        try {
-                            event(new \App\Events\CustomerUpdated([
-                                'account_no' => $serviceOrder->account_no,
-                                'type' => 'customer_updated',
-                                'edit_type' => 'billing_details',
-                                'title' => 'Customer Updated',
-                                'message' => "Customer balance updated for account {$serviceOrder->account_no}",
-                                'timestamp' => now()->timestamp,
-                                'formatted_date' => now()->format('Y-m-d h:i:s A')
-                            ]));
-                        } catch (\Exception $e) {
-                            Log::warning('Failed to broadcast customer update via Soketi from ServiceOrderApiController', [
-                                'account_no' => $serviceOrder->account_no,
-                                'error' => $e->getMessage()
+                        if ($claimed === 0) {
+                            Log::info('Service charge claim lost to a concurrent update, skipping balance update.', [
+                                'service_order_id' => $id,
+                                'account_no' => $serviceOrder->account_no
                             ]);
                         }
+                        else {
+                            $currentBalance = floatval($billingAccount->account_balance);
+                            $newBalance = $currentBalance + $serviceCharge;
 
-                        $data['status'] = 'used';
+                            DB::table('billing_accounts')
+                                ->where('account_no', $serviceOrder->account_no)
+                                ->update([
+                                'account_balance' => $newBalance,
+                                'balance_update_date' => now(),
+                                'updated_at' => now()
+                            ]);
 
-                        Log::info("Updated account balance from {$currentBalance} to {$newBalance} (added service charge: {$serviceCharge}). Status changed to 'used'.");
+                            try {
+                                event(new \App\Events\CustomerUpdated([
+                                    'account_no' => $serviceOrder->account_no,
+                                    'type' => 'customer_updated',
+                                    'edit_type' => 'billing_details',
+                                    'title' => 'Customer Updated',
+                                    'message' => "Customer balance updated for account {$serviceOrder->account_no}",
+                                    'timestamp' => now()->timestamp,
+                                    'formatted_date' => now()->format('Y-m-d h:i:s A')
+                                ]));
+                            } catch (\Exception $e) {
+                                Log::warning('Failed to broadcast customer update via Soketi from ServiceOrderApiController', [
+                                    'account_no' => $serviceOrder->account_no,
+                                    'error' => $e->getMessage()
+                                ]);
+                            }
+
+                            $data['status'] = 'used';
+                            // Carried in $data as well so the row the change log reads
+                            // back matches the claim, and the transition is logged.
+                            $data['service_charge_status'] = 'added';
+
+                            Log::info("Updated account balance from {$currentBalance} to {$newBalance} (added service charge: {$serviceCharge}). Status changed to 'used', service_charge_status set to 'added'.");
+                        }
                     }
                     else {
                         Log::warning('Billing account not found for account_no: ' . $serviceOrder->account_no);
