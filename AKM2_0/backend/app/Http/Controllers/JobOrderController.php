@@ -1118,47 +1118,40 @@ class JobOrderController extends Controller
                 throw new \Exception('Job order has already been approved and has an associated billing account.');
             }
 
-            // Check if a customer with the same email and names already exists to maintain 1-to-1
-            $existingCustomer = Customer::where('email_address', $application->email_address)
-                ->where('first_name', $application->first_name)
-                ->where('last_name', $application->last_name)
-                ->first();
-
-            if ($existingCustomer) {
-                $customer = $existingCustomer;
-                $houseUrlSource = $jobOrder->house_front_picture_url ?: $application->house_front_picture_url;
-                if (!empty($houseUrlSource) && empty($customer->house_front_picture_url)) {
-                    $customer->update(['house_front_picture_url' => $houseUrlSource]);
-                }
-                \Log::info('Using existing customer for approval', ['customer_id' => $customer->id]);
-            } else {
-                $customer = Customer::create([
-                    'first_name' => $application->first_name,
-                    'middle_initial' => $application->middle_initial,
-                    'last_name' => $application->last_name,
-                    'email_address' => $application->email_address,
-                    'contact_number_primary' => $application->mobile_number,
-                    'contact_number_secondary' => $application->secondary_mobile_number,
-                    'address' => $application->installation_address,
-                    'location' => $application->location,
-                    'barangay' => $application->barangay,
-                    'city' => $application->city,
-                    'region' => $application->region,
-                    'address_coordinates' => $jobOrder->address_coordinates,
-                    'housing_status' => $application->housing_status,
-                    'referred_by' => $application->referred_by,
-                    'desired_plan' => $application->desired_plan,
-                    'house_front_picture_url' => $jobOrder->house_front_picture_url ?? $application->house_front_picture_url,
-                    'proof_of_billing_url' => $application->proof_of_billing_url,
-                    'government_valid_id_url' => $application->government_valid_id_url,
-                    'second_government_valid_id_url' => $application->secondary_government_valid_id_url,
-                    'document_attachment_url' => $application->document_attachment_url,
-                    'other_isp_bill_url' => $application->other_isp_bill_url,
-                    'organization_id' => $organizationId,
-                    'created_by' => $actionUserEmail,
-                    'updated_by' => $actionUserEmail,
-                ]);
-            }
+            // Every approval gets its own customer row - deliberately no
+            // lookup for an existing customer here. One person can hold
+            // several accounts under identical details, and matching on
+            // name and email used to hand the new billing account the older
+            // customer's id, linking the account to the wrong record and
+            // overwriting that customer's account_no. The row created here is
+            // the one the billing account, technical details and portal user
+            // all hang off, so it must be new on every approval.
+            $customer = Customer::create([
+                'first_name' => $application->first_name,
+                'middle_initial' => $application->middle_initial,
+                'last_name' => $application->last_name,
+                'email_address' => $application->email_address,
+                'contact_number_primary' => $application->mobile_number,
+                'contact_number_secondary' => $application->secondary_mobile_number,
+                'address' => $application->installation_address,
+                'location' => $application->location,
+                'barangay' => $application->barangay,
+                'city' => $application->city,
+                'region' => $application->region,
+                'address_coordinates' => $jobOrder->address_coordinates,
+                'housing_status' => $application->housing_status,
+                'referred_by' => $application->referred_by,
+                'desired_plan' => $application->desired_plan,
+                'house_front_picture_url' => $jobOrder->house_front_picture_url ?? $application->house_front_picture_url,
+                'proof_of_billing_url' => $application->proof_of_billing_url,
+                'government_valid_id_url' => $application->government_valid_id_url,
+                'second_government_valid_id_url' => $application->secondary_government_valid_id_url,
+                'document_attachment_url' => $application->document_attachment_url,
+                'other_isp_bill_url' => $application->other_isp_bill_url,
+                'organization_id' => $organizationId,
+                'created_by' => $actionUserEmail,
+                'updated_by' => $actionUserEmail,
+            ]);
 
             \Log::info('Customer Ready with Contact Numbers', [
                 'customer_id' => $customer->id,
