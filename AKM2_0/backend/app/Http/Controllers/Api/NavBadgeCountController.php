@@ -40,6 +40,9 @@ class NavBadgeCountController extends Controller
     /** Service orders in any of these are closed. Anything else is open. */
     private const SERVICE_ORDER_TERMINAL = ['resolved', 'failed', 'cancelled'];
 
+    /** Terminal states for on-site visit. When support_status is 'For Visit', these mean the visit is finished. */
+    private const SERVICE_ORDER_VISIT_TERMINAL = ['done', 'completed', 'complete', 'failed', 'cancelled', 'canceled'];
+
     /** Work orders in any of these are closed. Anything else is open. */
     private const WORK_ORDER_TERMINAL = ['completed', 'done', 'failed', 'cancelled'];
 
@@ -131,6 +134,14 @@ class NavBadgeCountController extends Controller
                 // ticket, so it has to be admitted explicitly.
                 $q->whereNull('support_status')
                   ->orWhereNotIn(DB::raw('LOWER(TRIM(support_status))'), self::SERVICE_ORDER_TERMINAL);
+            })
+            ->where(function (Builder $q) {
+                // If support_status is 'For Visit', the visit must not already be in a terminal state
+                // (e.g. Done, Completed, Failed). Mirrors mobile app's useNavBadgeCounts isClosed() guard.
+                $q->where(DB::raw('LOWER(TRIM(COALESCE(support_status, "")))'), '!=', 'for visit')
+                  ->orWhereNull('visit_status')
+                  ->orWhereRaw("TRIM(visit_status) = ''")
+                  ->orWhereNotIn(DB::raw('LOWER(TRIM(visit_status))'), self::SERVICE_ORDER_VISIT_TERMINAL);
             })
             ->count();
     }

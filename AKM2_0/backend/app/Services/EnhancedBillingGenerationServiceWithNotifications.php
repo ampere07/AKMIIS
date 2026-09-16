@@ -904,8 +904,11 @@ class EnhancedBillingGenerationServiceWithNotifications
         $latestReconAt = Carbon::parse($unbilledLogs->last()->created_at)->endOfDay();
         $disconnectionLogs = DB::table('disconnected_logs')
             ->where('account_id', $account->id)
-            ->where('created_at', '<=', $latestReconAt)
-            ->orderBy('created_at', 'desc')
+            ->where(function ($q) use ($latestReconAt) {
+                $q->where('created_at', '<=', $latestReconAt)
+                  ->orWhereNull('created_at');
+            })
+            ->orderBy('id', 'desc')
             ->get(['id', 'created_at', 'remarks']);
 
         foreach ($unbilledLogs as $log) {
@@ -928,14 +931,17 @@ class EnhancedBillingGenerationServiceWithNotifications
                 continue;
             }
 
-            $logIds[] = $log->id;
-
-            // Latest disconnection that precedes this reconnection.
-            $disconnection = $disconnectionLogs->first(function ($dcLog) use ($log) {
+            // Find disconnections preceding this reconnection.
+            // If multiple disconnections precede this reconnection in a contiguous outage sequence
+            // (e.g. Auto DC followed days later by Pullout), use the earliest DC that initiated the outage.
+            $precedingDcs = $disconnectionLogs->filter(function ($dcLog) use ($log) {
+                if ($dcLog->created_at === null) {
+                    return true;
+                }
                 return Carbon::parse($dcLog->created_at)->lte(Carbon::parse($log->created_at));
             });
 
-            if (!$disconnection) {
+            if ($precedingDcs->isEmpty()) {
                 $this->log('warning', 'Reconnection log has no preceding disconnection log; skipping proration', [
                     'account_no' => $account->account_no,
                     'reconnection_log_id' => $log->id,
@@ -944,21 +950,32 @@ class EnhancedBillingGenerationServiceWithNotifications
                 continue;
             }
 
-            $dcDate = Carbon::parse($disconnection->created_at)->startOfDay();
-            $daysDisconnected = $dcDate->diffInDays($reconDate);
-            $reconDay = $reconDate->day;
+            // If the latest disconnection is a "Pullout" and there is an earlier "Auto DC", use the Auto DC date
+            $initialDisconnection = $precedingDcs->first(function ($dcLog) {
+                return $dcLog->created_at !== null && stripos((string) $dcLog->remarks, 'Auto DC') !== false;
+            }) ?? $precedingDcs->first();
 
-            // Reconnected between Day 15 and Day 21 (or short disconnection): balance remains as-is (full monthly fee stands, no extra pro-rate added)
-            if (($reconDay >= 15 && $reconDay <= 21) || $daysDisconnected < self::RECONNECTION_GRACE_DAYS) {
-                $this->log('info', 'Reconnection is within Day 15-21 window or grace threshold; keeping balance as-is without adding extra pro-rate', [
+            $hasNullTimestamp = ($initialDisconnection->created_at === null);
+            if ($hasNullTimestamp) {
+                // Legacy imported disconnection record without timestamp: outage is known to be long (> 7 days)
+                $daysDisconnected = self::RECONNECTION_GRACE_DAYS + 1;
+                $dcDate = null;
+            } else {
+                $dcDate = Carbon::parse($initialDisconnection->created_at)->startOfDay();
+                $daysDisconnected = $dcDate->diffInDays($reconDate);
+            }
+
+            // Only genuinely short disconnections (under grace threshold, e.g. < 7 days) absorb the outage
+            if ($daysDisconnected < self::RECONNECTION_GRACE_DAYS) {
+                $this->log('info', 'Disconnection is within grace threshold; keeping balance as-is without adding extra pro-rate', [
                     'account_no' => $account->account_no,
                     'reconnection_log_id' => $log->id,
-                    'disconnected_log_id' => $disconnection->id,
-                    'disconnection_date' => $dcDate->format('Y-m-d'),
+                    'disconnected_log_id' => $initialDisconnection->id,
+                    'disconnection_date' => $dcDate ? $dcDate->format('Y-m-d') : 'legacy_null',
                     'reconnection_date' => $reconDate->format('Y-m-d'),
-                    'days_disconnected' => $daysDisconnected,
-                    'recon_day' => $reconDay
+                    'days_disconnected' => $daysDisconnected
                 ]);
+                $logIds[] = $log->id;
                 continue;
             }
 
@@ -973,12 +990,14 @@ class EnhancedBillingGenerationServiceWithNotifications
                     'reconnection_date' => $reconDate->format('Y-m-d'),
                     'cycle_end' => $currentCycleEnd->format('Y-m-d')
                 ]);
+                $logIds[] = $log->id;
                 continue;
             }
 
             $dailyRate = $monthlyFee / self::DAYS_IN_MONTH;
             $proratedAmount = round($dailyRate * $daysActive, 2);
             $totalProrate += $proratedAmount;
+            $logIds[] = $log->id;
 
             if (!$proRateStart || $reconDate->lt(Carbon::parse($proRateStart))) {
                 $proRateStart = $reconDate->format('Y-m-d');
@@ -987,8 +1006,8 @@ class EnhancedBillingGenerationServiceWithNotifications
             $this->log('info', 'Calculated reconnection prorate for active days after a qualifying disconnection', [
                 'account_no' => $account->account_no,
                 'reconnection_log_id' => $log->id,
-                'disconnected_log_id' => $disconnection->id,
-                'disconnection_date' => $dcDate->format('Y-m-d'),
+                'disconnected_log_id' => $initialDisconnection->id,
+                'disconnection_date' => $dcDate ? $dcDate->format('Y-m-d') : 'legacy_null',
                 'reconnection_date' => $reconDate->format('Y-m-d'),
                 'days_disconnected' => $daysDisconnected,
                 'cycle_end' => $currentCycleEnd->format('Y-m-d'),
@@ -1021,34 +1040,25 @@ class EnhancedBillingGenerationServiceWithNotifications
     protected function markReconnectionProrateAsUsed(BillingAccount $account, int $userId, string $invoiceId, array $logIds = []): void
     {
         if (empty($logIds)) {
-            $logIds = DB::table('reconnection_logs')
-                ->where('account_id', $account->id)
-                ->where(function ($q) {
-                    $q->where('pro_rate_applied', 0)
-                      ->orWhereNull('pro_rate_applied');
-                })
-                ->pluck('id')
-                ->toArray();
+            return;
         }
 
-        if (!empty($logIds)) {
-            DB::table('reconnection_logs')
-                ->whereIn('id', $logIds)
-                ->update([
-                    'pro_rate_applied' => 1,
-                    'billing_status' => 'Billed',
-                    'pro_rate_invoice_id' => $invoiceId,
-                    'pro_rate_billed_at' => now(),
-                    'updated_by_user' => (string) $userId,
-                    'updated_at' => now()
-                ]);
-
-            $this->log('info', 'Marked reconnection logs as billed', [
-                'account_no' => $account->account_no,
-                'invoice_id' => $invoiceId,
-                'log_ids' => $logIds
+        DB::table('reconnection_logs')
+            ->whereIn('id', $logIds)
+            ->update([
+                'billing_status' => 'Billed',
+                'pro_rate_applied' => 1,
+                'pro_rate_invoice_id' => $invoiceId,
+                'pro_rate_billed_at' => Carbon::now(),
+                'updated_at' => Carbon::now(),
+                'updated_by_user' => (string) $userId
             ]);
-        }
+
+        $this->log('info', 'Marked reconnection logs as billed', [
+            'account_no' => $account->account_no,
+            'invoice_id' => $invoiceId,
+            'log_ids' => $logIds
+        ]);
     }
 
     protected function getDaysBetweenDatesIncludingDueDate(Carbon $startDate, Carbon $endDate): int

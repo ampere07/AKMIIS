@@ -326,7 +326,7 @@ class PaymentWorkerService
                 // Run reconnect/settlement flow AFTER commit — RADIUS failure must never roll back a real payment
                 if ($balanceSettled) {
                     $this->workerLog("Balance settled for $ref — Status ID: {$currentStatusId}, Balance: ₱" . number_format($currentBalance, 2) . " — running reconnect/settlement flow");
-                    $reconnectStatus = $this->attemptReconnect($account);
+                    $reconnectStatus = $this->attemptReconnect($account, $ref);
 
                     // Update reconnect_status outside the main transaction (standalone)
                     DB::table('pending_payments')
@@ -496,8 +496,11 @@ class PaymentWorkerService
     /**
      * Attempt to reconnect user account
      * Matches logic in TransactionController::approve
+     *
+     * @param  object       $account
+     * @param  string|null  $paymentReference
      */
-    private function attemptReconnect($account)
+    private function attemptReconnect($account, ?string $paymentReference = null)
     {
         try {
             // Reload billing account to get latest balance and status
@@ -515,6 +518,11 @@ class PaymentWorkerService
                 $this->workerLog("[RECONNECT SKIP] Balance is positive: ₱{$balance}");
                 return 'balance_positive';
             }
+
+            // The balance is settled, so the account's pullouts are void — closed
+            // here, before any of the RADIUS checks below can return early.
+            app(PulloutServiceOrderCloser::class)
+                ->closeIfSettled($accountNo, $balance, 'payment worker', $paymentReference);
 
             // Step 2: Check current billing status.
             $isAlreadyActive = ($billingAccount->billing_status_id == 1);
@@ -720,8 +728,6 @@ class PaymentWorkerService
                     $this->workerLog("[RECONNECT EMAIL EXCEPTION] " . $e->getMessage());
                 }
 
-                $this->failPulloutServiceOrders($accountNo);
-
                 return $radiusSuccess ? 'success' : 'queued';
             }
             
@@ -789,80 +795,7 @@ class PaymentWorkerService
         }
     }
 
-    /**
-     * Mark open Pullout service orders as Failed when an account is reconnected.
-     * Only fires when balance reaches 0 and billing_status_id is set to 1 via reconnectUser.
-     */
-    private function failPulloutServiceOrders(string $accountNo): void
-    {
-        $this->soFailLog('[RUNNING] Starting pullout service order check for account: ' . $accountNo);
-        try {
-            // Balance guard: only auto-fail when the account is fully paid.
-            // Use a small epsilon so tiny rounding residuals still count as "paid".
-            $balance = floatval(DB::table('billing_accounts')
-                ->where('account_no', $accountNo)
-                ->value('account_balance') ?? 0);
 
-            if ($balance > 0.01) {
-                $this->soFailLog('[SKIP] Account balance still positive (₱' . number_format($balance, 2) . ') - skipping pullout fail for account: ' . $accountNo);
-                $this->soFailLog('[DONE] Completed pullout service order check for account: ' . $accountNo);
-                return;
-            }
-
-            // Fail ALL of the customer's pullout SOs whose concern is exactly
-            // "pullout" / "for pullout" (case & spacing insensitive) and whose
-            // support_status is currently "In Progress" or "Reschedule".
-            $ids = DB::table('service_orders')
-                ->where('account_no', $accountNo)
-                ->whereIn(DB::raw('LOWER(TRIM(concern))'), ['pullout', 'for pullout'])
-                ->whereRaw("LOWER(COALESCE(support_status, '')) IN (?, ?)", ['in progress', 'reschedule'])
-                ->pluck('id');
-
-            if ($ids->isEmpty()) {
-                $this->soFailLog('[SKIP] No open Pullout service orders found for account: ' . $accountNo);
-                $this->soFailLog('[DONE] Completed pullout service order check for account: ' . $accountNo);
-                return;
-            }
-
-            $this->soFailLog('[FOUND] ' . $ids->count() . ' open pullout service order(s) for account: ' . $accountNo . ' (IDs: ' . $ids->implode(', ') . ')');
-
-            $affected = DB::table('service_orders')
-                ->whereIn('id', $ids)
-                ->update([
-                    'support_status'  => 'Failed',
-                    'visit_status'    => 'Failed',
-                    'support_remarks' => 'auto failed due to client reconnected',
-                    'updated_by_user' => 'System',
-                    'updated_at'      => now(),
-                ]);
-
-            $this->soFailLog('[SUCCESS] Marked ' . $affected . ' pullout service order(s) Failed - Account: ' . $accountNo . ' (IDs: ' . $ids->implode(', ') . ')');
-            $this->soFailLog('[DONE] Completed pullout service order check for account: ' . $accountNo);
-        } catch (Exception $e) {
-            $this->soFailLog('[FAILED] Account: ' . $accountNo . ' - Error: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Write a timestamped line to the dedicated sofailingauto.log file, mirror it to
-     * the default Laravel log and the worker log. Wrapped in try/catch so that logging
-     * can never break the calling flow.
-     */
-    private function soFailLog(string $message): void
-    {
-        try {
-            $timestamp = now()->format('Y-m-d H:i:s');
-            $line = "[{$timestamp}] [SO Failing Auto] {$message}";
-
-            file_put_contents(storage_path('logs/sofailingauto.log'), $line . PHP_EOL, FILE_APPEND);
-
-            // Mirror to the default Laravel log and the existing worker log.
-            Log::channel('single')->info('[SO Failing Auto] ' . $message);
-            $this->workerLog('[SO Failing Auto] ' . $message);
-        } catch (\Throwable $e) {
-            // Logging must never break the flow.
-        }
-    }
 
     /**
      * Send Transaction Approval SMS notification

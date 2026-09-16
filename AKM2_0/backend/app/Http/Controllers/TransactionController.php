@@ -211,7 +211,7 @@ class TransactionController extends Controller
                         $this->sendApprovalEmail($billingAccount, $appliedData['invoices_updated']['invoices_paid'] ?? [], $transaction->received_payment, $transaction->payment_date);
 
                         // Attempt reconnection for auto-applied payments
-                        $this->attemptReconnectionAfterApproval($billingAccount, $transaction->updated_by_user);
+                        $this->attemptReconnectionAfterApproval($billingAccount, $transaction->updated_by_user, (string) ($transaction->reference_no ?? $transaction->id));
                     }
 
                 }
@@ -479,7 +479,7 @@ class TransactionController extends Controller
 
 
             // Attempt reconnection after successful approval
-            $reconnectStatus = $this->attemptReconnectionAfterApproval($billingAccount, $transaction->updated_by_user);
+            $reconnectStatus = $this->attemptReconnectionAfterApproval($billingAccount, $transaction->updated_by_user, (string) ($transaction->reference_no ?? $transaction->id));
 
             event(new TransactionUpdated(['action' => 'approved', 'transaction_id' => $transactionId, 'account_no' => $accountNo]));
 
@@ -1088,7 +1088,7 @@ class TransactionController extends Controller
                     $accountPayments[$accountNo]['total'] += $paymentReceived;
 
                     // Attempt reconnection after successful approval
-                    $reconnectStatus = $this->attemptReconnectionAfterApproval($billingAccount, $transaction->updated_by_user);
+                    $reconnectStatus = $this->attemptReconnectionAfterApproval($billingAccount, $transaction->updated_by_user, (string) ($transaction->reference_no ?? $transaction->id));
 
                     $results['success'][] = [
                         'transaction_id' => $transactionId,
@@ -1200,7 +1200,7 @@ class TransactionController extends Controller
      * Attempt to reconnect user account after transaction approval
      * Only reconnects if billing_status_id is not 1 (Active) and balance is 0 or negative
      */
-    private function attemptReconnectionAfterApproval($billingAccount, $updatedByUser = 'System'): string
+    private function attemptReconnectionAfterApproval($billingAccount, $updatedByUser = 'System', ?string $paymentReference = null): string
     {
         try {
             // Reload billing account to get latest balance and status
@@ -1218,6 +1218,11 @@ class TransactionController extends Controller
                 \Log::info('[TRANSACTION RECONNECT SKIP] Balance is positive: ₱' . $balance);
                 return 'balance_positive';
             }
+
+            // The balance is settled, so this account's pullouts are void — closed
+            // here, before any of the RADIUS checks below can return early.
+            app(\App\Services\PulloutServiceOrderCloser::class)
+                ->closeIfSettled($accountNo, $balance, 'transaction approval', $paymentReference);
 
             // Step 2: Check current billing status.
             $isAlreadyActive = ($billingAccount->billing_status_id == 1);
@@ -1419,7 +1424,6 @@ class TransactionController extends Controller
                         \Log::error('[TRANSACTION RECONNECT EMAIL EXCEPTION] ' . $e->getMessage());
                     }
                 }
-                $this->failPulloutServiceOrders($billingAccount->id, $accountNo);
 
                 return $radiusSuccess ? 'success' : 'queued';
             }
@@ -1490,77 +1494,7 @@ class TransactionController extends Controller
         }
     }
 
-    /**
-     * Mark open Pullout service orders as Failed when an account is reconnected.
-     * Only fires when balance reaches 0 and billing_status_id is set to 1 via reconnectUser.
-     */
-    private function failPulloutServiceOrders(int $accountId, string $accountNo): void
-    {
-        $this->soFailLog('[RUNNING] Starting pullout service order check for account: ' . $accountNo);
-        try {
-            // Balance guard: only auto-fail when the account is fully paid.
-            // Use a small epsilon so tiny rounding residuals still count as "paid".
-            $balance = floatval(DB::table('billing_accounts')
-                ->where('id', $accountId)
-                ->value('account_balance') ?? 0);
 
-            if ($balance > 0.01) {
-                $this->soFailLog('[SKIP] Account balance still positive (₱' . number_format($balance, 2) . ') - skipping pullout fail for account: ' . $accountNo);
-                $this->soFailLog('[DONE] Completed pullout service order check for account: ' . $accountNo);
-                return;
-            }
-
-            // Fail ALL of the customer's pullout SOs whose concern is exactly
-            // "pullout" / "for pullout" (case & spacing insensitive) and whose
-            // support_status is currently "In Progress" or "Reschedule".
-            $serviceOrders = \App\Models\ServiceOrder::where('account_no', $accountNo)
-                ->whereIn(DB::raw('LOWER(TRIM(concern))'), ['pullout', 'for pullout'])
-                ->whereRaw("LOWER(COALESCE(support_status, '')) IN (?, ?)", ['in progress', 'reschedule'])
-                ->get();
-
-            if ($serviceOrders->isEmpty()) {
-                $this->soFailLog('[SKIP] No open Pullout service orders found for account: ' . $accountNo);
-                $this->soFailLog('[DONE] Completed pullout service order check for account: ' . $accountNo);
-                return;
-            }
-
-            $this->soFailLog('[FOUND] ' . $serviceOrders->count() . ' open pullout service order(s) for account: ' . $accountNo . ' (IDs: ' . $serviceOrders->pluck('id')->implode(', ') . ')');
-
-            foreach ($serviceOrders as $serviceOrder) {
-                $serviceOrder->support_status  = 'Failed';
-                $serviceOrder->visit_status    = 'Failed';
-                $serviceOrder->support_remarks = 'auto failed due to client reconnected';
-                $serviceOrder->updated_by_user = 'System';
-                $serviceOrder->updated_at      = now();
-                $serviceOrder->save();
-                $this->soFailLog('[SUCCESS] Pullout service order marked Failed - ID: ' . $serviceOrder->id . ', Account: ' . $accountNo);
-            }
-
-            $this->soFailLog('[DONE] Completed pullout service order check for account: ' . $accountNo);
-        } catch (\Exception $e) {
-            $this->soFailLog('[FAILED] Account: ' . $accountNo . ' - Error: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Write a timestamped line to the dedicated sofailingauto.log file and mirror it to
-     * the default Laravel log. Wrapped in try/catch so that logging can never break the
-     * calling flow.
-     */
-    private function soFailLog(string $message): void
-    {
-        try {
-            $timestamp = now()->format('Y-m-d H:i:s');
-            $line = "[{$timestamp}] [SO Failing Auto] {$message}";
-
-            file_put_contents(storage_path('logs/sofailingauto.log'), $line . PHP_EOL, FILE_APPEND);
-
-            // Mirror to the default Laravel log.
-            \Log::info('[SO Failing Auto] ' . $message);
-        } catch (\Throwable $e) {
-            // Logging must never break the flow.
-        }
-    }
 
     private function replaceGlobalVariables(string $message): string
     {

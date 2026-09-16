@@ -1142,7 +1142,11 @@ class ServiceOrderController extends Controller
 
             $isAlreadyResolvedReconnect = (($originalConcern === 'Reconnect' || $originalConcern === 'Upgrade/Downgrade Plan') && $originalSupportStatus === 'resolved');
             $isAlreadyResolvedRestrict = (($originalConcern === 'Restrict' || $originalConcern === 'Disconnect') && $originalSupportStatus === 'resolved');
-            $isAlreadyPulloutDone = ($originalRepairCategory === 'pullout' && $originalVisitStatus === 'done');
+            $pulloutCategories = ['pullout', 'for pullout'];
+            $isAlreadyPulloutDone = (
+                    in_array(strtolower(trim($originalRepairCategory)), $pulloutCategories, true)
+                    || in_array(strtolower(trim($originalConcern)), $pulloutCategories, true)
+                ) && $originalVisitStatus === 'done';
             $isAlreadyMigrationDone = (in_array($originalRepairCategory, ['migrate', 'relocate', 'relocate router', 'transfer lcp/nap/port']) && $originalVisitStatus === 'done');
 
             $reconnectStatus = null;
@@ -1250,7 +1254,9 @@ class ServiceOrderController extends Controller
                 $repairCategory = strtolower(trim($order->repair_category));
             }
 
-            if ($repairCategory === 'pullout' && $visitStatus === 'done' && !$isAlreadyPulloutDone) {
+            $pulloutCategories = ['pullout', 'for pullout'];
+            $pulloutConcern = strtolower(trim((string) ($order->concern ?? $request->input('concern') ?? '')));
+            if ((in_array($repairCategory, $pulloutCategories, true) || in_array($pulloutConcern, $pulloutCategories, true)) && $visitStatus === 'done' && !$isAlreadyPulloutDone) {
                 $billingAccount = BillingAccount::where('account_no', $order->account_no)->first();
                 if ($billingAccount) {
                     \Log::info('Triggering auto-pullout for Service Order with Pullout repair category', [
