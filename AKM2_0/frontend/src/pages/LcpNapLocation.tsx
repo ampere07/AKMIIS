@@ -2,8 +2,17 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Check, ChevronDown, ChevronRight, Loader2, MapPin, Search, X, ChevronLeft } from 'lucide-react';
 import AddLcpNapLocationModal from '../modals/AddLcpNapLocationModal';
 import LcpNapLocationDetails from '../components/LcpNapLocationDetails';
-import { GOOGLE_MAPS_API_KEY } from '../config/maps';
-import { mapStyleFor, isDarkThemeActive } from '../config/mapStyles';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import {
+  createBasemap,
+  PH_BOUNDS,
+  selectedPinIcon,
+  provisionalPinIcon,
+  photonSearch,
+  isDarkThemeActive,
+  AddressSuggestion,
+} from '../config/osmMap';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { getAllLCPNAPsForMap, clearLCPNAPMapCache } from '../services/lcpnapService';
 import apiClient from '../config/api';
@@ -95,7 +104,7 @@ const LcpNapLocation: React.FC = () => {
   const [pinLimit, setPinLimit] = useState<string>('25');
 
   /**
-   * Current map viewport, refreshed on Google Maps' `idle` event.
+   * Current map viewport, refreshed whenever the map stops moving.
    *
    * Needed so the cap keeps the pins NEAREST to wherever the user is looking
    * rather than an arbitrary first-N of the dataset — pan somewhere new and the
@@ -114,19 +123,17 @@ const LcpNapLocation: React.FC = () => {
   const [selectedLocation, setSelectedLocation] = useState<LocationMarker | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const [addressSuggestions, setAddressSuggestions] = useState<google.maps.places.AutocompletePrediction[]>([]);
+  const [addressSuggestions, setAddressSuggestions] = useState<AddressSuggestion[]>([]);
   const searchRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<HTMLDivElement>(null);
-  const mapInstanceRef = useRef<google.maps.Map | null>(null);
-  const autocompleteServiceRef = useRef<google.maps.places.AutocompleteService | null>(null);
-  const placesServiceRef = useRef<google.maps.places.PlacesService | null>(null);
-  const markersRef = useRef<google.maps.Marker[]>([]);
-  const infoWindowRef = useRef<google.maps.InfoWindow | null>(null);
+  const mapInstanceRef = useRef<L.Map | null>(null);
+  /** The basemap layer, kept so the theme switch can swap its tiles in place. */
+  const tileLayerRef = useRef<L.LayerGroup | null>(null);
   const sidebarStartXRef = useRef<number>(0);
   const sidebarStartWidthRef = useRef<number>(0);
-  const searchMarkerRef = useRef<google.maps.Marker | null>(null);
-  const allMarkersMapRef = useRef<Map<number, google.maps.Marker>>(new Map());
-  const pinMarkerRef = useRef<google.maps.Marker | null>(null);
+  const searchMarkerRef = useRef<L.Marker | null>(null);
+  const allMarkersMapRef = useRef<Map<number, L.CircleMarker>>(new Map());
+  const pinMarkerRef = useRef<L.Marker | null>(null);
   const [isDataLoaded, setIsDataLoaded] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
@@ -249,35 +256,32 @@ const LcpNapLocation: React.FC = () => {
       return;
     }
 
-    const handler = setTimeout(() => {
-      if (autocompleteServiceRef.current && showSuggestions) {
-        autocompleteServiceRef.current.getPlacePredictions(
-          { input: searchQuery, componentRestrictions: { country: 'ph' } },
-          (predictions, status) => {
-            if (status === google.maps.places.PlacesServiceStatus.OK && predictions) {
-              setAddressSuggestions(predictions.slice(0, 5));
-            } else {
-              setAddressSuggestions([]);
-            }
-          }
-        );
-      }
+    // Debounced the same 300ms the Google call was, so a fast typist still
+    // makes one request per pause rather than one per keystroke.
+    let cancelled = false;
+    const handler = setTimeout(async () => {
+      if (!showSuggestions) return;
+      const results = await photonSearch(searchQuery);
+      if (!cancelled) setAddressSuggestions(results);
     }, 300);
 
-    return () => clearTimeout(handler);
+    return () => {
+      cancelled = true;
+      clearTimeout(handler);
+    };
   }, [searchQuery, showSuggestions]);
 
   useEffect(() => {
-    loadGoogleMapsScript();
+    initializeMap();
     loadLocations();
 
     return () => {
       clearMarkers();
-      if (infoWindowRef.current) {
-        infoWindowRef.current.close();
-        infoWindowRef.current = null;
-      }
+      // Leaflet holds DOM listeners and a tile pipeline; remove() is what
+      // releases them. Dropping the ref alone leaks the map on every remount.
+      mapInstanceRef.current?.remove();
       mapInstanceRef.current = null;
+      tileLayerRef.current = null;
       setIsMapReady(false);
     };
   }, []);
@@ -347,83 +351,50 @@ const LcpNapLocation: React.FC = () => {
     };
   }, [isResizingSidebar]);
 
-  const loadGoogleMapsScript = () => {
-    if (window.google?.maps) {
-      initializeMap();
-      return;
-    }
-
-    const existingScript = document.getElementById('google-maps-script');
-    if (existingScript) {
-      existingScript.addEventListener('load', initializeMap);
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.id = 'google-maps-script';
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&libraries=marker,places`;
-    script.async = true;
-    script.defer = true;
-    script.onload = initializeMap;
-    script.onerror = () => {
-      console.error('Failed to load Google Maps script');
-      setIsMapReady(false);
-    };
-    document.head.appendChild(script);
-  };
-
   const initializeMap = () => {
-    if (!mapRef.current || !window.google?.maps) return;
+    if (!mapRef.current || mapInstanceRef.current) return;
 
     try {
-      const map = new google.maps.Map(mapRef.current, {
-        center: { lat: 12.8797, lng: 121.7740 },
+      const map = L.map(mapRef.current, {
+        center: [12.8797, 121.7740],
         zoom: 6,
         minZoom: 6,
-        restriction: {
-          latLngBounds: {
-            north: 21.5,
-            south: 4.3,
-            west: 114.0,
-            east: 127.5,
-          },
-          strictBounds: true,
-        },
-        mapTypeControl: true,
-        streetViewControl: true,
-        fullscreenControl: true,
+        // The same hard bounds the Google build set with strictBounds, so the
+        // reader cannot pan away from the country the data is in.
+        maxBounds: PH_BOUNDS,
+        maxBoundsViscosity: 1.0,
         zoomControl: true,
-        // Read at init from the same key the isDarkMode state watches, not from that
-        // state: this runs in the Maps script's load callback, outside React's render,
-        // where the closed-over value would be whatever it was when the page mounted.
-        // The effect below keeps it in step from then on.
-        styles: mapStyleFor(isDarkThemeActive()),
       });
 
-      infoWindowRef.current = new google.maps.InfoWindow();
+      // Read the theme at creation rather than from isDarkMode: this runs once,
+      // and the effect below keeps it in step from then on.
+      tileLayerRef.current = createBasemap(isDarkThemeActive()).addTo(map);
+
       mapInstanceRef.current = map;
-      autocompleteServiceRef.current = new google.maps.places.AutocompleteService();
-      placesServiceRef.current = new google.maps.places.PlacesService(map);
 
       // Recompute which pins are nearest whenever the camera settles, so panning
       // to a new area loads that area's pins within the configured limit.
-      map.addListener('idle', () => {
+      //
+      // 'moveend' and 'zoomend' together are Leaflet's equivalent of Google's
+      // single 'idle': it has no one event for "the camera has stopped".
+      const syncViewport = () => {
         const center = map.getCenter();
         const bounds = map.getBounds();
-        if (!center) return;
 
         setMapViewport({
-          center: { lat: center.lat(), lng: center.lng() },
-          bounds: bounds
-            ? {
-                north: bounds.getNorthEast().lat(),
-                east: bounds.getNorthEast().lng(),
-                south: bounds.getSouthWest().lat(),
-                west: bounds.getSouthWest().lng(),
-              }
-            : null,
+          center: { lat: center.lat, lng: center.lng },
+          bounds: {
+            north: bounds.getNorth(),
+            east: bounds.getEast(),
+            south: bounds.getSouth(),
+            west: bounds.getWest(),
+          },
         });
-      });
+      };
+
+      map.on('moveend', syncViewport);
+      map.on('zoomend', syncViewport);
+      syncViewport();
 
       setIsMapReady(true);
     } catch (error) {
@@ -435,15 +406,36 @@ const LcpNapLocation: React.FC = () => {
   /**
    * Keep the basemap on the app's theme.
    *
-   * The map is a Google-owned canvas, so a Tailwind class switch does not reach it —
-   * without this, flipping to the light theme left a near-black map inside a white
-   * page. setOptions re-styles the live map in place; there is no remount and no
-   * reload of tiles already cached.
+   * The map is its own canvas, so a Tailwind class switch does not reach it —
+   * without this, flipping to the light theme left a near-black map inside a
+   * white page. Only the tile source changes; the map, its markers and the
+   * current view are untouched.
    */
   useEffect(() => {
-    if (!isMapReady || !mapInstanceRef.current) return;
-    mapInstanceRef.current.setOptions({ styles: mapStyleFor(isDarkMode) });
+    const map = mapInstanceRef.current;
+    if (!isMapReady || !map) return;
+
+    tileLayerRef.current?.remove();
+    tileLayerRef.current = createBasemap(isDarkMode).addTo(map);
   }, [isDarkMode, isMapReady]);
+
+  /**
+   * Tell the map its box changed.
+   *
+   * Leaflet measures the container once and does not watch it, so a resized
+   * sidebar or a switch from the list to the map on a phone leaves grey,
+   * untiled space where the map grew. Google's canvas re-measured itself; this
+   * is the one thing that has to be said out loud instead.
+   */
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!isMapReady || !map) return;
+
+    // After the layout has settled, not during it — the container still has its
+    // old width on the frame the state changes.
+    const raf = requestAnimationFrame(() => map.invalidateSize());
+    return () => cancelAnimationFrame(raf);
+  }, [isMapReady, sidebarWidth, mobileViewMode, isMobile]);
 
   const parseCoordinates = (coordString: string): { latitude: number; longitude: number } | null => {
     if (!coordString) return null;
@@ -516,40 +508,44 @@ const LcpNapLocation: React.FC = () => {
   };
 
   const initializeAllMarkers = (locations: LocationMarker[]) => {
-    if (!mapInstanceRef.current || !window.google?.maps) return;
+    const map = mapInstanceRef.current;
+    if (!map) return;
 
-    // Clear existing markers mapping
-    allMarkersMapRef.current.forEach(m => m.setMap(null));
+    allMarkersMapRef.current.forEach(m => m.remove());
     allMarkersMapRef.current.clear();
 
     locations.forEach(location => {
       const isFull = location.port_total && location.total_technical_details !== undefined && location.total_technical_details >= location.port_total;
       const markerColor = isFull ? '#ef4444' : '#22c55e'; // Red if full, Green otherwise
 
-      const marker = new google.maps.Marker({
-        position: { lat: location.latitude, lng: location.longitude },
-        icon: createMarkerIcon(markerColor),
-        title: location.lcpnap_name
+      // circleMarker rather than a pin image: it is the same dot the Google
+      // build drew with a CIRCLE symbol, and it stays one screen size at every
+      // zoom, which is what keeps a dense NAP cluster readable.
+      const marker = L.circleMarker([location.latitude, location.longitude], {
+        radius: 8,
+        fillColor: markerColor,
+        fillOpacity: 1,
+        color: '#ffffff',
+        weight: 1,
       });
 
-      marker.addListener('click', () => {
-        setSelectedLocation(location);
-      });
+      marker.on('click', () => setSelectedLocation(location));
 
-      marker.addListener('mouseover', () => {
-        if (infoWindowRef.current && mapInstanceRef.current) {
-          const addressParts = [
-            location.street,
-            location.barangay,
-            location.city,
-            location.region
-          ].filter(Boolean);
+      const addressParts = [
+        location.street,
+        location.barangay,
+        location.city,
+        location.region
+      ].filter(Boolean);
 
-          const address = addressParts.length > 0
-            ? addressParts.join(', ')
-            : 'No address available';
+      const address = addressParts.length > 0
+        ? addressParts.join(', ')
+        : 'No address available';
 
-          const contentString = `
+      // Bound once rather than built on every hover, as the shared InfoWindow
+      // had to be — Leaflet gives each marker its own.
+      marker.bindTooltip(
+        `
             <div style="padding: 8px; min-width: 200px;">
               <h3 style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: #1f2937;">
                 ${location.lcpnap_name}
@@ -574,18 +570,9 @@ const LcpNapLocation: React.FC = () => {
                 ${address}
               </div>
             </div>
-          `;
-
-          infoWindowRef.current.setContent(contentString);
-          infoWindowRef.current.open(mapInstanceRef.current, marker);
-        }
-      });
-
-      marker.addListener('mouseout', () => {
-        if (infoWindowRef.current) {
-          infoWindowRef.current.close();
-        }
-      });
+          `,
+        { direction: 'top', opacity: 1, sticky: false }
+      );
 
       allMarkersMapRef.current.set(location.id, marker);
     });
@@ -615,26 +602,15 @@ const LcpNapLocation: React.FC = () => {
   };
 
   const clearMarkers = () => {
-    allMarkersMapRef.current.forEach(marker => marker.setMap(null));
+    allMarkersMapRef.current.forEach(marker => marker.remove());
     if (searchMarkerRef.current) {
-      searchMarkerRef.current.setMap(null);
+      searchMarkerRef.current.remove();
       searchMarkerRef.current = null;
     }
     if (pinMarkerRef.current) {
-      pinMarkerRef.current.setMap(null);
+      pinMarkerRef.current.remove();
       pinMarkerRef.current = null;
     }
-  };
-
-  const createMarkerIcon = (color: string = '#22c55e'): google.maps.Symbol => {
-    return {
-      path: google.maps.SymbolPath.CIRCLE,
-      scale: 8,
-      fillColor: color,
-      fillOpacity: 1,
-      strokeColor: '#ffffff',
-      strokeWeight: 1,
-    };
   };
 
   /**
@@ -644,31 +620,32 @@ const LcpNapLocation: React.FC = () => {
    * here, so panning shows different pins rather than rebuilding them.
    *
    * `shouldFitBounds` is false for updates driven by the pin limit: fitBounds moves
-   * the viewport, which fires `idle`, which recomputes the limited set, which would
+   * the viewport, which fires `moveend`, which recomputes the limited set, which would
    * call this again — a loop that also fights the operator's own panning.
    */
   const updateMapMarkers = (locations: LocationMarker[], shouldFitBounds: boolean = true) => {
-    if (!mapInstanceRef.current || !window.google?.maps) return;
+    const map = mapInstanceRef.current;
+    if (!map) return;
 
     const locationIds = new Set(locations.map(l => l.id));
-    const bounds = new google.maps.LatLngBounds();
-    let hasVisibleMarkers = false;
+    const points: L.LatLngExpression[] = [];
 
     allMarkersMapRef.current.forEach((marker, id) => {
       if (locationIds.has(id)) {
-        marker.setMap(mapInstanceRef.current);
-        const pos = marker.getPosition();
-        if (pos) bounds.extend(pos);
-        hasVisibleMarkers = true;
+        marker.addTo(map);
+        points.push(marker.getLatLng());
       } else {
-        marker.setMap(null);
+        marker.remove();
       }
     });
 
-    if (shouldFitBounds && hasVisibleMarkers && locations.length > 0) {
-      mapInstanceRef.current.fitBounds(bounds, { top: 50, right: 50, bottom: 50, left: 50 });
-      if (locations.length === 1) {
-        mapInstanceRef.current.setZoom(18);
+    if (shouldFitBounds && points.length > 0) {
+      // A single result has no extent to fit, and fitBounds on one point zooms
+      // to the maximum — so it is centred at a readable zoom instead.
+      if (points.length === 1) {
+        map.setView(points[0], 18);
+      } else {
+        map.fitBounds(L.latLngBounds(points), { padding: [50, 50] });
       }
     }
   };
@@ -702,8 +679,10 @@ const LcpNapLocation: React.FC = () => {
   const startPinPlacement = () => {
     if (!mapInstanceRef.current) return;
 
+    // Leaflet's LatLng exposes lat/lng as numbers, not the accessor methods the
+    // Google LatLng had.
     const center = mapInstanceRef.current.getCenter();
-    if (center) setPinCoords({ lat: center.lat(), lng: center.lng() });
+    setPinCoords({ lat: center.lat, lng: center.lng });
 
     setSelectedLocation(null);
     setIsPlacingPin(true);
@@ -730,50 +709,52 @@ const LcpNapLocation: React.FC = () => {
    */
   useEffect(() => {
     const map = mapInstanceRef.current;
-    if (!isPlacingPin || !map || !window.google?.maps) return;
+    if (!isPlacingPin || !map) return;
 
     const syncFromCenter = () => {
       const center = map.getCenter();
-      if (center) setPinCoords({ lat: center.lat(), lng: center.lng() });
+      setPinCoords({ lat: center.lat, lng: center.lng });
     };
 
-    const centerListener = map.addListener('center_changed', syncFromCenter);
-    const clickListener = map.addListener('click', (event: google.maps.MapMouseEvent) => {
-      if (!event.latLng) return;
-      map.panTo(event.latLng);
-      setPinCoords({ lat: event.latLng.lat(), lng: event.latLng.lng() });
-    });
+    const onClick = (event: L.LeafletMouseEvent) => {
+      map.panTo(event.latlng);
+      setPinCoords({ lat: event.latlng.lat, lng: event.latlng.lng });
+    };
+
+    // 'move' rather than 'moveend': the crosshair is fixed to the centre, so the
+    // coordinate under it has to track the pan as it happens, not after it stops.
+    map.on('move', syncFromCenter);
+    map.on('click', onClick);
 
     syncFromCenter();
 
     return () => {
-      google.maps.event.removeListener(centerListener);
-      google.maps.event.removeListener(clickListener);
+      map.off('move', syncFromCenter);
+      map.off('click', onClick);
     };
   }, [isPlacingPin]);
 
   /** The provisional marker itself, drawn under the crosshair while placing. */
   useEffect(() => {
     const map = mapInstanceRef.current;
-    if (!map || !window.google?.maps) return;
+    if (!map) return;
 
     if (!isPlacingPin || !pinCoords) {
       if (pinMarkerRef.current) {
-        pinMarkerRef.current.setMap(null);
+        pinMarkerRef.current.remove();
         pinMarkerRef.current = null;
       }
       return;
     }
 
     if (!pinMarkerRef.current) {
-      pinMarkerRef.current = new google.maps.Marker({
-        position: pinCoords,
-        map,
-        zIndex: 2000,
+      pinMarkerRef.current = L.marker([pinCoords.lat, pinCoords.lng], {
+        zIndexOffset: 2000,
         title: 'New LCP/NAP location',
-      });
+        icon: provisionalPinIcon,
+      }).addTo(map);
     } else {
-      pinMarkerRef.current.setPosition(pinCoords);
+      pinMarkerRef.current.setLatLng([pinCoords.lat, pinCoords.lng]);
     }
   }, [isPlacingPin, pinCoords]);
 
@@ -789,71 +770,53 @@ const LcpNapLocation: React.FC = () => {
   };
 
   const handleLocationSelect = (location: LocationMarker) => {
-    if (!mapInstanceRef.current) return;
+    const map = mapInstanceRef.current;
+    if (!map) return;
 
-    if (searchMarkerRef.current) {
-      searchMarkerRef.current.setMap(null);
-    }
+    searchMarkerRef.current?.remove();
 
-    const position = { lat: location.latitude, lng: location.longitude };
-    mapInstanceRef.current.setCenter(position);
-    mapInstanceRef.current.setZoom(18);
+    map.setView([location.latitude, location.longitude], 18);
 
-    // Add a red pin at the selected LCPNAP location
-    searchMarkerRef.current = new google.maps.Marker({
-      position,
-      map: mapInstanceRef.current,
+    searchMarkerRef.current = L.marker([location.latitude, location.longitude], {
       title: location.lcpnap_name,
-      animation: google.maps.Animation.DROP
-    });
+      icon: selectedPinIcon,
+    }).addTo(map);
 
-    const marker = markersRef.current.find(m => {
-      const pos = m.getPosition();
-      return pos && Math.abs(pos.lat() - location.latitude) < 0.000001 && Math.abs(pos.lng() - location.longitude) < 0.000001;
-    });
-
-    if (marker && infoWindowRef.current) {
-      google.maps.event.trigger(marker, 'click');
-    }
+    // Straight off the id. The old version searched a markersRef array that
+    // initializeAllMarkers never filled, so this lookup always missed and the
+    // tooltip never opened.
+    allMarkersMapRef.current.get(location.id)?.openTooltip();
   };
 
-  const handleAddressSelect = (placeId: string, description: string) => {
-    setSearchQuery(description);
+  /**
+   * A Photon result already carries its coordinates, so picking one moves the
+   * map immediately — Google needed a second getDetails round trip first.
+   */
+  const handleAddressSelect = (suggestion: AddressSuggestion) => {
+    setSearchQuery(suggestion.description);
     setShowSuggestions(false);
 
-    if (!placesServiceRef.current || !mapInstanceRef.current) return;
+    const map = mapInstanceRef.current;
+    if (!map) return;
 
-    placesServiceRef.current.getDetails(
-      { placeId, fields: ['geometry', 'formatted_address', 'name'] },
-      (place, status) => {
-        if (status === google.maps.places.PlacesServiceStatus.OK && place?.geometry?.location) {
-          const location = place.geometry.location;
-          mapInstanceRef.current?.setCenter(location);
-          mapInstanceRef.current?.setZoom(18);
+    map.setView([suggestion.lat, suggestion.lon], 18);
 
-          if (searchMarkerRef.current) {
-            searchMarkerRef.current.setMap(null);
-          }
-
-          searchMarkerRef.current = new google.maps.Marker({
-            position: location,
-            map: mapInstanceRef.current,
-            title: description,
-            animation: google.maps.Animation.DROP
-          });
-
-          if (infoWindowRef.current) {
-            infoWindowRef.current.setContent(`
+    searchMarkerRef.current?.remove();
+    searchMarkerRef.current = L.marker([suggestion.lat, suggestion.lon], {
+      title: suggestion.description,
+      icon: selectedPinIcon,
+    })
+      .addTo(map)
+      .bindTooltip(
+        `
               <div style="padding: 8px; min-width: 150px;">
                 <h3 style="margin: 0 0 4px 0; font-size: 14px; font-weight: 600; color: #1f2937;">Selected Location</h3>
-                <p style="margin: 0; font-size: 12px; color: #6b7280;">${description}</p>
+                <p style="margin: 0; font-size: 12px; color: #6b7280;">${suggestion.description}</p>
               </div>
-            `);
-            infoWindowRef.current.open(mapInstanceRef.current, searchMarkerRef.current);
-          }
-        }
-      }
-    );
+            `,
+        { direction: 'top', opacity: 1 }
+      )
+      .openTooltip();
   };
 
   const handleMouseDownSidebarResize = (e: React.MouseEvent) => {
@@ -1115,12 +1078,12 @@ const LcpNapLocation: React.FC = () => {
                     )}
                     {addressSuggestions.map(suggestion => (
                       <button
-                        key={suggestion.place_id}
+                        key={suggestion.id}
                         className={`w-full text-left px-4 py-2 text-sm transition-colors border-b last:border-0 ${isDarkMode
                           ? 'border-gray-700 hover:bg-gray-700 text-gray-200'
                           : 'border-gray-100 hover:bg-gray-50 text-gray-800'
                           }`}
-                        onClick={() => handleAddressSelect(suggestion.place_id, suggestion.description)}
+                        onClick={() => handleAddressSelect(suggestion)}
                       >
                         <div className="flex items-start gap-2">
                           <MapPin className={`h-4 w-4 mt-0.5 flex-shrink-0 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`} />

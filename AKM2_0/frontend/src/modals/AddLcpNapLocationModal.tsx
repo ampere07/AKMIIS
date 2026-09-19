@@ -3,7 +3,9 @@ import { X, Camera, MapPin, ChevronDown, CheckCircle, AlertCircle, Loader2 } fro
 import { getRegions, getCities, City } from '../services/cityService';
 import { barangayService, Barangay } from '../services/barangayService';
 import { getActiveImageSize, resizeImage, ImageSizeSetting } from '../services/imageSettingsService';
-import { GOOGLE_MAPS_API_KEY } from '../config/maps';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import { createBasemap, PH_BOUNDS, selectedPinIcon, isDarkThemeActive } from '../config/osmMap';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import apiClient from '../config/api';
 
@@ -144,8 +146,8 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
 
   const mapRef = useRef<HTMLDivElement>(null);
-  const mapInstanceRef = useRef<google.maps.Map | null>(null);
-  const markerRef = useRef<google.maps.Marker | null>(null);
+  const mapInstanceRef = useRef<L.Map | null>(null);
+  const markerRef = useRef<L.Marker | null>(null);
 
   useEffect(() => {
     const observer = new MutationObserver(() => {
@@ -195,11 +197,19 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
   };
 
   useEffect(() => {
-    if (showCoordinatesMap && !mapInstanceRef.current) {
-      loadMapScript();
+    if (!showCoordinatesMap) {
+      cleanupMap();
+      return;
     }
+    if (mapInstanceRef.current) return;
+
+    // The container is rendered by this same state change, so it does not exist
+    // yet on this tick. Waiting a frame is what the asynchronous script load
+    // used to do by accident.
+    const raf = requestAnimationFrame(() => initializeMap());
 
     return () => {
+      cancelAnimationFrame(raf);
       cleanupMap();
     };
   }, [showCoordinatesMap]);
@@ -213,69 +223,38 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
     }
   }, [formData.lcp_name, formData.nap_name]);
 
-  const loadMapScript = () => {
-    if (window.google?.maps) {
-      initializeMap();
-      return;
-    }
-
-    const existingScript = document.getElementById('google-maps-script-modal');
-    if (existingScript) {
-      existingScript.addEventListener('load', initializeMap);
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.id = 'google-maps-script-modal';
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}`;
-    script.async = true;
-    script.defer = true;
-    script.onload = initializeMap;
-    script.onerror = () => {
-      console.error('Failed to load Google Maps script');
-    };
-    document.head.appendChild(script);
-  };
-
   const initializeMap = () => {
-    if (!mapRef.current || !window.google?.maps) return;
-
-    cleanupMap();
+    if (!mapRef.current || mapInstanceRef.current) return;
 
     try {
       const defaultLat = 14.5995;
       const defaultLng = 120.9842;
 
-      const map = new google.maps.Map(mapRef.current, {
-        center: { lat: defaultLat, lng: defaultLng },
+      const map = L.map(mapRef.current, {
+        center: [defaultLat, defaultLng],
         zoom: 6,
         minZoom: 6,
-        restriction: {
-          latLngBounds: {
-            north: 21.5,
-            south: 4.3,
-            west: 114.0,
-            east: 127.5,
-          },
-          strictBounds: true,
-        },
-        mapTypeControl: true,
-        streetViewControl: false,
-        fullscreenControl: false,
+        maxBounds: PH_BOUNDS,
+        maxBoundsViscosity: 1.0,
         zoomControl: true,
       });
+
+      createBasemap(isDarkThemeActive()).addTo(map);
 
       // Locked coordinates came from a confirmed pin drop — the preview map stays a
       // preview and cannot re-set them.
       if (!lockCoordinates) {
-        map.addListener('click', (e: google.maps.MapMouseEvent) => {
-          if (e.latLng) {
-            handleMapClick(e.latLng.lat(), e.latLng.lng());
-          }
+        map.on('click', (e: L.LeafletMouseEvent) => {
+          handleMapClick(e.latlng.lat, e.latlng.lng);
         });
       }
 
       mapInstanceRef.current = map;
+
+      // The modal is already laid out around it, so the container has its final
+      // size but Leaflet measured it mid-reveal. Without this the tiles fill
+      // only part of the box.
+      map.invalidateSize();
 
       // Try to get user's current location if no coordinates set
       if (!lockCoordinates && !formData.coordinates && navigator.geolocation) {
@@ -283,8 +262,7 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
           (position) => {
             const userLat = position.coords.latitude;
             const userLng = position.coords.longitude;
-            map.setCenter({ lat: userLat, lng: userLng });
-            map.setZoom(15);
+            map.setView([userLat, userLng], 15);
             addMarkerToMap(userLat, userLng);
             setFormData(prev => ({
               ...prev,
@@ -304,8 +282,7 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
           const lng = parseFloat(coords[1]);
           if (!isNaN(lat) && !isNaN(lng)) {
             addMarkerToMap(lat, lng);
-            map.setCenter({ lat, lng });
-            map.setZoom(15);
+            map.setView([lat, lng], 15);
           }
         }
       }
@@ -315,10 +292,11 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
   };
 
   const cleanupMap = () => {
-    if (markerRef.current) {
-      markerRef.current.setMap(null);
-      markerRef.current = null;
-    }
+    markerRef.current?.remove();
+    markerRef.current = null;
+    // remove() rather than dropping the ref: Leaflet holds DOM listeners and a
+    // tile pipeline, and the map is created again every time this is toggled.
+    mapInstanceRef.current?.remove();
     mapInstanceRef.current = null;
   };
 
@@ -334,40 +312,25 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
   };
 
   const addMarkerToMap = (lat: number, lng: number) => {
-    if (!mapInstanceRef.current || !window.google?.maps) return;
+    const map = mapInstanceRef.current;
+    if (!map) return;
 
-    if (markerRef.current) {
-      markerRef.current.setMap(null);
-    }
+    markerRef.current?.remove();
 
-    const marker = new google.maps.Marker({
-      position: { lat, lng },
-      map: mapInstanceRef.current,
-      icon: {
-        path: google.maps.SymbolPath.CIRCLE,
-        scale: 10,
-        fillColor: colorPalette?.primary || '#7c3aed',
-        fillOpacity: 1,
-        strokeColor: '#ffffff',
-        strokeWeight: 2,
-      },
-      title: 'Selected Location'
-    });
-
-    const infoWindow = new google.maps.InfoWindow({
-      content: `
+    markerRef.current = L.marker([lat, lng], {
+      icon: selectedPinIcon,
+      title: 'Selected Location',
+    })
+      .addTo(map)
+      .bindTooltip(
+        `
         <div style="font-family: system-ui; text-align: center; color: #1f2937;">
           <strong>Selected Location</strong><br/>
           <span style="font-size: 12px; color: #666;">${lat.toFixed(6)}, ${lng.toFixed(6)}</span>
         </div>
-      `
-    });
-
-    marker.addListener('click', () => {
-      infoWindow.open(mapInstanceRef.current, marker);
-    });
-
-    markerRef.current = marker;
+      `,
+        { direction: 'top', opacity: 1 }
+      );
   };
 
   const handleToggleMap = () => {
