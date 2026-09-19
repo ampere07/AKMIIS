@@ -49,6 +49,11 @@ class AutoDisconnectService
      */
     private const BILLING_CYCLE_DAYS = 30;
     private const DC_OFFSET_DAYS = 10;
+
+    // Fallback grace-charge offset, used only when billing_config.grace_charge_day is
+    // NULL / not configured (see getScheduleOffsets()). The configured column is the
+    // source of truth; this preserves the historical 7-day behaviour for rows that
+    // predate the column.
     private const ADDITIONAL_INVOICE_OFFSET_DAYS = 7;
     private const PRORATE_DIVISOR_DAYS = 30;
 
@@ -908,14 +913,17 @@ class AutoDisconnectService
      *   DC / restriction = due date    + disconnection_day
      *                    = billing day + (due_date_day + disconnection_day)
      *   coverage (proration window) = disconnection_day   (days from due date to DC)
-     *   grace / additional invoice  = DC + ADDITIONAL_INVOICE_OFFSET_DAYS
+     *   grace / additional invoice  = DC + grace_charge_day
      *
      * Falls back to the documented constants when a value is missing. A disconnection_day
      * of 0 disables auto-DC (and therefore the grace charge), matching the config UI where
      * "0 = disabled".
      *
-     * NOTE: the grace/additional-invoice offset (days after DC) has no dedicated field in
-     * billing_config, so it stays the ADDITIONAL_INVOICE_OFFSET_DAYS constant.
+     * The grace/additional-invoice offset (days after DC) comes from
+     * billing_config.grace_charge_day. A NULL / unset / non-positive value falls back to
+     * ADDITIONAL_INVOICE_OFFSET_DAYS (7), which is the behaviour that predates the column;
+     * the grace charge is never silently switched off by a blank config field, it is
+     * disabled only by disconnection_day = 0 like every other post-DC step.
      *
      * The DC-notice date is informational only (the service has no notice channel) and is
      * measured as due date + disconnection_notice cycle days.
@@ -927,7 +935,10 @@ class AutoDisconnectService
         $dueOffset      = (int) ($config->due_date_day ?? 0);
         $dcAfterDue     = (int) ($config->disconnection_day ?? self::DC_OFFSET_DAYS);
         $noticeAfterDue = (int) ($config->disconnection_notice ?? 0);
-        $graceAfterDc   = self::ADDITIONAL_INVOICE_OFFSET_DAYS;
+        $graceAfterDc   = (int) ($config?->grace_charge_day ?? self::ADDITIONAL_INVOICE_OFFSET_DAYS);
+        if ($graceAfterDc <= 0) {
+            $graceAfterDc = self::ADDITIONAL_INVOICE_OFFSET_DAYS;
+        }
         $pulloutAfterDc = (int) ($config->pullout_day ?? $config->pullout_offset ?? 30);
 
         return [
@@ -947,14 +958,16 @@ class AutoDisconnectService
 
     /**
      * Grace-period charge: bill the grace period consumed by subscribers who were
-     * auto-disconnected exactly ADDITIONAL_INVOICE_OFFSET_DAYS (7) days ago and are still
+     * auto-disconnected exactly billing_config.grace_charge_day days ago (falling back to
+     * ADDITIONAL_INVOICE_OFFSET_DAYS = 7 when that column is unset) and are still
      * disconnected. Invoked by the console command right after processAutoDisconnect().
      *
      * Driven by disconnected_logs rather than by billing-cycle arithmetic, so off-cycle
      * disconnections (manual re-runs, catch-up runs, accounts whose DC did not land on the
      * computed cycle date) are covered as well:
      *
-     *   1. disconnected_logs written on today - 7 whose remarks mark them as 'Auto DC'
+     *   1. disconnected_logs written on today - grace_charge_day whose remarks mark them
+     *      as 'Auto DC'
      *   2. the account is still Inactive or Pullout (a subscriber who paid and was
      *      reconnected is Active again and is never charged)
      *   3. penalty = (plan price / 30) * disconnection_day coverage days (10 by default)
@@ -971,7 +984,7 @@ class AutoDisconnectService
     {
         $this->writeLog("");
         $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
-        $this->writeLog("║         STARTING GRACE PERIOD CHARGE (AUTO DC + 7 DAYS)        ║");
+        $this->writeLog("║                  STARTING GRACE PERIOD CHARGE                  ║");
         $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
         $startTime = Carbon::now();
         $this->writeLog("Start Time: " . $startTime->format('Y-m-d H:i:s'));
@@ -999,6 +1012,10 @@ class AutoDisconnectService
         $coverageDays = $off['coverage'] > 0 ? $off['coverage'] : self::DC_OFFSET_DAYS;
         $invoiceRemark = ' | GP Charge (' . $coverageDays . ' Days)';
 
+        $graceSource = ((int) ($config?->grace_charge_day ?? 0)) > 0
+            ? 'billing_config.grace_charge_day'
+            : 'default (billing_config.grace_charge_day not configured)';
+        $this->writeLog("[CONFIG] Grace Charge Day: {$graceDays} day(s) after DC - source: {$graceSource}");
         $this->writeLog("[GRACE] Target disconnection date" . ($customTargetDate ? " (explicit override)" : " (today - {$graceDays} days)") . ": " . $targetDcDate->format('Y-m-d'));
         $this->writeLog("[GRACE] Coverage days: {$coverageDays} (fixed divisor " . self::PRORATE_DIVISOR_DAYS . ")");
 

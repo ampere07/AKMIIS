@@ -15,6 +15,10 @@ import apiClient from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 
+// Mirrors AutoDisconnectService::ADDITIONAL_INVOICE_OFFSET_DAYS — the offset the backend
+// falls back to when billing_config.grace_charge_day is NULL.
+const DEFAULT_GRACE_CHARGE_DAY = 7;
+
 interface BillingConfigData {
   advance_generation_day: number;
   due_date_day: number;
@@ -23,6 +27,7 @@ interface BillingConfigData {
   disconnection_notice: number;
   disconnection_fee: number;
   pullout_day: number;
+  grace_charge_day: number;
   agent_commission: number;
   created_at?: string;
   updated_at?: string;
@@ -52,6 +57,7 @@ const EMPTY_CONFIG: BillingConfigData = {
   disconnection_notice: 0,
   disconnection_fee: 0,
   pullout_day: 0,
+  grace_charge_day: DEFAULT_GRACE_CHARGE_DAY,
   agent_commission: 0,
 };
 
@@ -63,6 +69,7 @@ const BILLING_FIELDS: { key: keyof BillingConfigData; label: string; isFloat?: b
   { key: 'disconnection_notice', label: 'Disconnection Notice' },
   { key: 'disconnection_fee', label: 'Disconnection Fee (₱)', isFloat: true },
   { key: 'pullout_day', label: 'Pullout Day' },
+  { key: 'grace_charge_day', label: 'Grace Charge Day' },
   { key: 'agent_commission', label: 'Agent Commission (%)', isFloat: true },
 ];
 
@@ -109,8 +116,12 @@ const BillingConfig: React.FC = () => {
       setLoadingBillingConfig(true);
       const response = await apiClient.get<BillingConfigResponse>('/billing-config');
       if (response.data.success && response.data.data) {
-        setBillingConfig(response.data.data);
-        setBillingConfigInput(response.data.data);
+        const data = {
+          ...response.data.data,
+          grace_charge_day: response.data.data.grace_charge_day ?? DEFAULT_GRACE_CHARGE_DAY,
+        };
+        setBillingConfig(data);
+        setBillingConfigInput(data);
       } else {
         setBillingConfig(null);
       }

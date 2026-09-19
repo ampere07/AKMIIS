@@ -111,7 +111,8 @@ class ProcessAutoDisconnectPullout extends Command
                 $this->newLine();
             }
 
-            // Process Grace Period Charges (7-day delayed charging for DC'd accounts)
+            // Process Grace Period Charges (delayed charging for DC'd accounts, offset
+            // from billing_config.grace_charge_day)
             if (!$dcOnly && !$pulloutOnly) {
                 $this->info("─────────────────────────────────────────────────────────");
                 $this->info("[PROCESS] Processing Grace Period Charges...");

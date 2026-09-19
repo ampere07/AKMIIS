@@ -550,18 +550,41 @@ class MonitorController extends Controller
                 ]);
             }
 
-            // 8) EXPENSES (your real table is expenses_log; category_id exists)
+            // 8) EXPENSES
             if ($action === 'expenses_mon') {
-                $qb = DB::table('expenses_log');
-                $applyOrg($qb, 'expenses_log');
-                $qb->leftJoin('expenses_category', 'expenses_log.category_id', '=', 'expenses_category.id')
-                    ->select(
-                        DB::raw("COALESCE(expenses_category.category_name, 'Unknown') as label"),
-                        DB::raw("SUM(COALESCE(expenses_log.amount,0)) as value")
-                    );
+                // Read straight off expenses_logs. Three things were wrong here
+                // and each of them was a 500 on its own, which is why this
+                // widget has never returned anything:
+                //
+                //   • the table is `expenses_logs`, not `expenses_log` — see
+                //     the migration and ExpensesLogController, which both use
+                //     the plural;
+                //   • there is no `category_id`. The category is a plain string
+                //     column on the row (`category`), so there is nothing to
+                //     join expenses_category on — the join is dropped rather
+                //     than repointed;
+                //   • the date column is `date`, not `expense_date`.
+                //
+                // Nothing caught it because the web never asks for this widget:
+                // `expenses_mon` exists only in the mobile client's catalog.
+                $qb = DB::table('expenses_logs');
+                $applyOrg($qb, 'expenses_logs');
+                $qb->select(
+                    DB::raw("COALESCE(NULLIF(TRIM(expenses_logs.category), ''), 'Unknown') as label"),
+                    DB::raw("SUM(COALESCE(expenses_logs.amount,0)) as value")
+                );
 
-                $applyScope($qb, 'expenses_log.expense_date');
-                $qb->groupBy('expenses_category.category_name')
+                $applyScope($qb, 'expenses_logs.date');
+                // Grouped on the select alias so a blank category and a NULL one
+                // fall into one "Unknown" bucket rather than two.
+                //
+                // The alias rather than the expression repeated: this server runs
+                // with ONLY_FULL_GROUP_BY, and MySQL does not recognise a
+                // repeated COALESCE/NULLIF as matching the one in the SELECT —
+                // it rejects the query with 1055 "'category' isn't in GROUP BY".
+                // Grouping by the alias is a MySQL extension, which is safe here:
+                // this application is MySQL-only.
+                $qb->groupBy(DB::raw('label'))
                     ->orderByDesc('value');
 
                 return response()->json(['status' => 'success', 'data' => $qb->get(), 'barangays' => $response['barangays']]);

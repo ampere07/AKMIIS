@@ -4,6 +4,11 @@ import { customAccountNumberService, CustomAccountNumber } from '../services/cus
 import apiClient from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 
+// Fallback used by the backend (AutoDisconnectService::ADDITIONAL_INVOICE_OFFSET_DAYS)
+// when billing_config.grace_charge_day is NULL, so the form shows the offset that is
+// actually in effect for configs saved before the column existed.
+const DEFAULT_GRACE_CHARGE_DAY = 7;
+
 interface BillingConfigData {
   advance_generation_day: number;
   due_date_day: number;
@@ -12,6 +17,7 @@ interface BillingConfigData {
   disconnection_notice: number;
   disconnection_fee: number;
   pullout_day: number;
+  grace_charge_day: number;
   created_at?: string;
   updated_at?: string;
   updated_by?: string;
@@ -49,7 +55,8 @@ const BillingConfig: React.FC = () => {
     overdue_day: 0,
     disconnection_notice: 0,
     disconnection_fee: 0,
-    pullout_day: 0
+    pullout_day: 0,
+    grace_charge_day: DEFAULT_GRACE_CHARGE_DAY
   });
   const [loadingBillingConfig, setLoadingBillingConfig] = useState<boolean>(false);
 
@@ -85,8 +92,12 @@ const BillingConfig: React.FC = () => {
       setLoadingBillingConfig(true);
       const response = await apiClient.get<BillingConfigResponse>('/billing-config');
       if (response.data.success && response.data.data) {
-        setBillingConfig(response.data.data);
-        setBillingConfigInput(response.data.data);
+        const data = {
+          ...response.data.data,
+          grace_charge_day: response.data.data.grace_charge_day ?? DEFAULT_GRACE_CHARGE_DAY
+        };
+        setBillingConfig(data);
+        setBillingConfigInput(data);
       } else {
         setBillingConfig(null);
       }
@@ -273,6 +284,9 @@ const BillingConfig: React.FC = () => {
       if (billingConfigInput.pullout_day !== undefined && billingConfigInput.pullout_day !== null) {
         payload.pullout_day = billingConfigInput.pullout_day;
       }
+      if (billingConfigInput.grace_charge_day !== undefined && billingConfigInput.grace_charge_day !== null) {
+        payload.grace_charge_day = billingConfigInput.grace_charge_day;
+      }
 
       if (billingConfig) {
         await apiClient.put('/billing-config', payload);
@@ -333,7 +347,8 @@ const BillingConfig: React.FC = () => {
             overdue_day: 0,
             disconnection_notice: 0,
             disconnection_fee: 0,
-            pullout_day: 0
+            pullout_day: 0,
+            grace_charge_day: DEFAULT_GRACE_CHARGE_DAY
           });
           setIsEditingBillingConfig(false);
         } catch (error: any) {
@@ -365,7 +380,8 @@ const BillingConfig: React.FC = () => {
         overdue_day: 0,
         disconnection_notice: 0,
         disconnection_fee: 0,
-        pullout_day: 0
+        pullout_day: 0,
+        grace_charge_day: DEFAULT_GRACE_CHARGE_DAY
       });
     }
     setIsEditingBillingConfig(false);
@@ -641,6 +657,13 @@ const BillingConfig: React.FC = () => {
                     <p className={`font-medium text-lg ${isDarkMode ? 'text-white' : 'text-gray-900'
                       }`}>{billingConfig.pullout_day}</p>
                   </div>
+                  <div className={`p-4 rounded ${isDarkMode ? 'bg-gray-800' : 'bg-gray-100'
+                    }`}>
+                    <p className={`text-xs mb-1 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+                      }`}>Grace Charge Day</p>
+                    <p className={`font-medium text-lg ${isDarkMode ? 'text-white' : 'text-gray-900'
+                      }`}>{billingConfig.grace_charge_day ?? DEFAULT_GRACE_CHARGE_DAY}</p>
+                  </div>
                 </div>
 
                 <div className="mt-4 pt-4 border-t border-gray-700/30 flex flex-wrap gap-x-6 gap-y-1">
@@ -869,6 +892,30 @@ const BillingConfig: React.FC = () => {
                     <p className={`text-xs mt-2 ${isDarkMode ? 'text-gray-500' : 'text-gray-600'
                       }`}>
                       Days after disconnection to pull out equipment (0-31, 0 = disabled)
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                      }`}>
+                      Grace Charge Day
+                    </label>
+                    <input
+                      type="number"
+                      value={billingConfigInput.grace_charge_day}
+                      onChange={(e) => handleBillingConfigInputChange('grace_charge_day', e.target.value)}
+                      onFocus={(e) => e.target.select()}
+                      className={`w-full px-4 py-2 border rounded focus:outline-none focus:border-orange-500 ${isDarkMode
+                        ? 'bg-gray-800 border-gray-700 text-white'
+                        : 'bg-white border-gray-300 text-gray-900'
+                        }`}
+                      min="1"
+                      max="31"
+                      disabled={loadingBillingConfig}
+                    />
+                    <p className={`text-xs mt-2 ${isDarkMode ? 'text-gray-500' : 'text-gray-600'
+                      }`}>
+                      Days after disconnection to charge the grace period (1-31, blank or 0 = {DEFAULT_GRACE_CHARGE_DAY})
                     </p>
                   </div>
                 </div>

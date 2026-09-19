@@ -60,6 +60,7 @@ class BillingConfigController extends Controller
                 'disconnection_notice' => 'nullable|integer|min:0',
                 'disconnection_fee' => 'nullable|numeric|min:0',
                 'pullout_day' => 'nullable|integer|min:0',
+                'grace_charge_day' => 'nullable|integer|min:0',
                 'user_email' => 'nullable|email|max:255'
             ]);
 
@@ -86,6 +87,7 @@ class BillingConfigController extends Controller
                 'disconnection_notice' => $request->input('disconnection_notice', 0),
                 'disconnection_fee' => $request->input('disconnection_fee', 0.00),
                 'pullout_day' => $request->input('pullout_day', 0),
+                'grace_charge_day' => $request->input('grace_charge_day', 7),
                 'updated_by' => $userEmail,
                 'created_by' => $userEmail
             ]);
@@ -130,6 +132,7 @@ class BillingConfigController extends Controller
                 'disconnection_notice' => 'nullable|integer|min:0',
                 'disconnection_fee' => 'nullable|numeric|min:0',
                 'pullout_day' => 'nullable|integer|min:0',
+                'grace_charge_day' => 'nullable|integer|min:0',
                 'user_email' => 'nullable|email|max:255'
             ]);
 
@@ -156,6 +159,7 @@ class BillingConfigController extends Controller
                 'disconnection_notice' => $request->input('disconnection_notice', $config->disconnection_notice),
                 'disconnection_fee' => $request->input('disconnection_fee', $config->disconnection_fee),
                 'pullout_day' => $request->input('pullout_day', $config->pullout_day),
+                'grace_charge_day' => $request->input('grace_charge_day', $config->grace_charge_day),
                 'updated_by' => $userEmail
             ]);
 

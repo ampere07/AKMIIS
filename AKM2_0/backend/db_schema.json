@@ -3187,6 +3187,17 @@
                 "Comment": ""
             },
             {
+                "Field": "grace_charge_day",
+                "Type": "int(50)",
+                "Collation": null,
+                "Null": "YES",
+                "Key": "",
+                "Default": null,
+                "Extra": "",
+                "Privileges": "select,insert,update,references",
+                "Comment": ""
+            },
+            {
                 "Field": "organization_id",
                 "Type": "bigint(50)",
                 "Collation": null,
@@ -3228,7 +3239,7 @@
             }
         ],
         "fks": [],
-        "create_statement": "CREATE TABLE `billing_config` (\n  `id` int(11) NOT NULL AUTO_INCREMENT,\n  `advance_generation_day` int(50) DEFAULT NULL,\n  `due_date_day` int(50) DEFAULT NULL,\n  `disconnection_day` int(50) DEFAULT NULL,\n  `overdue_day` int(50) DEFAULT NULL,\n  `disconnection_notice` int(50) DEFAULT NULL,\n  `created_at` datetime DEFAULT NULL,\n  `updated_at` datetime DEFAULT NULL,\n  `updated_by` varchar(255) DEFAULT NULL,\n  `disconnection_fee` decimal(10,2) NOT NULL DEFAULT 0.00,\n  `pullout_day` int(50) DEFAULT NULL,\n  `organization_id` bigint(50) DEFAULT NULL,\n  `agent_commission` decimal(10,2) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        "create_statement": "CREATE TABLE `billing_config` (\n  `id` int(11) NOT NULL AUTO_INCREMENT,\n  `advance_generation_day` int(50) DEFAULT NULL,\n  `due_date_day` int(50) DEFAULT NULL,\n  `disconnection_day` int(50) DEFAULT NULL,\n  `overdue_day` int(50) DEFAULT NULL,\n  `disconnection_notice` int(50) DEFAULT NULL,\n  `created_at` datetime DEFAULT NULL,\n  `updated_at` datetime DEFAULT NULL,\n  `updated_by` varchar(255) DEFAULT NULL,\n  `disconnection_fee` decimal(10,2) NOT NULL DEFAULT 0.00,\n  `pullout_day` int(50) DEFAULT NULL,\n  `grace_charge_day` int(50) DEFAULT NULL,\n  `organization_id` bigint(50) DEFAULT NULL,\n  `agent_commission` decimal(10,2) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
     },
     "billing_status": {
         "columns": [

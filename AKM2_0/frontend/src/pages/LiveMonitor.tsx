@@ -1120,6 +1120,105 @@ const LiveMonitor: React.FC = () => {
     );
   };
 
+  // The "Type" column carries a job order's fixed "Installation (Joborder)" or a
+  // service order's concern with " (Service Order)" appended. Both halves matter
+  // — the concern is what an operator wants to filter by, the suffix is what
+  // separates a job order from a service order — so the option value stays the
+  // whole string and only the label is shortened.
+  const TYPE_SUFFIX = /\s*\((joborder|job order|service order|work order)\)\s*$/i;
+
+  // Concerns are free text and reach the queue in whatever case they were typed
+  // — "For Pullout" and "for pullout" are the same concern and were listing as
+  // two separate options, splitting the rows between them. Options are keyed on
+  // the lower-cased type so those fold into one, and the filter compares the
+  // same way.
+  // Has this row been started again since it last stopped?
+  //
+  // Reaching the queue with BOTH timestamps set normally means one run that
+  // finished. It means the opposite when the start is the later of the two: the
+  // recorded end belongs to an earlier attempt and a new run is underway. That
+  // is what a rescheduled visit looks like when a technician picks it back up
+  // without the stored status ever leaving "Reschedule".
+  //
+  // Compared on the ISO fields the widget sends alongside the display strings,
+  // never on the formatted "Mmm d, yyyy h:mm AM" text. A row without them (an
+  // older payload) simply is not treated as restarted.
+  const isRestarted = (row: any) => {
+    const started = Date.parse(row?.start_time ?? '');
+    const ended = Date.parse(row?.end_time ?? '');
+    return Number.isFinite(started) && Number.isFinite(ended) && started > ended;
+  };
+
+  // Statuses that mean the work is over, whatever the timestamps say. A row that
+  // reached one of these is never running, so it never reads "On Going" and its
+  // timer never ticks — a Failed visit whose times happen to look restarted must
+  // not come back to life.
+  const FINISHED_STATUSES = ['done', 'resolved', 'completed', 'failed', 'cancelled', 'canceled'];
+
+  const isFinishedStatus = (status: any) =>
+    FINISHED_STATUSES.includes(String(status ?? '').trim().toLowerCase());
+
+  const typeFilterKey = (type: string) => type.trim().toLowerCase();
+
+  const typeFilterGroups = (data: any, selected?: string) => {
+    // key -> every spelling seen, with how often
+    const variants = new Map<string, Map<string, number>>();
+
+    const note = (raw: string) => {
+      const type = raw.trim();
+      if (!type) return;
+      const key = typeFilterKey(type);
+      const seen = variants.get(key) ?? new Map<string, number>();
+      seen.set(type, (seen.get(type) ?? 0) + 1);
+      variants.set(key, seen);
+    };
+
+    (Array.isArray(data) ? data : []).forEach((row: any) => {
+      if (typeof row?.type === 'string') note(row.type);
+    });
+
+    // A selection whose rows have all finished still belongs in the list, or the
+    // dropdown would silently snap back to "All Types" on the next poll.
+    if (selected && selected !== 'all') note(selected);
+
+    const jobOrders: { key: string; label: string }[] = [];
+    const services: { key: string; label: string }[] = [];
+    const others: { key: string; label: string }[] = [];
+
+    Array.from(variants.entries()).forEach(([key, seen]) => {
+      // Show the spelling someone actually capitalised, and among equals the one
+      // used most — never "for pullout" when "For Pullout" is also on the board.
+      const label = Array.from(seen.entries()).sort((a, b) => {
+        const cased = Number(/[A-Z]/.test(b[0])) - Number(/[A-Z]/.test(a[0]));
+        return cased !== 0 ? cased : b[1] - a[1];
+      })[0][0];
+
+      const entry = { key, label };
+
+      if (key.includes('(joborder)') || key.includes('(job order)')) jobOrders.push(entry);
+      else if (key.includes('(service order)')) services.push(entry);
+      else others.push(entry);
+    });
+
+    const byLabel = (a: { label: string }, b: { label: string }) => a.label.localeCompare(b.label);
+
+    return {
+      jobOrders: jobOrders.sort(byLabel),
+      services: services.sort(byLabel),
+      others: others.sort(byLabel),
+    };
+  };
+
+  const typeFilterLabel = (type: string) => type.replace(TYPE_SUFFIX, '').trim() || type;
+
+  const applyTypeFilter = (data: any, selected?: string) => {
+    if (!Array.isArray(data) || !selected || selected === 'all') return data;
+    return data.filter((row: any) =>
+      typeof row?.type === 'string' && typeFilterKey(row.type) === selected
+    );
+  };
+
+
   const renderTable = (data: any[], id: string, fontSize: number) => {
     if (!Array.isArray(data) || data.length === 0) {
       return (
@@ -1150,7 +1249,12 @@ const LiveMonitor: React.FC = () => {
               const isDuplicate = idx > 0 && data[idx - 1].team_name === row.team_name;
               const borderClass = (!isDuplicate && idx > 0) ? (isDarkMode ? 'border-t border-gray-700/50' : 'border-t border-gray-200') : '';
               const hasEnd = !!row.end;
-              const duration = isTeamQueue ? formatDuration(row.start, hasEnd ? row.end : null) : null;
+              // Open-ended: still running. A restarted row's stored end belongs to
+              // the attempt before this one, so it is not an end at all — the
+              // timer runs from the new start, and the End Time column shows "-"
+              // rather than a time that precedes the start beside it.
+              const openEnded = !isFinishedStatus(row.status) && (!hasEnd || isRestarted(row));
+              const duration = isTeamQueue ? formatDuration(row.start, openEnded ? null : row.end) : null;
 
               return (
                 <tr key={idx} className={`${isDarkMode ? 'hover:bg-gray-800/50' : 'hover:bg-gray-50'} ${borderClass}`}>
@@ -1184,16 +1288,32 @@ const LiveMonitor: React.FC = () => {
                   <td className="py-2 px-3">
                     {(() => {
                       const s = row.status?.toLowerCase() ?? '';
-                      const isOngoing = s === 'in progress' && row.start && row.start !== '-';
+                      // "On Going" means the work is running right now, which the
+                      // timestamps say and the stored status does not.
+                      //
+                      // A rescheduled visit that a technician starts again gets a
+                      // fresh start_time and its end_time cleared, but its stored
+                      // status stays "Reschedule" — so the board kept showing
+                      // RESCHEDULE for a job actively being worked. Reading the
+                      // clock instead fixes that, and keeps a reschedule that was
+                      // NOT restarted (it carries an end_time) reading RESCHEDULE.
+                      //
+                      // Same rule the Duration column beside it already uses, so
+                      // the two can no longer disagree.
+                      const hasStarted = !!row.start && row.start !== '-';
+                      const isOngoing = hasStarted && openEnded;
                       const label = isOngoing ? 'On Going' : (row.status || '-');
-                      const color = s === 'reschedule'
-                        ? 'text-purple-500'
-                        : s === 'done' || s === 'resolved' || s === 'completed'
-                          ? 'text-green-500'
-                          : s === 'failed'
-                            ? 'text-red-500'
-                            : isOngoing
-                              ? 'text-blue-400'
+                      // Ongoing is checked first: the label already reads "On
+                      // Going", and leaving the stored status to pick the colour
+                      // painted a restarted reschedule purple under a blue label.
+                      const color = isOngoing
+                        ? 'text-blue-400'
+                        : s === 'reschedule'
+                          ? 'text-purple-500'
+                          : s === 'done' || s === 'resolved' || s === 'completed'
+                            ? 'text-green-500'
+                            : s === 'failed'
+                              ? 'text-red-500'
                               : 'text-orange-500';
                       return (
                         <span className={`font-bold uppercase ${color}`}>
@@ -1205,16 +1325,16 @@ const LiveMonitor: React.FC = () => {
                   </td>
                   <td className="py-2 px-3 whitespace-nowrap">{row.start || '-'}</td>
                   {isTeamQueue && (
-                    <td className="py-2 px-3 whitespace-nowrap">{row.end || '-'}</td>
+                    <td className="py-2 px-3 whitespace-nowrap">{openEnded ? '-' : (row.end || '-')}</td>
                   )}
                   {isTeamQueue && (
                     <td className="py-2 px-3 whitespace-nowrap font-mono font-bold">
                       {row.start && row.start !== '-' ? (
-                        <span className={hasEnd
+                        <span className={!openEnded
                           ? (isDarkMode ? 'text-gray-400' : 'text-gray-500')
                           : 'text-green-500'
                         }>
-                          {!hasEnd && (
+                          {openEnded && (
                             <span className="inline-block w-2 h-2 rounded-full bg-green-500 mr-1.5 animate-pulse" />
                           )}
                           {duration}
@@ -1272,7 +1392,7 @@ const LiveMonitor: React.FC = () => {
     if (state.viewType === 'table' && (id === 'team_detailed_queue' || id === 'agent_detailed_queue')) {
       return (
         <div className="h-full overflow-y-auto custom-scrollbar">
-          {renderTable(widget.data, id, fontSize)}
+          {renderTable(applyTypeFilter(widget.data, state.typeFilter), id, fontSize)}
         </div>
       );
     }
@@ -1945,6 +2065,49 @@ const LiveMonitor: React.FC = () => {
                           </button>
                         </>
                       )}
+
+
+                      {id === 'team_detailed_queue' && (() => {
+                        const { jobOrders, services, others } = typeFilterGroups(
+                          widgets[id]?.data,
+                          widgetStates[id]?.typeFilter
+                        );
+
+                        return (
+                          <select
+                            value={widgetStates[id]?.typeFilter || 'all'}
+                            onChange={(e) => updateWidgetState(id, { typeFilter: e.target.value })}
+                            title="Filter by type"
+                            className={`text-[11px] font-semibold rounded px-2 py-1 border outline-none cursor-pointer ${isDarkMode
+                              ? 'bg-gray-800 border-gray-700 text-gray-200'
+                              : 'bg-white border-gray-300 text-gray-700'
+                              }`}
+                          >
+                            <option value="all">All Types</option>
+                            {jobOrders.length > 0 && (
+                              <optgroup label="Job Order">
+                                {jobOrders.map(({ key, label }) => (
+                                  <option key={key} value={key}>{typeFilterLabel(label)}</option>
+                                ))}
+                              </optgroup>
+                            )}
+                            {services.length > 0 && (
+                              <optgroup label="Service Order">
+                                {services.map(({ key, label }) => (
+                                  <option key={key} value={key}>{typeFilterLabel(label)}</option>
+                                ))}
+                              </optgroup>
+                            )}
+                            {others.length > 0 && (
+                              <optgroup label="Other">
+                                {others.map(({ key, label }) => (
+                                  <option key={key} value={key}>{typeFilterLabel(label)}</option>
+                                ))}
+                              </optgroup>
+                            )}
+                          </select>
+                        );
+                      })()}
 
                       {(id === 'team_detailed_queue' || id === 'agent_detailed_queue') && (
                         <button

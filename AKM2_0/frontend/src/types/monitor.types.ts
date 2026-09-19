@@ -28,6 +28,11 @@ export interface WidgetState {
   fontSize?: number; // per-widget font size
   paymentMode?: 'type' | 'months'; // For Payment Methods widget
   customStartTime?: string; // HH:mm format
+  // Detailed-queue "Type" filter. Holds the full type string a row carries
+  // ("Installation (Joborder)", "No Internet (Service Order)") or undefined /
+  // 'all' for no filter. Applied client-side to rows already fetched, so it
+  // never has to agree with anything the server does.
+  typeFilter?: string;
   isEditingGrid?: boolean; // For specialized grid editing
   gridCols?: number; // Internal grid columns
   gridRows?: number; // Internal grid rows
