@@ -27,7 +27,8 @@ import L from 'leaflet';
  * No {s} subdomain placeholder: these services are served from one host, and
  * leaving it in produces requests to hosts that do not exist.
  */
-const ESRI = 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas';
+const ARCGIS = 'https://services.arcgisonline.com/ArcGIS/rest/services';
+const ESRI = `${ARCGIS}/Canvas`;
 
 export const BASEMAPS = {
   light: {
@@ -40,23 +41,83 @@ export const BASEMAPS = {
   },
 } as const;
 
+/** Aerial photography, and the road and place-name overlay that pairs with it. */
+const AERIAL = `${ARCGIS}/World_Imagery/MapServer/tile/{z}/{y}/{x}`;
+const AERIAL_LABELS = `${ARCGIS}/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}`;
+
+/**
+ * How deep each service actually has tiles over the Philippines.
+ *
+ * Measured against each service's own placeholder image, not read off the
+ * advertised tiling scheme — every one of these claims 23 levels, and past its
+ * real data each answers 200 with "Map data not yet available" drawn into the
+ * tile. Nothing errors, so the only symptom is that text tiled across the map.
+ *
+ * Canvas is the strict one: it simply stops at 16, which is below the zoom the
+ * page uses to frame a chosen location.
+ */
+const CANVAS_MAX_ZOOM = 16;
+/** Aerial has 18 everywhere in the country and 19 only over the metros. */
+const AERIAL_NATIVE_MAX = 18;
+/** The label overlay thins out a level sooner than the imagery under it. */
+const LABELS_NATIVE_MAX = 17;
+
+/** As far as the map lets anyone zoom. */
+export const MAX_ZOOM = 19;
+
 /** Credit required by the tile service. */
 export const TILE_ATTRIBUTION =
   'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, HERE, Garmin, ' +
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, and the GIS user community';
 
+/** Takes the glare off the aerial tiles so they sit in a dark page. */
+const DARK_AERIAL_CLASS = 'lcpnap-aerial-dark';
+
+const ensureDarkAerialStyle = () => {
+  const id = 'lcpnap-aerial-dark-style';
+  if (document.getElementById(id)) return;
+
+  const style = document.createElement('style');
+  style.id = id;
+  // On the layer container, so it dims the photography without touching the
+  // markers — those live in a different Leaflet pane.
+  style.textContent = `.${DARK_AERIAL_CLASS} { filter: brightness(0.72) saturate(0.85); }`;
+  document.head.appendChild(style);
+};
+
 /**
  * The basemap for a theme, as one removable unit.
  *
- * A LayerGroup rather than two loose layers so the theme switch stays a single
- * add and a single remove — with two, forgetting one leaves the old labels
- * printed over the new map.
+ * A LayerGroup rather than loose layers so the theme switch stays a single add
+ * and a single remove — miss one and the old labels stay printed over the new
+ * map.
+ *
+ * Two tiers, because no single free service covers the whole range. The grey
+ * canvas is the better overview and is what the country-wide view shows, but it
+ * has nothing below z16; from z17 the aerial takes over, which is also the more
+ * useful thing to be looking at when the job is placing a pole. Each layer is
+ * capped at the zoom it genuinely has, and maxNativeZoom stretches the last real
+ * tile for the rest — so a missing tile is never requested and that placeholder
+ * can no longer appear.
  */
 export const createBasemap = (isDark: boolean): L.LayerGroup => {
   const theme = isDark ? BASEMAPS.dark : BASEMAPS.light;
+  if (isDark) ensureDarkAerialStyle();
+
   return L.layerGroup([
-    L.tileLayer(theme.base, { attribution: TILE_ATTRIBUTION, maxZoom: 19 }),
-    L.tileLayer(theme.reference, { maxZoom: 19 }),
+    L.tileLayer(theme.base, { attribution: TILE_ATTRIBUTION, maxZoom: CANVAS_MAX_ZOOM }),
+    L.tileLayer(theme.reference, { maxZoom: CANVAS_MAX_ZOOM }),
+    L.tileLayer(AERIAL, {
+      minZoom: CANVAS_MAX_ZOOM + 1,
+      maxZoom: MAX_ZOOM,
+      maxNativeZoom: AERIAL_NATIVE_MAX,
+      className: isDark ? DARK_AERIAL_CLASS : '',
+    }),
+    L.tileLayer(AERIAL_LABELS, {
+      minZoom: CANVAS_MAX_ZOOM + 1,
+      maxZoom: MAX_ZOOM,
+      maxNativeZoom: LABELS_NATIVE_MAX,
+    }),
   ]);
 };
 
