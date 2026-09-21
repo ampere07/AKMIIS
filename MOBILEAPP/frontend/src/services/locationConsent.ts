@@ -17,6 +17,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /** Remembers that the user has seen the disclosure and made a choice. */
 const CONSENT_KEY = 'locationDisclosureConsent';
+/**
+ * Remembers the answer to the *background* ("Allow all the time") step separately.
+ * Android 11+ never shows an in-place prompt for background, so declining it leaves the
+ * OS state untouched and `canAskAgain` stays true forever — without our own record we
+ * would re-show the background disclosure on every single app launch.
+ */
+const BG_CONSENT_KEY = 'locationDisclosureBackgroundConsent';
 
 export type LocationConsent = 'granted' | 'declined';
 export type DisclosureStage = 'disclosure' | 'background';
@@ -30,20 +37,29 @@ export function registerDisclosureHost(fn: ShowDisclosure | null): void {
     showDisclosure = fn;
 }
 
-export async function getStoredConsent(): Promise<LocationConsent | null> {
+export async function getStoredConsent(key: string = CONSENT_KEY): Promise<LocationConsent | null> {
     try {
-        const value = await AsyncStorage.getItem(CONSENT_KEY);
+        const value = await AsyncStorage.getItem(key);
         return value === 'granted' || value === 'declined' ? value : null;
     } catch {
         return null;
     }
 }
 
-async function setStoredConsent(value: LocationConsent): Promise<void> {
+async function setStoredConsent(value: LocationConsent, key: string = CONSENT_KEY): Promise<void> {
     try {
-        await AsyncStorage.setItem(CONSENT_KEY, value);
+        await AsyncStorage.setItem(key, value);
     } catch {
         // Non-fatal: the user is simply asked again next time.
+    }
+}
+
+/** Clears both consent records so the disclosure is shown afresh (e.g. on logout). */
+export async function resetStoredConsent(): Promise<void> {
+    try {
+        await AsyncStorage.multiRemove([CONSENT_KEY, BG_CONSENT_KEY]);
+    } catch {
+        // Non-fatal.
     }
 }
 
@@ -75,7 +91,7 @@ export async function ensureLocationPermission(options: EnsureOptions = {}): Pro
         // Already granted: the disclosure was shown before this was granted, so there is
         // nothing to disclose again for foreground use.
         if (current.status === 'granted') {
-            if (background) await ensureBackgroundPermission();
+            if (background) await ensureBackgroundPermission(reAskIfDeclined);
             return true;
         }
 
@@ -102,7 +118,7 @@ export async function ensureLocationPermission(options: EnsureOptions = {}): Pro
         const result = await Location.requestForegroundPermissionsAsync();
         if (result.status !== 'granted') return false;
 
-        if (background) await ensureBackgroundPermission();
+        if (background) await ensureBackgroundPermission(reAskIfDeclined);
         return true;
     } catch {
         return false;
@@ -115,23 +131,36 @@ export async function ensureLocationPermission(options: EnsureOptions = {}): Pro
  * Android 11+ does not show an in-place prompt for this — it sends the user to a system
  * settings page — so without a lead-in most people never find "Allow all the time".
  *
+ * @param reAskIfDeclined Show the background disclosure again to someone who already
+ *   declined it. False for automatic flows (app launch), so they do not nag; true when
+ *   the user explicitly asked for something that needs background location.
  * @returns true when background permission ends up granted.
  */
-export async function ensureBackgroundPermission(): Promise<boolean> {
+export async function ensureBackgroundPermission(reAskIfDeclined = true): Promise<boolean> {
     try {
         const current = await Location.getBackgroundPermissionsAsync();
         if (current.status === 'granted') return true;
         if (!current.canAskAgain) return false;
 
+        const stored = await getStoredConsent(BG_CONSENT_KEY);
+        if (stored === 'declined' && !reAskIfDeclined) return false;
+
         if (showDisclosure) {
             const proceed = await showDisclosure('background');
             // Declining the background step is not a refusal of location altogether;
             // the foreground grant already given stays in force.
-            if (!proceed) return false;
+            if (!proceed) {
+                await setStoredConsent('declined', BG_CONSENT_KEY);
+                return false;
+            }
         }
 
         const result = await Location.requestBackgroundPermissionsAsync();
-        return result.status === 'granted';
+        const granted = result.status === 'granted';
+        // Record the outcome either way: someone who walked through the settings screen
+        // and still did not pick "Allow all the time" has effectively declined.
+        await setStoredConsent(granted ? 'granted' : 'declined', BG_CONSENT_KEY);
+        return granted;
     } catch {
         return false;
     }

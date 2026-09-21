@@ -1,8 +1,12 @@
 import { registerRootComponent } from 'expo';
 
-// Temporarily disabled for Play Store review — do not register the location task
-// (technician live-location tracking is off until location permissions are re-added).
-// import './src/services/locationTask';
+// Registers the technician background-location task. This import MUST stay here, above
+// the App import: TaskManager.defineTask has to run during bundle evaluation, in true
+// global scope, so the OS can hand positions to the task on a headless background
+// relaunch (when no React tree is mounted). Relying on the App -> Dashboard -> hook
+// import chain to pull it in works by accident and breaks the moment Dashboard is
+// lazy-loaded or the hook moves.
+import './src/services/locationTask';
 
 import App from './App';
 
