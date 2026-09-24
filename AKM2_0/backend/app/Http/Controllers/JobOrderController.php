@@ -796,7 +796,13 @@ class JobOrderController extends Controller
                 // Trigger RADIUS account creation
                 $radiusResult = $this->createRadiusAccountInternal($jobOrder);
                 if (!$radiusResult['success']) {
-                    $detailedError = $radiusResult['error'] ?? $radiusResult['message'] ?? 'radius api error occured contact support';
+                    // Keep the classification ('Failed to connect to RADIUS server', …) in
+                    // front of the raw device error: the catch below maps on it, and a bare
+                    // socket error such as "Connection timed out" matches none of its checks.
+                    $detailedError = implode(': ', array_filter([
+                        $radiusResult['message'] ?? null,
+                        $radiusResult['error'] ?? null,
+                    ])) ?: 'radius api error occured contact support';
                     \Log::channel('radiusrelated')->error('RADIUS Account Creation Failed during JobOrder Done', [
                         'job_order_id' => $id,
                         'radius_error' => $detailedError

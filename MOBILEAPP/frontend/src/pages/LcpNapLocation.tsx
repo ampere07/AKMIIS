@@ -662,10 +662,17 @@ const LcpNapLocation: React.FC = () => {
                 showsTraffic={false}
                 showsIndoors={false}
               >
+                {/*
+                  Two tiers, as on the web map (AKM2_0 config/osmMap.ts). Every ESRI
+                  service here answers past its real data with a 200 tile reading
+                  "Map data not yet available", so each is capped at the zoom it truly
+                  has over the Philippines: the grey canvas stops at 16, and from 17 the
+                  aerial takes over, with maximumNativeZ stretching its last real tile.
+                */}
                 {/* ESRI ArcGIS World Light Gray Base — free tiles, no API key, designed for app use, hides POIs */}
                 <UrlTile
                   urlTemplate="https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
-                  maximumZ={19}
+                  maximumZ={16}
                   flipY={false}
                   tileSize={256}
                   // @ts-ignore
@@ -674,7 +681,29 @@ const LcpNapLocation: React.FC = () => {
                 {/* ESRI ArcGIS World Light Gray Reference — provides clean labels without POIs */}
                 <UrlTile
                   urlTemplate="https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
+                  maximumZ={16}
+                  flipY={false}
+                  tileSize={256}
+                  // @ts-ignore
+                  zIndex={-1}
+                />
+                {/* ESRI World Imagery — real tiles to 18 across the country (19 only over the metros) */}
+                <UrlTile
+                  urlTemplate="https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                  minimumZ={17}
                   maximumZ={19}
+                  maximumNativeZ={18}
+                  flipY={false}
+                  tileSize={256}
+                  // @ts-ignore
+                  zIndex={-2}
+                />
+                {/* ESRI World Transportation — road and place-name overlay for the imagery; thins out after 17 */}
+                <UrlTile
+                  urlTemplate="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}"
+                  minimumZ={17}
+                  maximumZ={19}
+                  maximumNativeZ={17}
                   flipY={false}
                   tileSize={256}
                   // @ts-ignore
