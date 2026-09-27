@@ -10,6 +10,12 @@ import AddLcpNapLocationModal from '../modals/AddLcpNapLocationModal';
 import LcpNapLocationDetails from '../components/LcpNapLocationDetails';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import apiClient from '../config/api';
+import {
+  AERIAL_SERVICE,
+  AERIAL_LABELS_SERVICE,
+  AERIAL_FLOOR_ZOOM,
+  nativeZoomAt,
+} from '../config/esriCoverage';
 import axios from 'axios';
 
 // ─── Interfaces ────────────────────────────────────────────────────────────────
@@ -237,6 +243,12 @@ const LcpNapLocation: React.FC = () => {
   // Pin dropped at the searched place so the user can see exactly where they navigated to
   const [searchedPlacePin, setSearchedPlacePin] = useState<{ latitude: number; longitude: number; title: string } | null>(null);
 
+  // How deep the aerial tier may be asked for over the area on screen. Starts at
+  // the pessimistic floor and is raised per area by the coverage lookup — see
+  // config/esriCoverage.ts for why a fixed number cannot work here.
+  const [aerialNativeZ, setAerialNativeZ] = useState(AERIAL_FLOOR_ZOOM);
+  const [labelsNativeZ, setLabelsNativeZ] = useState(AERIAL_FLOOR_ZOOM);
+
   const mapRef = useRef<MapView>(null);
   const { width } = useWindowDimensions();
   const isTablet = width >= 768;
@@ -250,6 +262,36 @@ const LcpNapLocation: React.FC = () => {
   });
 
   const skipShowSuggestionsRef = useRef(false);
+
+  /**
+   * Keep the aerial tier on the depth the area under the camera actually has.
+   *
+   * Raises the cap where the imagery is deep (19 over the metros) and lowers it
+   * on the way into thinner coverage, so a tile the service does not hold is
+   * never requested and its "Map data not yet available" placeholder cannot be
+   * drawn. The map stretches the last real tile over the levels past the cap, so
+   * the deep end goes soft rather than blank.
+   *
+   * Answers are cached per area, so panning around one town costs one lookup,
+   * not one per camera move.
+   */
+  useEffect(() => {
+    let current = true;
+
+    Promise.all([
+      nativeZoomAt(AERIAL_SERVICE, mapCenter.latitude, mapCenter.longitude),
+      nativeZoomAt(AERIAL_LABELS_SERVICE, mapCenter.latitude, mapCenter.longitude),
+    ]).then(([aerial, labels]) => {
+      // The map has already moved on to another area.
+      if (!current) return;
+      setAerialNativeZ(aerial);
+      setLabelsNativeZ(labels);
+    });
+
+    return () => {
+      current = false;
+    };
+  }, [mapCenter.latitude, mapCenter.longitude]);
 
   // Initialization
   useEffect(() => {
@@ -665,9 +707,10 @@ const LcpNapLocation: React.FC = () => {
                 {/*
                   Two tiers, as on the web map (AKM2_0 config/osmMap.ts). Every ESRI
                   service here answers past its real data with a 200 tile reading
-                  "Map data not yet available", so each is capped at the zoom it truly
-                  has over the Philippines: the grey canvas stops at 16, and from 17 the
-                  aerial takes over, with maximumNativeZ stretching its last real tile.
+                  "Map data not yet available", so none is asked for a tile it does not
+                  hold: the grey canvas stops at 16 nationwide and is capped outright,
+                  and from 17 the aerial takes over at whatever depth the area on screen
+                  actually has — see config/esriCoverage.ts.
                 */}
                 {/* ESRI ArcGIS World Light Gray Base — free tiles, no API key, designed for app use, hides POIs */}
                 <UrlTile
@@ -687,23 +730,23 @@ const LcpNapLocation: React.FC = () => {
                   // @ts-ignore
                   zIndex={-1}
                 />
-                {/* ESRI World Imagery — real tiles to 18 across the country (19 only over the metros) */}
+                {/* ESRI World Imagery — depth varies by area, so maximumNativeZ is resolved rather than fixed */}
                 <UrlTile
                   urlTemplate="https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                   minimumZ={17}
                   maximumZ={19}
-                  maximumNativeZ={18}
+                  maximumNativeZ={aerialNativeZ}
                   flipY={false}
                   tileSize={256}
                   // @ts-ignore
                   zIndex={-2}
                 />
-                {/* ESRI World Transportation — road and place-name overlay for the imagery; thins out after 17 */}
+                {/* ESRI World Transportation — road and place-name overlay for the imagery; thinner again than the imagery */}
                 <UrlTile
                   urlTemplate="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}"
                   minimumZ={17}
                   maximumZ={19}
-                  maximumNativeZ={17}
+                  maximumNativeZ={labelsNativeZ}
                   flipY={false}
                   tileSize={256}
                   // @ts-ignore

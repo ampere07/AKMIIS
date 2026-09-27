@@ -45,30 +45,181 @@ export const BASEMAPS = {
 const AERIAL = `${ARCGIS}/World_Imagery/MapServer/tile/{z}/{y}/{x}`;
 const AERIAL_LABELS = `${ARCGIS}/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}`;
 
+/** The services behind those tile templates, for the coverage lookup below. */
+const AERIAL_SERVICE = `${ARCGIS}/World_Imagery/MapServer`;
+const AERIAL_LABELS_SERVICE = `${ARCGIS}/Reference/World_Transportation/MapServer`;
+
 /**
  * How deep each service actually has tiles over the Philippines.
  *
- * Measured against each service's own placeholder image, not read off the
- * advertised tiling scheme — every one of these claims 23 levels, and past its
- * real data each answers 200 with "Map data not yet available" drawn into the
- * tile. Nothing errors, so the only symptom is that text tiled across the map.
+ * Every one of these advertises 23 levels, and past its real data each answers
+ * 200 with "Map data not yet available" drawn into the tile. Nothing errors, so
+ * the only symptom is that text tiled across the map.
  *
- * Canvas is the strict one: it simply stops at 16, which is below the zoom the
- * page uses to frame a chosen location.
+ * Canvas is the simple one — it stops at 16 nationwide, so a plain cap is all
+ * it needs. The aerial and its label overlay are not: their depth is regional
+ * and does not track how built-up a place is. World_Imagery has 19 over Manila,
+ * 18 over rural Isabela, and only 17 over Sulu and Palawan. That is why the
+ * single hardcoded number this used to carry could not hold — wherever it
+ * overshot the real coverage, the placeholder came back. Those two are resolved
+ * per area instead, against the service's own tilemap; see nativeZoomAt.
  */
 const CANVAS_MAX_ZOOM = 16;
-/** Aerial has 18 everywhere in the country and 19 only over the metros. */
-const AERIAL_NATIVE_MAX = 18;
-/** The label overlay thins out a level sooner than the imagery under it. */
-const LABELS_NATIVE_MAX = 17;
+
+/**
+ * The shallowest depth the aerial tier is assumed to have anywhere in the
+ * country, used until a lookup says otherwise. Deliberately pessimistic: it is
+ * what the first paint of a new area draws with, so it has to be a zoom that is
+ * there, not one that usually is.
+ */
+const AERIAL_FLOOR_ZOOM = 17;
 
 /** As far as the map lets anyone zoom. */
 export const MAX_ZOOM = 19;
+
+/**
+ * Nothing sensible is served shallower than this, so a lookup that keeps
+ * missing stops here rather than walking to the top of the world.
+ */
+const COVERAGE_FLOOR_ZOOM = 12;
 
 /** Credit required by the tile service. */
 export const TILE_ATTRIBUTION =
   'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, HERE, Garmin, ' +
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, and the GIS user community';
+
+/** Slippy-map tile column for a longitude at a zoom. */
+const tileX = (lon: number, z: number) => Math.floor(((lon + 180) / 360) * 2 ** z);
+
+/** Slippy-map tile row for a latitude at a zoom. */
+const tileY = (lat: number, z: number) => {
+  const rad = (lat * Math.PI) / 180;
+  return Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * 2 ** z);
+};
+
+/**
+ * One resolved area, keyed by the z10 tile it falls in — about 40km across,
+ * coarse enough that panning around a town reuses the answer and fine enough
+ * not to span a coverage boundary. Kept for the life of the page; coverage does
+ * not change while someone is looking at it.
+ */
+const coverageCache = new Map<string, Promise<number>>();
+
+/**
+ * Whether a service has real tiles across a block, by asking it.
+ *
+ * ESRI's tilemap endpoint answers with a 1 or a 0 per tile, which is the only
+ * honest way to tell a real tile from the placeholder: the tile endpoint itself
+ * returns 200 either way, so there is nothing for Leaflet's tileerror to catch
+ * and nothing to read off the image without drawing it to a canvas first.
+ *
+ * A block rather than the single centre tile, because a view straddling a
+ * coverage edge would otherwise be told the whole screen is covered and show
+ * the placeholder across half of it. Four tiles square is about a viewport.
+ */
+const blockIsCovered = async (service: string, z: number, lat: number, lon: number) => {
+  const span = 4;
+  const y = Math.max(0, tileY(lat, z) - span / 2);
+  const x = Math.max(0, tileX(lon, z) - span / 2);
+
+  const response = await fetch(`${service}/tilemap/${z}/${y}/${x}/${span}/${span}`);
+  if (!response.ok) return false;
+
+  const body = await response.json();
+  return (
+    Array.isArray(body.data) &&
+    body.data.length > 0 &&
+    body.data.every((present: number) => present === 1)
+  );
+};
+
+/**
+ * The deepest zoom a service genuinely has over a point.
+ *
+ * Walks down from the deepest zoom the map can reach until the service admits
+ * to the tiles, so each place keeps every level it really has. Capping the
+ * country at its thinnest coverage instead would have been the simpler fix, but
+ * it blurs Manila — where the pins are densest — to spare Palawan.
+ *
+ * The in-flight promise is what gets cached, not its result, so the two layers
+ * and the repeated camera moves that ask about one area at the same moment
+ * share a single round trip.
+ */
+const nativeZoomAt = (service: string, lat: number, lon: number): Promise<number> => {
+  const key = `${service}@${tileY(lat, 10)}/${tileX(lon, 10)}`;
+  const cached = coverageCache.get(key);
+  if (cached) return cached;
+
+  const resolved = (async () => {
+    for (let z = MAX_ZOOM; z > COVERAGE_FLOOR_ZOOM; z--) {
+      try {
+        if (await blockIsCovered(service, z, lat, lon)) return z;
+      } catch {
+        // The lookup is an optimisation, not a requirement. If it cannot be
+        // reached, leave the layer on the floor it started at — a slightly soft
+        // map is the failure anyone would pick over the placeholder.
+        return AERIAL_FLOOR_ZOOM;
+      }
+    }
+    return COVERAGE_FLOOR_ZOOM;
+  })();
+
+  coverageCache.set(key, resolved);
+  return resolved;
+};
+
+/**
+ * A tile layer that only ever asks for tiles the service has.
+ *
+ * It starts at the pessimistic floor, raises maxNativeZoom to whatever the area
+ * on screen actually holds, and lowers it again on the way into thinner
+ * coverage. Leaflet stretches the last real tile over the levels past that, so
+ * the deep end of the map goes soft instead of going blank.
+ */
+class CoverageCappedTileLayer extends L.TileLayer {
+  private readonly service: string;
+
+  /** Guards against a slow lookup for an area the map has already left. */
+  private probe = 0;
+
+  constructor(url: string, service: string, options: L.TileLayerOptions) {
+    super(url, { ...options, maxNativeZoom: AERIAL_FLOOR_ZOOM });
+    this.service = service;
+  }
+
+  onAdd(map: L.Map) {
+    super.onAdd(map);
+    map.on('moveend', this.syncCoverage, this);
+    this.syncCoverage();
+    return this;
+  }
+
+  onRemove(map: L.Map) {
+    map.off('moveend', this.syncCoverage, this);
+    super.onRemove(map);
+    return this;
+  }
+
+  private syncCoverage() {
+    const map = this._map;
+    if (!map) return;
+
+    const centre = map.getCenter();
+    const probe = ++this.probe;
+
+    void nativeZoomAt(this.service, centre.lat, centre.lng).then((native) => {
+      // A newer lookup has since started, or the layer was removed while this
+      // one was in flight.
+      if (probe !== this.probe || !this._map) return;
+
+      const capped = Math.min(native, MAX_ZOOM);
+      if (this.options.maxNativeZoom === capped) return;
+
+      this.options.maxNativeZoom = capped;
+      this.redraw();
+    });
+  }
+}
 
 /** Takes the glare off the aerial tiles so they sit in a dark page. */
 const DARK_AERIAL_CLASS = 'lcpnap-aerial-dark';
@@ -95,10 +246,10 @@ const ensureDarkAerialStyle = () => {
  * Two tiers, because no single free service covers the whole range. The grey
  * canvas is the better overview and is what the country-wide view shows, but it
  * has nothing below z16; from z17 the aerial takes over, which is also the more
- * useful thing to be looking at when the job is placing a pole. Each layer is
- * capped at the zoom it genuinely has, and maxNativeZoom stretches the last real
- * tile for the rest — so a missing tile is never requested and that placeholder
- * can no longer appear.
+ * useful thing to be looking at when the job is placing a pole. The canvas is
+ * capped outright at the zoom it has; the aerial pair works out per area how
+ * deep it can go, so a tile the service does not hold is never requested and
+ * that placeholder cannot appear.
  */
 export const createBasemap = (isDark: boolean): L.LayerGroup => {
   const theme = isDark ? BASEMAPS.dark : BASEMAPS.light;
@@ -107,16 +258,14 @@ export const createBasemap = (isDark: boolean): L.LayerGroup => {
   return L.layerGroup([
     L.tileLayer(theme.base, { attribution: TILE_ATTRIBUTION, maxZoom: CANVAS_MAX_ZOOM }),
     L.tileLayer(theme.reference, { maxZoom: CANVAS_MAX_ZOOM }),
-    L.tileLayer(AERIAL, {
+    new CoverageCappedTileLayer(AERIAL, AERIAL_SERVICE, {
       minZoom: CANVAS_MAX_ZOOM + 1,
       maxZoom: MAX_ZOOM,
-      maxNativeZoom: AERIAL_NATIVE_MAX,
       className: isDark ? DARK_AERIAL_CLASS : '',
     }),
-    L.tileLayer(AERIAL_LABELS, {
+    new CoverageCappedTileLayer(AERIAL_LABELS, AERIAL_LABELS_SERVICE, {
       minZoom: CANVAS_MAX_ZOOM + 1,
       maxZoom: MAX_ZOOM,
-      maxNativeZoom: LABELS_NATIVE_MAX,
     }),
   ]);
 };
