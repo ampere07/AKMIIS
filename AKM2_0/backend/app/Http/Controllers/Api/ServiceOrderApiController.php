@@ -1106,11 +1106,15 @@ class ServiceOrderApiController extends Controller
 
             $isAlreadyResolvedReconnect = (($originalConcern === 'Reconnect' || $originalConcern === 'Upgrade/Downgrade Plan') && $originalSupportStatus === 'resolved');
             $isAlreadyResolvedRestrict = (($originalConcern === 'Restrict' || $originalConcern === 'Disconnect') && $originalSupportStatus === 'resolved');
-            $pulloutCategories = ['pullout', 'for pullout'];
-            $isAlreadyPulloutDone = (
-                    in_array(strtolower(trim($originalRepairCategory)), $pulloutCategories, true)
-                    || in_array(strtolower(trim($originalConcern)), $pulloutCategories, true)
-                ) && $originalVisitStatus === 'done';
+            // Mirrors the trigger below, by asking the same object the same
+            // question against the row as it was BEFORE this write. Its job is to
+            // stop a re-save of a finished pullout from running it a second time,
+            // so it has to agree with the trigger or it will suppress a pullout
+            // that has not happened yet.
+            $isAlreadyPulloutDone = \App\Support\PulloutCategory::deactivatesPortalLogin(
+                $originalRepairCategory,
+                $originalVisitStatus
+            );
             $isAlreadyMigrationDone = (in_array($originalRepairCategory, ['migrate', 'relocate', 'relocate router', 'transfer lcp/nap/port']) && $originalVisitStatus === 'done');
 
             $reconnectStatus = null;
@@ -1215,9 +1219,37 @@ class ServiceOrderApiController extends Controller
                 $repairCategory = strtolower(trim($serviceOrder->repair_category));
             }
 
-            $pulloutCategories = ['pullout', 'for pullout'];
-            $pulloutConcern = strtolower(trim((string) ($serviceOrder->concern ?? $request->input('concern') ?? '')));
-            if ((in_array($repairCategory, $pulloutCategories, true) || in_array($pulloutConcern, $pulloutCategories, true)) && $visitStatus === 'done' && !$isAlreadyPulloutDone) {
+            // The pullout itself is decided on what the ticket says AFTER this
+            // request's write, not on $request and not on the pre-update copy above.
+            //
+            // This is the write that disables the customer's portal login, so the
+            // request-or-stored fallbacks are too loose for it in both directions:
+            //   • a request that only sets the category to Pullout would inherit a
+            //     'Done' left behind by an earlier, unrelated visit, and disable the
+            //     login without any pullout visit having been completed;
+            //   • a request that merely claims visit_status=Done would be trusted
+            //     even if that value never reached the row.
+            // Reading the row back closes both: no completed pullout visit on the
+            // record, no deactivation.
+            $pulloutRow = DB::table('service_orders')->where('id', $id)->first();
+            $pulloutVisitStatus = strtolower(trim((string) ($pulloutRow->visit_status ?? '')));
+            $pulloutRepairCategory = strtolower(trim((string) ($pulloutRow->repair_category ?? '')));
+
+            // The REPAIR CATEGORY decides this, and nothing else. Every spelling
+            // of it — "Pullout", "Pull Out", "for pullout" — is one instruction;
+            // see App\Support\PulloutCategory, which holds the whole rule.
+            //
+            // Consequence worth knowing: AutoDisconnectService::createPulloutRequest
+            // raises its tickets with concern = 'for pullout' and no category, so
+            // closing one of those disables the login only if the technician picks
+            // Pullout as the Repair Category — it is a choice now rather than an
+            // inference.
+            $isPulloutVisitDone = \App\Support\PulloutCategory::deactivatesPortalLogin(
+                $pulloutRepairCategory,
+                $pulloutVisitStatus
+            );
+
+            if ($isPulloutVisitDone && !$isAlreadyPulloutDone) {
                 $billingAccount = BillingAccount::where('account_no', $serviceOrder->account_no)->first();
                 if ($billingAccount) {
                     \Log::info('Triggering auto-pullout for Service Order with Pullout repair category', [
