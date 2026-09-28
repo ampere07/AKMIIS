@@ -159,22 +159,22 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     // or to themselves when they belong to none, so this entry can never show
     // another team's documents.
     { id: 'agent-invoices', label: 'Invoices', icon: FileText, allowedRoles: ['agent'] },
-    {
-      id: 'agent-group',
-      label: 'Agent',
-      icon: UserCheck,
-      allowedRoles: ['administrator', 'superadmin'],
-      children: [
-        { id: 'commission', label: 'Pay Out/In', icon: DollarSign, allowedRoles: ['administrator', 'superadmin'] },
-        { id: 'team-agent', label: 'Team Agents', icon: Users, allowedRoles: ['administrator', 'superadmin'] },
-        { id: 'agent-management', label: 'Agent Management', icon: User, allowedRoles: ['administrator', 'superadmin'] },
-        { id: 'agent-payout', label: 'Agent Payout', icon: DollarSign, allowedRoles: ['administrator', 'superadmin'] },
-        // Weekly referral invoices, one per team and one per solo agent. The
-        // page is scoped server side, so an agent reaching it sees only their
-        // own team's invoices.
-        { id: 'agent-invoices', label: 'Invoices', icon: FileText, allowedRoles: ['administrator', 'superadmin'] }
-      ]
-    },
+    // {
+    //   id: 'agent-group',
+    //   label: 'Agent',
+    //   icon: UserCheck,
+    //   allowedRoles: ['administrator', 'superadmin'],
+    //   children: [
+    //     { id: 'commission', label: 'Pay Out/In', icon: DollarSign, allowedRoles: ['administrator', 'superadmin'] },
+    //     { id: 'team-agent', label: 'Team Agents', icon: Users, allowedRoles: ['administrator', 'superadmin'] },
+    //     { id: 'agent-management', label: 'Agent Management', icon: User, allowedRoles: ['administrator', 'superadmin'] },
+    //     { id: 'agent-payout', label: 'Agent Payout', icon: DollarSign, allowedRoles: ['administrator', 'superadmin'] },
+    //     // Weekly referral invoices, one per team and one per solo agent. The
+    //     // page is scoped server side, so an agent reaching it sees only their
+    //     // own team's invoices.
+    //     { id: 'agent-invoices', label: 'Invoices', icon: FileText, allowedRoles: ['administrator', 'superadmin'] }
+    //   ]
+    // },
     {
       id: 'inventory-group',
       label: 'Inventory',

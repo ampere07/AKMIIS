@@ -171,16 +171,16 @@ const Menu: React.FC<MenuProps> = ({ onLogout, onSectionChange }) => {
                     { id: 'staggered-payment', label: 'Staggered Payment', icon: CreditCard },
                 ]
             },
-            {
-                title: 'Agent',
-                items: [
-                    { id: 'commission', label: 'Pay Out/In', icon: DollarSign },
-                    { id: 'team-agent', label: 'Team Agents', icon: Users },
-                    { id: 'agent-management', label: 'Agent Management', icon: UserCog },
-                    { id: 'agent-payout', label: 'Agent Payout', icon: Wallet },
-                    { id: 'group-management', label: 'Affiliates', icon: Users },
-                ]
-            },
+            // {
+            //     title: 'Agent',
+            //     items: [
+            //         { id: 'commission', label: 'Pay Out/In', icon: DollarSign },
+            //         { id: 'team-agent', label: 'Team Agents', icon: Users },
+            //         { id: 'agent-management', label: 'Agent Management', icon: UserCog },
+            //         { id: 'agent-payout', label: 'Agent Payout', icon: Wallet },
+            //         { id: 'group-management', label: 'Affiliates', icon: Users },
+            //     ]
+            // },
             {
                 title: 'Inventory',
                 items: [
@@ -218,7 +218,7 @@ const Menu: React.FC<MenuProps> = ({ onLogout, onSectionChange }) => {
                     { id: 'user-management', label: 'Users Management', icon: Users },
                     { id: 'tech-users', label: 'Tech Users', icon: Wrench },
                     { id: 'organizations', label: 'Organizations', icon: Building },
-                    { id: 'roles', label: 'Roles', icon: Shield },
+                    // { id: 'roles', label: 'Roles', icon: Shield },
                 ]
             },
             {
