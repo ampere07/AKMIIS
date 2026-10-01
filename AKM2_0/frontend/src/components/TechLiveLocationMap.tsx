@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshCw, Users } from 'lucide-react';
+import { Eye, EyeOff, RefreshCw, Users } from 'lucide-react';
 import pusher from '../services/pusherService';
 import apiClient from '../config/api';
 import { ColorPalette } from '../services/settingsColorPaletteService';
@@ -31,6 +31,17 @@ interface Props {
 // Must match the backend stale window (TechnicianLocationController::STALE_SECONDS).
 const STALE_MS = 2 * 60 * 1000;
 const MANILA: [number, number] = [14.5995, 120.9842];
+const HIDDEN_KEY = 'techLiveMap.hiddenIds';
+
+function loadHiddenIds(): Set<number> {
+  try {
+    const raw = localStorage.getItem(HIDDEN_KEY);
+    const ids = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(ids) ? ids.map(Number).filter((n) => !isNaN(n)) : []);
+  } catch (e) {
+    return new Set();
+  }
+}
 
 const STATUS_COLORS: Record<string, string> = {
   online: '#22c55e',
@@ -111,6 +122,29 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
 
   // Single-select technician whose daily trail is shown (null = none).
   const [selectedTechId, setSelectedTechId] = useState<number | null>(null);
+
+  // Technicians hidden from the map by the viewer (remembered per browser).
+  const [hiddenIds, setHiddenIds] = useState<Set<number>>(loadHiddenIds);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(HIDDEN_KEY, JSON.stringify(Array.from(hiddenIds)));
+    } catch (e) {
+      /* ignore storage errors */
+    }
+  }, [hiddenIds]);
+
+  const toggleHidden = (userId: number) => {
+    const willHide = !hiddenIds.has(userId);
+    setHiddenIds((prev) => {
+      const next = new Set(prev);
+      if (willHide) next.add(userId);
+      else next.delete(userId);
+      return next;
+    });
+    // A hidden technician can't keep its trail on the map.
+    if (willHide && selectedTechId === userId) setSelectedTechId(null);
+  };
 
   // Merge polled snapshots with live Pusher pushes into one map keyed by user_id.
   const [techs, setTechs] = useState<Record<number, TechLocation>>({});
@@ -246,6 +280,7 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
 
     techList.forEach((tech) => {
       if (tech.latitude == null || tech.longitude == null) return;
+      if (hiddenIds.has(tech.user_id)) return;
       seen.add(tech.user_id);
       const status = liveStatus(tech, nowTick);
       const color = STATUS_COLORS[status] || STATUS_COLORS.offline;
@@ -335,7 +370,7 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [techList, ready, nowTick, isDarkMode]);
+  }, [techList, ready, nowTick, isDarkMode, hiddenIds]);
 
   // 6) Draw the selected technician's daily trail; refresh it as new points arrive.
   useEffect(() => {
@@ -368,6 +403,12 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
     });
     return { online, stale, offline, total: techList.length };
   }, [techList, nowTick]);
+
+  // Only count hidden technicians that are actually in the current list.
+  const hiddenCount = useMemo(
+    () => techList.filter((t) => hiddenIds.has(t.user_id)).length,
+    [techList, hiddenIds],
+  );
 
   return (
     <div className="relative w-full h-full" style={{ minHeight: 360 }}>
@@ -405,22 +446,47 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
           {/* Right: pick ONE technician to show today's trail */}
           {counts.total > 0 && (
             <div className={`pl-3 border-l ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`} style={{ minWidth: 150 }}>
-              <div className="font-semibold mb-1 opacity-80">Show trail (today)</div>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span className="font-semibold opacity-80">Show trail (today)</span>
+                {hiddenCount > 0 && (
+                  <button
+                    type="button"
+                    className="text-[11px] font-medium hover:underline"
+                    style={{ color: colorPalette?.primary || '#7c3aed' }}
+                    onClick={() => setHiddenIds(new Set())}
+                  >
+                    Show all ({hiddenCount})
+                  </button>
+                )}
+              </div>
               <div className="overflow-y-auto pr-1 space-y-0.5" style={{ maxHeight: 150 }}>
                 {techList.map((t) => {
                   const s = liveStatus(t, nowTick);
                   const checked = selectedTechId === t.user_id;
+                  const hidden = hiddenIds.has(t.user_id);
                   return (
-                    <label key={t.user_id} className="flex items-center gap-1.5 cursor-pointer py-0.5">
-                      <input
-                        type="checkbox"
-                        className="cursor-pointer"
-                        checked={checked}
-                        onChange={() => setSelectedTechId(checked ? null : t.user_id)}
-                      />
-                      <i className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ background: STATUS_COLORS[s] || STATUS_COLORS.offline }} />
-                      <span className="truncate" style={{ maxWidth: 120 }}>{t.full_name}</span>
-                    </label>
+                    <div key={t.user_id} className="flex items-center gap-1 py-0.5">
+                      <label className={`flex items-center gap-1.5 flex-1 min-w-0 ${hidden ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+                        <input
+                          type="checkbox"
+                          className={hidden ? 'cursor-not-allowed' : 'cursor-pointer'}
+                          checked={checked}
+                          disabled={hidden}
+                          onChange={() => setSelectedTechId(checked ? null : t.user_id)}
+                        />
+                        <i className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ background: STATUS_COLORS[s] || STATUS_COLORS.offline }} />
+                        <span className="truncate" style={{ maxWidth: 120 }}>{t.full_name}</span>
+                      </label>
+                      <button
+                        type="button"
+                        className={`flex-shrink-0 p-0.5 rounded ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} ${hidden ? 'opacity-60' : ''}`}
+                        title={hidden ? 'Show on map' : 'Hide from map'}
+                        aria-label={hidden ? `Show ${t.full_name} on map` : `Hide ${t.full_name} from map`}
+                        onClick={() => toggleHidden(t.user_id)}
+                      >
+                        {hidden ? <EyeOff size={13} /> : <Eye size={13} />}
+                      </button>
+                    </div>
                   );
                 })}
               </div>

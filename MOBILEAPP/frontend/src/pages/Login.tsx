@@ -378,6 +378,12 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
             >
               <Text style={{ color: '#ffffff', fontSize: 16, fontWeight: '700' }}>APPLY NOW</Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => Linking.openURL('https://akmiis.com/privacyakm.php')}
+              style={{ marginTop: 24 }}
+            >
+              <Text style={{ color: '#6b7280', fontSize: 13, textDecorationLine: 'underline' }}>Privacy Policy</Text>
+            </TouchableOpacity>
           </View>
 
         </ScrollView>

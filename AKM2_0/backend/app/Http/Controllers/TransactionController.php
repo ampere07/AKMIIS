@@ -137,6 +137,7 @@ class TransactionController extends Controller
                 'remarks' => 'nullable|string',
                 'status' => 'nullable|string|max:100',
                 'image_url' => 'nullable|string|max:255',
+                'proof_payment_url' => 'nullable|url|max:255',
                 'auto_apply_payment' => 'nullable|boolean',
             ]);
 
@@ -874,6 +875,7 @@ class TransactionController extends Controller
                 'or_no' => 'nullable|string|max:255',
                 'remarks' => 'nullable|string',
                 'image_url' => 'nullable|string|max:255',
+                'proof_payment_url' => 'nullable|url|max:255',
             ]);
 
             DB::beginTransaction();
@@ -889,6 +891,7 @@ class TransactionController extends Controller
             }
 
             if ($transaction->status !== 'Pending') {
+                DB::rollBack();
                 return response()->json([
                     'success' => false,
                     'message' => 'Only pending transactions can be edited'
@@ -1156,28 +1159,38 @@ class TransactionController extends Controller
     public function uploadImages(Request $request): JsonResponse
     {
         try {
+            // The proof of payment is the only file this endpoint handles, so a request without
+            // it is an error rather than an empty success the form would silently save past.
+            if (!$request->hasFile('payment_proof_image') || !$request->file('payment_proof_image')->isValid()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No valid proof of payment image was received'
+                ], 422);
+            }
+
             $folderName = $request->input('folder_name', 'transactions');
 
             $googleDriveService = new \App\Services\GoogleDriveService();
             $folderId = $googleDriveService->createFolder($folderName);
 
-            $imageUrls = [];
+            $file = $request->file('payment_proof_image');
+            $fileName = 'payment_proof_' . time() . '.' . $file->getClientOriginalExtension();
 
-            if ($request->hasFile('payment_proof_image')) {
-                $file = $request->file('payment_proof_image');
-                $fileName = 'payment_proof_' . time() . '.' . $file->getClientOriginalExtension();
+            $fileUrl = $googleDriveService->uploadFile(
+                $file,
+                $folderId,
+                $fileName,
+                $file->getMimeType()
+            );
 
-                $fileUrl = $googleDriveService->uploadFile(
-                    $file,
-                    $folderId,
-                    $fileName,
-                    $file->getMimeType()
-                );
-
-                if ($fileUrl) {
-                    $imageUrls['payment_proof_image_url'] = $fileUrl;
-                }
+            if (!$fileUrl) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Google Drive did not return a URL for the uploaded image'
+                ], 500);
             }
+
+            $imageUrls = ['payment_proof_image_url' => $fileUrl];
 
             return response()->json([
                 'success' => true,

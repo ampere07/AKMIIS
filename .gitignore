@@ -1,1 +1,4 @@
 MOBILEAPP/frontend/env
+
+# App Store Connect API keys
+*.p8

@@ -169,16 +169,21 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     const installationDate = customerDetail?.billingAccount?.dateInstalled || 'Pending';
     const balance = customerDetail?.billingAccount?.accountBalance || 0;
 
-    // Due Date: read from the latest invoice's due_date (not recalculated from billingDay)
+    // Due Date: read from the latest invoice's due_date (not recalculated from billingDay).
+    // The latest invoice is the most recently generated one (highest id), the same one the
+    // Invoices list shows first; the API orders by invoice_date only, with no tie-breaker.
+    const latestInvoice = [...(invoiceRecords || [])].sort((a: any, b: any) => {
+        const byId = Number(b.id || 0) - Number(a.id || 0);
+        if (byId !== 0) return byId;
+        return String(b.invoice_date || '').localeCompare(String(a.invoice_date || ''));
+    })[0] || null;
+
     let dueDateString = 'Upon Receipt';
-    if (invoiceRecords && invoiceRecords.length > 0) {
-        const latestInvoice = invoiceRecords[0]; // already sorted by date descending from the store
-        const rawDueDate = latestInvoice.due_date;
-        if (rawDueDate) {
-            const parsed = new Date(rawDueDate);
-            if (!isNaN(parsed.getTime())) {
-                dueDateString = parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-            }
+    if (latestInvoice?.due_date) {
+        // Read the date parts directly so the stored date is shown as-is, without a timezone shift.
+        const [y, m, d] = String(latestInvoice.due_date).split('T')[0].split(' ')[0].split('-').map(Number);
+        if (y && m && d) {
+            dueDateString = new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
         }
     }
 
