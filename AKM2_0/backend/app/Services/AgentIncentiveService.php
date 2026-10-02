@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\AgentReferral;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
@@ -166,7 +167,7 @@ class AgentIncentiveService
             return;
         }
 
-        $nameVariants = $this->nameVariants($user);
+        $nameVariants = AgentReferral::nameVariants($user);
         if (empty($nameVariants)) {
             $summary['skipped']++;
             $this->writeLog("  [SKIP] Unable to build a name to match job orders");
@@ -358,33 +359,6 @@ class AgentIncentiveService
         }
         $this->writeLog("  [COMPLETE] {$agentName} (#{$agentId}) — awarded incentive x{$cycles}, recorded {$processCount} job order(s)");
         $this->writeLog("[{$counter}/{$total}] ✓ SUCCESS");
-    }
-
-    /**
-     * Build all lowercased name variants used to match against applications.referred_by.
-     * Mirrors the matching used by CommissionController for consistency.
-     */
-    private function nameVariants(object $user): array
-    {
-        $first  = trim((string) ($user->first_name ?? ''));
-        $middle = trim((string) ($user->middle_initial ?? ''));
-        $last   = trim((string) ($user->last_name ?? ''));
-
-        $variants = [];
-
-        // first last
-        $simple = trim($first . ' ' . $last);
-        if ($simple !== '') {
-            $variants[] = strtolower($simple);
-        }
-
-        // first M. last  (matches the User::full_name accessor format)
-        $full = trim($first . ' ' . ($middle !== '' ? $middle . '. ' : '') . $last);
-        if ($full !== '') {
-            $variants[] = strtolower($full);
-        }
-
-        return array_values(array_unique(array_filter($variants)));
     }
 
     /**

@@ -69,6 +69,13 @@ export const isInProgressOnsiteStatus = (status: string): boolean =>
 export const isAgentUser = (role?: string | null, roleId?: number | string | null): boolean =>
   (role || '').toLowerCase().trim() === 'agent' || String(roleId ?? '') === String(AGENT_ROLE_ID);
 
+export const AGENT_SECTIONS = ['application-management'];
+
+export const AGENT_HIDDEN_APPLICATION_FIELDS = ['status', 'remarks'];
+
+export const agentSectionFor = (section: string): string =>
+  AGENT_SECTIONS.includes(section) ? section : AGENT_SECTIONS[0];
+
 export const isSuperUser = (role?: string | null, roleId?: number | string | null): boolean =>
   SUPER_ROLE_NAMES.includes((role || '').toLowerCase().trim()) ||
   SUPER_ROLE_IDS.includes(String(roleId ?? ''));

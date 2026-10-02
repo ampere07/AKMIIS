@@ -14,6 +14,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import NavBadge from '../components/NavBadge';
+import { AGENT_SECTIONS, isAgentUser } from '../utils/agentReferral';
 import { useNavBadgeCounts } from '../hooks/useNavBadgeCounts';
 
 interface SidebarProps {
@@ -149,6 +150,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
   const filterMenuByRole = (items: MenuItem[]): MenuItem[] => {
     const normalizedUserRole = userRole ? userRole.toLowerCase().trim() : '';
     const currentRoleId = roleId ? String(roleId) : '';
+    if (isAgentUser(userRole, roleId)) return items.filter(item => AGENT_SECTIONS.includes(item.id));
 
     return items.filter(item => {
       if ((!item.allowedRoles || item.allowedRoles.length === 0) && (!item.allowedRoleIds || item.allowedRoleIds.length === 0)) return true;

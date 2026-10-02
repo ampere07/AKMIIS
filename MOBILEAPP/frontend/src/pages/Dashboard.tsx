@@ -118,6 +118,7 @@ import { usePushNotifications } from '../hooks/usePushNotifications';
 // Technician live-location tracking (feeds the LiveMonitor widget). Only starts for logged-in technicians.
 import { useLocationTracking } from '../hooks/useLocationTracking';
 import ErrorBoundary from '../components/ErrorBoundary';
+import { AGENT_SECTIONS, agentSectionFor, isAgentUser } from '../utils/agentReferral';
 
 interface DashboardProps {
     onLogout: () => void;
@@ -159,8 +160,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                     // Use the initialized user data if available
                     if (user.role === 'customer') {
                         setActiveSection('customer-dashboard');
-                    } else if (user.role?.toLowerCase() === 'agent') {
-                        setActiveSection('agent-dashboard');
+                    } else if (isAgentUser(user.role, user.role_id)) {
+                        setActiveSection(AGENT_SECTIONS[0]);
                     } else if (String(user.role_id) === '6' || user.role?.toLowerCase() === 'osp') {
                         setActiveSection('work-order');
                     } else if (user.role === 'technician' || String(user.role_id) === '4') {
@@ -206,7 +207,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     // Add effect to log the active section when it changes
     const handleSectionChange = useCallback((section: string, extra?: string) => {
         console.log('[Dashboard] handleSectionChange:', section);
-        setActiveSection(section);
+        setActiveSection(isAgentUser(userData?.role, userData?.role_id) ? agentSectionFor(section) : section);
         if (section === 'customer-bills') {
             setBillsInitialTab((extra as any) || 'soa');
         } else if (section === 'customer') {
@@ -217,7 +218,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
         if (width < 768) {
             closeMobileMenu();
         }
-    }, [width]);
+    }, [width, userData?.role, userData?.role_id]);
 
     const content = useMemo(() => {
         switch (activeSection) {

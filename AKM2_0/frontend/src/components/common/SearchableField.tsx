@@ -21,6 +21,7 @@ interface SearchableFieldProps {
   required?: boolean;
   isHeaderSelectable?: boolean;
   emptyMessage?: string;
+  disabled?: boolean;
 }
 
 const SearchableField: React.FC<SearchableFieldProps> = ({
@@ -37,7 +38,8 @@ const SearchableField: React.FC<SearchableFieldProps> = ({
   colorPalette,
   required,
   isHeaderSelectable = false,
-  emptyMessage
+  emptyMessage,
+  disabled = false
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -85,12 +87,14 @@ const SearchableField: React.FC<SearchableFieldProps> = ({
       <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
         {label}{required && <span className="text-red-500">*</span>}
       </label>
-      <div className={`flex items-center px-3 py-2 border rounded transition-colors ${
+      <div className={`flex items-center px-3 py-2 border rounded transition-colors ${disabled ? 'opacity-50 cursor-not-allowed' : ''} ${
         isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'
       } ${error ? 'border-red-500' : 'focus-within:border-orange-500'}`}>
         {icon || <Search size={16} className={`mr-2 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`} />}
         <input
           type="text"
+          aria-label={label}
+          disabled={disabled}
           placeholder={placeholder}
           value={isOpen ? searchTerm : (value || '')}
           onChange={(e) => {
@@ -98,10 +102,11 @@ const SearchableField: React.FC<SearchableFieldProps> = ({
             if (!isOpen) setIsOpen(true);
           }}
           onFocus={() => setIsOpen(true)}
-          className={`w-full bg-transparent border-none focus:outline-none p-0 text-sm ${isDarkMode ? 'text-white' : 'text-gray-900'}`}
+          className={`w-full bg-transparent border-none focus:outline-none p-0 text-sm disabled:cursor-not-allowed ${isDarkMode ? 'text-white' : 'text-gray-900'}`}
         />
         <button
           type="button"
+          disabled={disabled}
           onClick={() => {
             if (isOpen) {
               setIsOpen(false);
@@ -116,7 +121,7 @@ const SearchableField: React.FC<SearchableFieldProps> = ({
         </button>
       </div>
 
-      {isOpen && (
+      {isOpen && !disabled && (
         <div className={`absolute left-0 right-0 top-full mt-1 z-50 rounded-md shadow-2xl border overflow-hidden flex flex-col ${
           isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'
         }`} style={{ minWidth: '100vw', maxWidth: '300px', width: '100%' }}>

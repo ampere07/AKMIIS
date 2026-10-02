@@ -1763,7 +1763,10 @@ Route::delete('/plans/{id}', [\App\Http\Controllers\Api\PlanApiController::class
 Route::get('/radius/user-groups', [\App\Http\Controllers\Api\PlanApiController::class , 'getMikrotikGroups']);
 
 // Plan Related Data - fetch applications, job orders, customers by plan name
-Route::get('/plans/{id}/related', function ($id) {
+Route::middleware('auth:sanctum')->get('/plans/{id}/related', function ($id) {
+    if (\App\Support\AgentReferral::isAgent(auth()->user())) {
+        return response()->json(['success' => false, 'message' => 'Agents cannot view plan related data'], 403);
+    }
     try {
         $plan = \Illuminate\Support\Facades\DB::table('plan_list')->where('id', $id)->first();
         if (!$plan) {

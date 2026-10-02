@@ -184,7 +184,7 @@ const ApplicationAttachmentModal: React.FC<ApplicationAttachmentModalProps> = ({
             setPreviews({
                 proofOfBilling: convertGoogleDriveUrl(applicationData.proof_of_billing_url),
                 governmentValidId: convertGoogleDriveUrl(applicationData.government_valid_id_url),
-                secondaryGovernmentValidId: convertGoogleDriveUrl(applicationData.secondary_government_valid_id_url),
+                secondaryGovernmentValidId: convertGoogleDriveUrl(applicationData.second_government_valid_id_url),
                 houseFrontImage: convertGoogleDriveUrl(applicationData.house_front_picture_url),
                 promoImage: convertGoogleDriveUrl(applicationData.promo_url),
                 nearestLandmark1: convertGoogleDriveUrl(applicationData.nearest_landmark1_url),

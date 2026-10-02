@@ -14,6 +14,7 @@ interface ApplicationFunnelFilterProps {
   onClose: () => void;
   onApplyFilters: (filters: FilterValues) => void;
   currentFilters?: FilterValues;
+  hiddenColumns?: string[];
 }
 
 export interface FilterValues {
@@ -72,7 +73,8 @@ const ApplicationFunnelFilter: React.FC<ApplicationFunnelFilterProps> = ({
   isOpen,
   onClose,
   onApplyFilters,
-  currentFilters
+  currentFilters,
+  hiddenColumns = []
 }) => {
   const [isDarkMode, setIsDarkMode] = useState(localStorage.getItem('theme') === 'dark');
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
@@ -506,7 +508,8 @@ const ApplicationFunnelFilter: React.FC<ApplicationFunnelFilterProps> = ({
                 renderFilterInput()
               ) : (
                 <div className="space-y-1">
-                  {[...allColumns]
+                  {allColumns
+                    .filter((column) => !hiddenColumns.includes(column.key))
                     .sort((a, b) => a.label.localeCompare(b.label))
                     .map((column) => {
                     const isActive = !!filterValues[column.key];

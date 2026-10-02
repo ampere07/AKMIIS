@@ -8,7 +8,11 @@ interface LocationPickerProps {
   label?: string;
   required?: boolean;
   error?: string;
+  showCurrentLocation?: boolean;
 }
+
+const LEAFLET_SCRIPT_ID = 'leaflet-script';
+const LEAFLET_STYLE_ID = 'leaflet-style';
 
 interface Coordinates {
   lat: number;
@@ -21,7 +25,8 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
   isDarkMode,
   label = 'Location',
   required = false,
-  error
+  error,
+  showCurrentLocation = true
 }) => {
   const [map, setMap] = useState<any>(null);
   const [marker, setMarker] = useState<any>(null);
@@ -30,7 +35,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
   const [latStr, setLatStr] = useState('');
   const [lngStr, setLngStr] = useState('');
   const mapRef = useRef<HTMLDivElement>(null);
-  const leafletLoaded = useRef(false);
+  const mapInstance = useRef<any>(null);
 
   useEffect(() => {
     if (value && value.trim()) {
@@ -59,28 +64,33 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
   }, [value]);
 
   useEffect(() => {
-    const loadLeaflet = async () => {
-      if (leafletLoaded.current) return;
+    let unmounted = false;
 
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-      document.head.appendChild(link);
+    const loadLeaflet = () => {
+      if (!document.getElementById(LEAFLET_STYLE_ID)) {
+        const link = document.createElement('link');
+        link.id = LEAFLET_STYLE_ID;
+        link.rel = 'stylesheet';
+        link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+        document.head.appendChild(link);
+      }
+
+      const existingScript = document.getElementById(LEAFLET_SCRIPT_ID);
+      if (existingScript) {
+        existingScript.addEventListener('load', initializeMap);
+        return;
+      }
 
       const script = document.createElement('script');
+      script.id = LEAFLET_SCRIPT_ID;
       script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
       script.async = true;
-
-      script.onload = () => {
-        leafletLoaded.current = true;
-        initializeMap();
-      };
-
+      script.addEventListener('load', initializeMap);
       document.head.appendChild(script);
     };
 
     const initializeMap = () => {
-      if (!mapRef.current || map) return;
+      if (unmounted || !mapRef.current || mapInstance.current) return;
 
       const L = (window as any).L;
       if (!L) return;
@@ -89,6 +99,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
       const initialLng = coordinates?.lng || 120.9842;
 
       const newMap = L.map(mapRef.current).setView([initialLat, initialLng], 13);
+      mapInstance.current = newMap;
 
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '© OpenStreetMap contributors',
@@ -119,13 +130,18 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
       }
     };
 
-    if (mapRef.current && !map) {
+    if ((window as any).L) {
+      initializeMap();
+    } else {
       loadLeaflet();
     }
 
     return () => {
-      if (map) {
-        map.remove();
+      unmounted = true;
+      document.getElementById(LEAFLET_SCRIPT_ID)?.removeEventListener('load', initializeMap);
+      if (mapInstance.current) {
+        mapInstance.current.remove();
+        mapInstance.current = null;
       }
     };
   }, []);
@@ -215,6 +231,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
             style={{ zIndex: 1 }}
           />
 
+          {showCurrentLocation && (
           <button
             type="button"
             onClick={handleGetCurrentLocation}
@@ -229,6 +246,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
               {isGettingLocation ? 'Getting...' : 'Get My Location'}
             </span>
           </button>
+          )}
         </div>
 
         <div className={`p-3 border-t ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'
@@ -245,6 +263,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
                   value={latStr}
                   onChange={handleLatInputChange}
                   placeholder="Latitude"
+                  aria-label="Latitude"
                   className={`w-full pl-8 pr-3 py-2 rounded text-sm transition-all focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none ${isDarkMode
                       ? 'bg-gray-900 text-white border-gray-700'
                       : 'bg-white text-gray-900 border-gray-300'
@@ -263,6 +282,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
                   value={lngStr}
                   onChange={handleLngInputChange}
                   placeholder="Longitude"
+                  aria-label="Longitude"
                   className={`w-full pl-8 pr-3 py-2 rounded text-sm transition-all focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none ${isDarkMode
                       ? 'bg-gray-900 text-white border-gray-700'
                       : 'bg-white text-gray-900 border-gray-300'

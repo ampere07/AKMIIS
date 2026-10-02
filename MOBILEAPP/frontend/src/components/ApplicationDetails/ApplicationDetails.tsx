@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Pressable, ScrollView, Modal, Alert, Linking } from 'react-native';
+import { View, Text, Pressable, ScrollView, Modal, Alert, Linking, Image } from 'react-native';
 import { 
-  X, Phone, MessageSquare, Info, ExternalLink, Mail, ChevronDown, 
+  X, Phone, MessageSquare, Info, Mail, ChevronDown, 
   ChevronRight as ChevronRightIcon, Ban, XCircle, RotateCw, CheckCircle, 
-  Loader, Square, Settings
+  Loader, Square, Settings, MapPin
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getApplication, updateApplication } from '../../services/applicationService';
@@ -13,6 +13,9 @@ import ApplicationVisitFormModal from '../../modals/ApplicationVisitFormModal';
 import { JobOrderData } from '../../services/jobOrderService';
 import { ApplicationVisitData, getApplicationVisits } from '../../services/applicationVisitService';
 import { settingsColorPaletteService, ColorPalette } from '../../services/settingsColorPaletteService';
+import ApplicationEditModal from '../../modals/ApplicationEditModal';
+import { APPLICATION_IMAGE_FIELDS, ApplicationImageField, mapLinkFor, toImagePreviewUrl } from '../../utils/applicationImages';
+import { AGENT_HIDDEN_APPLICATION_FIELDS, isAgentUser } from '../../utils/agentReferral';
 
 interface ApplicationDetailsProps {
   application: {
@@ -46,6 +49,9 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
   const [showFieldSettings, setShowFieldSettings] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [isAgent, setIsAgent] = useState(false);
+  const hiddenFields = isAgent ? AGENT_HIDDEN_APPLICATION_FIELDS : [];
 
   const FIELD_VISIBILITY_KEY = 'applicationDetailsFieldVisibility';
   const FIELD_ORDER_KEY = 'applicationDetailsFieldOrder';
@@ -64,6 +70,8 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
     'barangay',
     'city',
     'region',
+    'location',
+    'mapPin',
     'desiredPlan',
     'promo',
     'termsAgreed',
@@ -75,7 +83,8 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
     'nearestLandmark1',
     'nearestLandmark2',
     'documentAttachment',
-    'otherIspBill'
+    'otherIspBill',
+    'remarks'
   ];
 
   const [fieldVisibility, setFieldVisibility] = useState<Record<string, boolean>>(() => {
@@ -88,6 +97,12 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
     const loadSettings = async () => {
       const theme = await AsyncStorage.getItem('theme');
       setIsDarkMode(theme === 'dark');
+
+      const authData = await AsyncStorage.getItem('authData');
+      if (authData) {
+        const user = JSON.parse(authData);
+        setIsAgent(isAgentUser(user.role, user.role_id));
+      }
 
       const savedVisibility = await AsyncStorage.getItem(FIELD_VISIBILITY_KEY);
       if (savedVisibility) {
@@ -295,6 +310,8 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
       barangay: 'Barangay',
       city: 'City',
       region: 'Region',
+      location: 'Location',
+      mapPin: 'Map Pin',
       desiredPlan: 'Desired Plan',
       promo: 'Promo',
       termsAgreed: 'Terms and Conditions',
@@ -306,7 +323,8 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
       nearestLandmark1: 'Nearest Landmark 1',
       nearestLandmark2: 'Nearest Landmark 2',
       documentAttachment: 'Document Attachment',
-      otherIspBill: 'Other ISP Bill'
+      otherIspBill: 'Other ISP Bill',
+      remarks: 'Remarks'
     };
     return labels[fieldKey] || fieldKey;
   };
@@ -331,8 +349,27 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
     setFieldOrder(defaultFields);
   };
 
+  const renderImageRow = (image: ApplicationImageField) => {
+    const url = detailedApplication?.[image.column];
+    const preview = toImagePreviewUrl(url);
+    return (
+      <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
+        <Text style={{ width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>{image.label}</Text>
+        {preview ? (
+          <Pressable onPress={() => Linking.openURL(url)} accessibilityLabel={`Open ${image.label}`}>
+            <Image source={{ uri: preview }} accessibilityLabel={image.label} style={{ width: 160, height: 96, borderRadius: 6, borderWidth: 1, borderColor: isDarkMode ? '#374151' : '#d1d5db' }} resizeMode="cover" />
+          </Pressable>
+        ) : (
+          <Text style={{ flex: 1, color: isDarkMode ? '#ffffff' : '#111827' }}>No document available</Text>
+        )}
+      </View>
+    );
+  };
+
   const renderFieldContent = (fieldKey: string) => {
-    if (!fieldVisibility[fieldKey]) return null;
+    if (fieldVisibility[fieldKey] === false || hiddenFields.includes(fieldKey)) return null;
+    const image = APPLICATION_IMAGE_FIELDS.find(field => field.key === fieldKey);
+    if (image) return renderImageRow(image);
 
     const baseFieldStyle = { flexDirection: 'row' as const, borderBottomWidth: 1, paddingBottom: 16, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' };
     const labelStyle = { width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' };
@@ -482,159 +519,36 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
           </View>
         );
 
-      case 'proofOfBilling':
+      case 'location':
         return (
-          <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
-            <Text style={{ width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>Proof of Billing</Text>
+          <View style={baseFieldStyle}>
+            <Text style={labelStyle}>Location:</Text>
+            <Text style={valueStyle}>{detailedApplication?.location || 'Not provided'}</Text>
+          </View>
+        );
+
+      case 'mapPin': {
+        const mapLink = mapLinkFor(detailedApplication?.long_lat);
+        return (
+          <View style={baseFieldStyle}>
+            <Text style={labelStyle}>Map Pin:</Text>
             <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }} numberOfLines={1}>
-                {detailedApplication?.proof_of_billing_url || 'No document available'}
-              </Text>
-              {detailedApplication?.proof_of_billing_url && (
-                <Pressable onPress={() => Linking.openURL(detailedApplication.proof_of_billing_url)}>
-                  <ExternalLink width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
+              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }}>{detailedApplication?.long_lat || 'Not pinned'}</Text>
+              {mapLink && (
+                <Pressable onPress={() => Linking.openURL(mapLink)} accessibilityLabel="Open in Maps">
+                  <MapPin width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
                 </Pressable>
               )}
             </View>
           </View>
         );
+      }
 
-      case 'governmentValidId':
+      case 'remarks':
         return (
-          <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
-            <Text style={{ width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>Government Valid ID</Text>
-            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }} numberOfLines={1}>
-                {detailedApplication?.government_valid_id_url || 'No document available'}
-              </Text>
-              {detailedApplication?.government_valid_id_url && (
-                <Pressable onPress={() => Linking.openURL(detailedApplication.government_valid_id_url)}>
-                  <ExternalLink width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
-                </Pressable>
-              )}
-            </View>
-          </View>
-        );
-
-      case 'secondaryGovernmentValidId':
-        return (
-          <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
-            <View style={{ width: 160 }}>
-              <Text style={{ fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>Secondary Government</Text>
-              <Text style={{ fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>Valid ID</Text>
-            </View>
-            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }} numberOfLines={1}>
-                {detailedApplication?.secondary_government_valid_id_url || 'No document available'}
-              </Text>
-              {detailedApplication?.secondary_government_valid_id_url && (
-                <Pressable onPress={() => Linking.openURL(detailedApplication.secondary_government_valid_id_url)}>
-                  <ExternalLink width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
-                </Pressable>
-              )}
-            </View>
-          </View>
-        );
-
-      case 'houseFrontPicture':
-        return (
-          <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
-            <Text style={{ width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>House Front Picture</Text>
-            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }} numberOfLines={1}>
-                {detailedApplication?.house_front_picture_url || 'No image available'}
-              </Text>
-              {detailedApplication?.house_front_picture_url && (
-                <Pressable onPress={() => Linking.openURL(detailedApplication.house_front_picture_url)}>
-                  <ExternalLink width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
-                </Pressable>
-              )}
-            </View>
-          </View>
-        );
-
-      case 'promoImage':
-        return (
-          <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
-            <Text style={{ width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>Promo Image</Text>
-            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }} numberOfLines={1}>
-                {detailedApplication?.promo_url || 'No image available'}
-              </Text>
-              {detailedApplication?.promo_url && (
-                <Pressable onPress={() => Linking.openURL(detailedApplication.promo_url)}>
-                  <ExternalLink width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
-                </Pressable>
-              )}
-            </View>
-          </View>
-        );
-
-      case 'nearestLandmark1':
-        return (
-          <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
-            <Text style={{ width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>Nearest Landmark 1</Text>
-            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }} numberOfLines={1}>
-                {detailedApplication?.nearest_landmark1_url || 'No image available'}
-              </Text>
-              {detailedApplication?.nearest_landmark1_url && (
-                <Pressable onPress={() => Linking.openURL(detailedApplication.nearest_landmark1_url)}>
-                  <ExternalLink width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
-                </Pressable>
-              )}
-            </View>
-          </View>
-        );
-
-      case 'nearestLandmark2':
-        return (
-          <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
-            <Text style={{ width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>Nearest Landmark 2</Text>
-            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }} numberOfLines={1}>
-                {detailedApplication?.nearest_landmark2_url || 'No image available'}
-              </Text>
-              {detailedApplication?.nearest_landmark2_url && (
-                <Pressable onPress={() => Linking.openURL(detailedApplication.nearest_landmark2_url)}>
-                  <ExternalLink width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
-                </Pressable>
-              )}
-            </View>
-          </View>
-        );
-
-      case 'documentAttachment':
-        return (
-          <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
-            <Text style={{ width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>Document Attachment</Text>
-            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }} numberOfLines={1}>
-                {detailedApplication?.document_attachment_url || 'No document available'}
-              </Text>
-              {detailedApplication?.document_attachment_url && (
-                <Pressable onPress={() => Linking.openURL(detailedApplication.document_attachment_url)}>
-                  <ExternalLink width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
-                </Pressable>
-              )}
-            </View>
-          </View>
-        );
-
-      case 'otherIspBill':
-        return (
-          <View style={{ flexDirection: 'row', borderBottomWidth: 1, paddingVertical: 8, borderBottomColor: isDarkMode ? '#1f2937' : '#e5e7eb' }}>
-            <Text style={{ width: 160, fontSize: 14, color: isDarkMode ? '#9ca3af' : '#4b5563' }}>Other ISP Bill</Text>
-            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={{ flex: 1, marginRight: 8, color: isDarkMode ? '#ffffff' : '#111827' }} numberOfLines={1}>
-                {detailedApplication?.other_isp_bill_url || 'No document available'}
-              </Text>
-              {detailedApplication?.other_isp_bill_url && (
-                <Pressable onPress={() => Linking.openURL(detailedApplication.other_isp_bill_url)}>
-                  <ExternalLink width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
-                </Pressable>
-              )}
-            </View>
+          <View style={baseFieldStyle}>
+            <Text style={labelStyle}>Remarks:</Text>
+            <Text style={valueStyle}>{detailedApplication?.remarks || 'None'}</Text>
           </View>
         );
 
@@ -652,20 +566,33 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
         </View>
         
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-          <Pressable 
-            style={{ paddingHorizontal: 12, paddingVertical: 4, borderRadius: 2, flexDirection: 'row', alignItems: 'center', backgroundColor: colorPalette?.primary || '#7c3aed' }}
-            onPress={handleMoveToJO}
-            disabled={loading}
-          >
-            <Text style={{ color: '#ffffff' }}>Move to JO</Text>
-          </Pressable>
-          <Pressable 
-            style={{ paddingHorizontal: 12, paddingVertical: 4, borderRadius: 2, flexDirection: 'row', alignItems: 'center', backgroundColor: colorPalette?.primary || '#7c3aed' }}
-            onPress={handleScheduleVisit}
-            disabled={loading}
-          >
-            <Text style={{ color: '#ffffff' }}>Schedule</Text>
-          </Pressable>
+          {isAgent && (
+            <Pressable 
+              style={{ paddingHorizontal: 12, paddingVertical: 4, borderRadius: 2, flexDirection: 'row', alignItems: 'center', backgroundColor: colorPalette?.primary || '#7c3aed' }}
+              onPress={() => setShowEditModal(true)}
+              disabled={loading || !detailedApplication}
+            >
+              <Text style={{ color: '#ffffff' }}>Edit</Text>
+            </Pressable>
+          )}
+          {!isAgent && (
+            <Pressable 
+              style={{ paddingHorizontal: 12, paddingVertical: 4, borderRadius: 2, flexDirection: 'row', alignItems: 'center', backgroundColor: colorPalette?.primary || '#7c3aed' }}
+              onPress={handleMoveToJO}
+              disabled={loading}
+            >
+              <Text style={{ color: '#ffffff' }}>Move to JO</Text>
+            </Pressable>
+          )}
+          {!isAgent && (
+            <Pressable 
+              style={{ paddingHorizontal: 12, paddingVertical: 4, borderRadius: 2, flexDirection: 'row', alignItems: 'center', backgroundColor: colorPalette?.primary || '#7c3aed' }}
+              onPress={handleScheduleVisit}
+              disabled={loading}
+            >
+              <Text style={{ color: '#ffffff' }}>Schedule</Text>
+            </Pressable>
+          )}
           
           <Pressable onPress={() => setShowFieldSettings(!showFieldSettings)}>
             <Settings width={16} height={16} color={isDarkMode ? '#9ca3af' : '#4b5563'} />
@@ -677,6 +604,7 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
         </View>
       </View>
       
+      {!isAgent && (
       <View style={{ paddingVertical: 12, borderBottomWidth: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16, backgroundColor: isDarkMode ? '#111827' : '#f3f4f6', borderBottomColor: isDarkMode ? '#374151' : '#e5e7eb' }}>
         <Pressable 
           style={{ flexDirection: 'column', alignItems: 'center', padding: 8, borderRadius: 6 }}
@@ -733,6 +661,7 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
           <Text style={{ fontSize: 12, marginTop: 4, color: isDarkMode ? '#d1d5db' : '#374151' }}>Clear Status</Text>
         </Pressable>
       </View>
+      )}
       
       {error && (
         <View style={{ padding: 12, margin: 12, borderRadius: 4, backgroundColor: isDarkMode ? 'rgba(127, 29, 29, 0.2)' : '#fef2f2', borderWidth: 1, borderColor: isDarkMode ? '#991b1b' : '#fca5a5' }}>
@@ -784,7 +713,7 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
                 </View>
               </View>
               <ScrollView style={{ padding: 8 }} showsVerticalScrollIndicator={false}>
-                {fieldOrder.map((fieldKey) => (
+                {fieldOrder.filter((fieldKey) => !hiddenFields.includes(fieldKey)).map((fieldKey) => (
                   <Pressable
                     key={fieldKey}
                     onPress={() => toggleFieldVisibility(fieldKey)}
@@ -804,6 +733,18 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
         </Modal>
       )}
       
+      {isAgent && detailedApplication && (
+        <ApplicationEditModal
+          isOpen={showEditModal}
+          application={detailedApplication}
+          onClose={() => setShowEditModal(false)}
+          onSaved={async () => {
+            setDetailedApplication(await getApplication(application.id));
+            if (onApplicationUpdate) onApplicationUpdate();
+          }}
+        />
+      )}
+
       <ConfirmationModal
         isOpen={showMoveConfirmation}
         title="Confirm"

@@ -989,7 +989,7 @@ const JobOrderDetails: React.FC<JobOrderDetailsPropsExtended> = ({ jobOrder, onC
     houseFrontPicture: () => renderImageLink(applicationData?.house_front_picture_url || jobOrder.house_front_picture_url || jobOrder.House_Front_Picture_URL || jobOrder.house_front_picture || jobOrder.House_Front_Picture),
     proof_of_billing_url: () => renderImageLink(applicationData?.proof_of_billing_url || jobOrder.proof_of_billing_url),
     government_valid_id_url: () => renderImageLink(applicationData?.government_valid_id_url || jobOrder.government_valid_id_url),
-    second_government_valid_id_url: () => renderImageLink(applicationData?.secondary_government_valid_id_url || jobOrder.second_government_valid_id_url),
+    second_government_valid_id_url: () => renderImageLink(applicationData?.second_government_valid_id_url || jobOrder.second_government_valid_id_url),
     document_attachment_url: () => renderImageLink(applicationData?.document_attachment_url || jobOrder.document_attachment_url),
     other_isp_bill_url: () => renderImageLink(applicationData?.other_isp_bill_url || jobOrder.other_isp_bill_url),
   }), [jobOrder, applicationData, jobOrderItems, billingStatuses]);
@@ -1045,7 +1045,7 @@ const JobOrderDetails: React.FC<JobOrderDetailsPropsExtended> = ({ jobOrder, onC
       case 'houseFrontPicture': return !(applicationData?.house_front_picture_url || jobOrder.house_front_picture_url || jobOrder.House_Front_Picture_URL || jobOrder.house_front_picture || jobOrder.House_Front_Picture);
       case 'proof_of_billing_url': return !(applicationData?.proof_of_billing_url || jobOrder.proof_of_billing_url);
       case 'government_valid_id_url': return !(applicationData?.government_valid_id_url || jobOrder.government_valid_id_url);
-      case 'second_government_valid_id_url': return !(applicationData?.secondary_government_valid_id_url || jobOrder.second_government_valid_id_url);
+      case 'second_government_valid_id_url': return !(applicationData?.second_government_valid_id_url || jobOrder.second_government_valid_id_url);
       case 'document_attachment_url': return !(applicationData?.document_attachment_url || jobOrder.document_attachment_url);
       case 'other_isp_bill_url': return !(applicationData?.other_isp_bill_url || jobOrder.other_isp_bill_url);
       default: return false;

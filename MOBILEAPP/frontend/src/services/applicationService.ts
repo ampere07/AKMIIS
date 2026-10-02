@@ -90,3 +90,15 @@ export const updateApplication = async (id: string, application: Partial<Applica
 export const deleteApplication = async (id: string): Promise<void> => {
   await apiClient.delete<ApplicationResponse>(`/applications/${id}`);
 };
+
+export const uploadApplicationImages = async (
+  id: number | string,
+  formData: FormData
+): Promise<{ success?: boolean; message?: string; data?: any }> => {
+  const response = await apiClient.post<{ success?: boolean; message?: string; data?: any }>(
+    `/applications/${id}/upload-images`,
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } }
+  );
+  return response.data;
+};
