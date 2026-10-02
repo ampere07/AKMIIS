@@ -4,7 +4,6 @@ import GlobalSearch from './globalfunctions/GlobalSearch';
 import DropdownPortal from '../components/common/DropdownPortal';
 import ApplicationDetails from '../components/ApplicationDetails';
 import GlobalRelatedDataOverlay from '../components/GlobalRelatedDataOverlay';
-import AddApplicationModal from '../modals/AddApplicationModal';
 import SessionExpiredModal from '../components/SessionExpiredModal';
 import ApplicationFunnelFilter, { allColumns as filterColumns } from '../filter/ApplicationFunnelFilter';
 import { useApplicationStore } from '../store/applicationStore';
@@ -17,6 +16,7 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import { exportToCSV } from '../utils/exportUtils';
 import pusher from '../services/pusherService';
 import apiClient from '../config/api';
+import { AGENT_HIDDEN_APPLICATION_FIELDS, getStoredAgentIdentity } from '../utils/agentReferral';
 
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -64,6 +64,9 @@ interface ApplicationManagementProps {
 }
 
 const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigate, autoOpenApplicationId }) => {
+  const [hiddenFields] = useState<string[]>(() => getStoredAgentIdentity().isAgent ? AGENT_HIDDEN_APPLICATION_FIELDS : []);
+  const showsStatus = !hiddenFields.includes('status');
+  const availableColumns = allColumns.filter(column => !hiddenFields.includes(column.key));
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [currentUserOrgId, setCurrentUserOrgId] = useState<number | null>(() => {
     try {
@@ -147,7 +150,6 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
   const [isResizingSidebar, setIsResizingSidebar] = useState<boolean>(false);
   const [isMobile, setIsMobile] = useState<boolean>(false);
   const [mobileViewMode, setMobileViewMode] = useState<'sidebar' | 'list'>('sidebar');
-  const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
   const [isFunnelFilterOpen, setIsFunnelFilterOpen] = useState<boolean>(false);
   const [timestampFrom, setTimestampFrom] = useState<string>('');
   const [timestampTo, setTimestampTo] = useState<string>('');
@@ -713,14 +715,14 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
     });
 
     return {
-      items: statuses.map(s => ({
+      items: statuses.filter(() => showsStatus).map(s => ({
         id: `status:${s.value}`,
         name: s.name,
         count: counts[s.value] || 0
       })).filter(s => s.count > 0),
       total: globalFilteredApplications.length
     };
-  }, [globalFilteredApplications]);
+  }, [globalFilteredApplications, showsStatus]);
 
   const filteredApplications = useMemo(() => {
     let filtered = globalFilteredApplications.filter(application => {
@@ -969,7 +971,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
   };
 
   const handleSelectAllColumns = () => {
-    const allKeys = allColumns.map(col => col.key);
+    const allKeys = availableColumns.map(col => col.key);
     setVisibleColumns(allKeys);
     localStorage.setItem('applicationManagementVisibleColumns', JSON.stringify(allKeys));
   };
@@ -993,7 +995,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
     }
   };
 
-  const filteredColumns = allColumns
+  const filteredColumns = availableColumns
     .filter(col => visibleColumns.includes(col.key))
     .sort((a, b) => {
       const indexA = columnOrder.indexOf(a.key);
@@ -1190,7 +1192,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
   const handleExport = () => {
     if (!filteredApplications || filteredApplications.length === 0) return;
 
-    const exportColumns = allColumns
+    const exportColumns = availableColumns
       .filter(col => visibleColumns.includes(col.key))
       .sort((a, b) => {
         const indexA = columnOrder.indexOf(a.key);
@@ -1606,7 +1608,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
                           </div>
                         </div>
                         <div className="overflow-y-auto flex-1">
-                          {allColumns.map((column) => (
+                          {availableColumns.map((column) => (
                             <label
                               key={column.key}
                               className={`flex items-center px-4 py-2 cursor-pointer text-sm ${isDarkMode ? 'hover:bg-gray-700 text-white' : 'hover:bg-gray-100 text-gray-900'
@@ -1878,7 +1880,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
                             </div>
                           </div>
                           <div className="flex flex-col items-end space-y-1 ml-4 flex-shrink-0">
-                            {(() => {
+                            {showsStatus && (() => {
                               const status = (!application.status || String(application.status).trim() === '') ? 'Empty' : application.status;
                               return (
                                 <div className={`text-xs px-2 py-1 font-bold uppercase ${status.toLowerCase() === 'schedule' ? 'text-green-400' :
@@ -2123,16 +2125,6 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
         }
       `}</style>
 
-      {/* Add Application Modal */}
-      <AddApplicationModal
-        isOpen={isAddModalOpen}
-        onClose={() => setIsAddModalOpen(false)}
-        onSave={() => {
-          silentRefresh();
-          setIsAddModalOpen(false);
-        }}
-      />
-
       {/* Application Funnel Filter */}
       <ApplicationFunnelFilter
         isOpen={isFunnelFilterOpen}
@@ -2142,6 +2134,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
           setIsFunnelFilterOpen(false);
         }}
         currentFilters={funnelFilters}
+        hiddenColumns={hiddenFields}
       />
 
       {/* Session Expired Modal */}

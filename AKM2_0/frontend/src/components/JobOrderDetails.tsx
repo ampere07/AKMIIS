@@ -1720,7 +1720,7 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
         );
 
       case 'secondGovernmentValidId':
-        const secondGovId = applicationData?.secondary_government_valid_id_url;
+        const secondGovId = applicationData?.second_government_valid_id_url;
         if (!secondGovId) return null;
         return (
           <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>

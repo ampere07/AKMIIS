@@ -84,6 +84,7 @@ import XenditReconcileTool from './XenditReconcileTool';
 import BillingReconcileTool from './BillingReconcileTool';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
+import { AGENT_SECTIONS, agentSectionFor, isAgentUser } from '../utils/agentReferral';
 
 interface DashboardProps {
     onLogout: () => void;
@@ -109,8 +110,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 if (normalizedRole === 'customer' || String(user.role_id) === '3') {
                     return 'customer-dashboard';
                 }
-                if (normalizedRole === 'agent' || String(user.role_id) === '4') {
-                    return 'agent-dashboard';
+                if (isAgentUser(user.role, user.role_id)) {
+                    return AGENT_SECTIONS[0];
                 }
                 if (normalizedRole === 'technician' || String(user.role_id) === '2') {
                     return 'job-order';
@@ -465,7 +466,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     };
 
     const handleSectionChange = (section: string, extra?: string) => {
-        setActiveSection(section);
+        setActiveSection(isAgentUser(userData?.role, userData?.role_id) ? agentSectionFor(section) : section);
         if (section === 'customer-bills') {
             setBillsInitialTab((extra as any) || 'soa');
         } else if (section === 'customer-dashboard') {

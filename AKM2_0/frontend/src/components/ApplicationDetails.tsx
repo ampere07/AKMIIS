@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   ArrowLeft, ArrowRight, Maximize2, X, Phone, MessageSquare, Info,
-  ExternalLink, Mail, ChevronDown, ChevronRight as ChevronRightIcon,
+  Mail, ChevronDown, ChevronRight as ChevronRightIcon,
   Ban, XCircle, RotateCw, CheckCircle, Loader, Square, Settings, ArrowRightCircle, Paperclip,
-  ChevronLeft, ChevronRight
+  ChevronLeft, ChevronRight, MapPin
 } from 'lucide-react';
 import { getApplication, updateApplication, getApplications, getRelatedDetailsUpdateLogs } from '../services/applicationService';
 import { Application } from '../types/application';
@@ -17,6 +17,9 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import { planService, Plan } from '../services/planService';
 import RelatedDataTable from './RelatedDataTable';
 import { relatedDataColumns } from '../config/relatedDataColumns';
+import ApplicationEditModal from '../modals/ApplicationEditModal';
+import { APPLICATION_IMAGE_FIELDS, ApplicationImageField, mapLinkFor, retryWithDriveExport, toImagePreviewUrl } from '../utils/applicationImages';
+import { AGENT_HIDDEN_APPLICATION_FIELDS, isAgentUser } from '../utils/agentReferral';
 
 const PlanListDetails = React.lazy(() => import('./PlanListDetails'));
 const NotFoundModal = React.lazy(() => import('../modals/NotFoundModal'));
@@ -40,6 +43,7 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
   const [showJOAssignForm, setShowJOAssignForm] = useState(false);
   const [showVisitForm, setShowVisitForm] = useState(false);
   const [showAttachmentModal, setShowAttachmentModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
   const [showStatusConfirmation, setShowStatusConfirmation] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<string>('');
   const [showVisitExistsConfirmation, setShowVisitExistsConfirmation] = useState(false);
@@ -101,7 +105,11 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
     }
   }, []);
 
+  const isAgent = isAgentUser(userRole, roleId);
+  const hiddenFields = isAgent ? AGENT_HIDDEN_APPLICATION_FIELDS : [];
+
   const hasPermission = (permission: string): boolean => {
+    if (isAgent) return false;
     const lowerRole = (userRole || '').toLowerCase().trim();
     if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) {
       return true;
@@ -184,6 +192,8 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
     'barangay',
     'city',
     'region',
+    'location',
+    'mapPin',
     'desiredPlan',
     'promo',
     'termsAgreed',
@@ -521,6 +531,8 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
       barangay: 'Barangay',
       city: 'City',
       region: 'Region',
+      location: 'Location',
+      mapPin: 'Map Pin',
       desiredPlan: 'Desired Plan',
       promo: 'Promo',
       termsAgreed: 'Terms and Conditions',
@@ -581,8 +593,30 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
     setFieldOrder(defaultFields);
   };
 
+  const renderImageRow = (image: ApplicationImageField) => {
+    const url = detailedApplication?.[image.column];
+    if (!url) return null;
+    return (
+      <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+        <div className={`w-40 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{image.label}</div>
+        <div className="flex-1 min-w-0">
+          <button type="button" onClick={() => window.open(url)} title={`Open ${image.label}`} className="block">
+            <img
+              src={toImagePreviewUrl(url) || url}
+              alt={image.label}
+              onError={retryWithDriveExport}
+              className={`h-24 w-40 object-cover rounded border ${isDarkMode ? 'border-gray-700' : 'border-gray-300'}`}
+            />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const renderFieldContent = (fieldKey: string) => {
-    if (!fieldVisibility[fieldKey]) return null;
+    if (fieldVisibility[fieldKey] === false || hiddenFields.includes(fieldKey)) return null;
+    const image = APPLICATION_IMAGE_FIELDS.find(field => field.key === fieldKey);
+    if (image) return renderImageRow(image);
 
     switch (fieldKey) {
       case 'timestamp':
@@ -770,6 +804,7 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
             <div className={`flex-1 flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-gray-900'
               }`}>
               <span>{detailedApplication.desired_plan}</span>
+              {!isAgent && (
               <button
                 onClick={async () => {
                   try {
@@ -797,6 +832,7 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
               >
                 {loadingPlanOverlay ? <Loader size={16} className="animate-spin" /> : <ArrowRightCircle size={16} />}
               </button>
+              )}
             </div>
           </div>
         );
@@ -825,233 +861,36 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
           </div>
         );
 
-      case 'proofOfBilling':
-        if (!detailedApplication?.proof_of_billing_url) return null;
+      case 'location':
+        if (!detailedApplication?.location) return null;
         return (
-          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'
-            }`}>
-            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-              }`}>Proof of Billing</div>
-            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-              }`}>
-              <span className="truncate mr-2">
-                {detailedApplication.proof_of_billing_url}
-              </span>
-              {detailedApplication?.proof_of_billing_url && (
-                <button
-                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  onClick={() => window.open(detailedApplication.proof_of_billing_url)}
-                >
-                  <ExternalLink size={16} />
-                </button>
-              )}
-            </div>
+          <div className={`flex border-b pb-4 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+            <div className={`w-40 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>Location:</div>
+            <div className={`flex-1 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>{detailedApplication.location}</div>
           </div>
         );
 
-      case 'governmentValidId':
-        if (!detailedApplication?.government_valid_id_url) return null;
+      case 'mapPin': {
+        if (!detailedApplication?.long_lat) return null;
+        const mapLink = mapLinkFor(detailedApplication.long_lat);
         return (
-          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'
-            }`}>
-            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-              }`}>Government Valid ID</div>
-            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-              }`}>
-              <span className="truncate mr-2">
-                {detailedApplication.government_valid_id_url}
-              </span>
-              {detailedApplication?.government_valid_id_url && (
+          <div className={`flex border-b pb-4 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+            <div className={`w-40 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>Map Pin:</div>
+            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+              <span className="truncate mr-2">{detailedApplication.long_lat}</span>
+              {mapLink && (
                 <button
-                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  onClick={() => window.open(detailedApplication.government_valid_id_url)}
+                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'}`}
+                  onClick={() => window.open(mapLink)}
+                  title="Open in Maps"
                 >
-                  <ExternalLink size={16} />
+                  <MapPin size={16} />
                 </button>
               )}
             </div>
           </div>
         );
-
-      case 'secondaryGovernmentValidId':
-        if (!detailedApplication?.secondary_government_valid_id_url) return null;
-        return (
-          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'
-            }`}>
-            <div className={`w-40 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-              }`}>
-              <div>Secondary Government</div>
-              <div>Valid ID</div>
-            </div>
-            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-              }`}>
-              <span className="truncate mr-2">
-                {detailedApplication.secondary_government_valid_id_url}
-              </span>
-              {detailedApplication?.secondary_government_valid_id_url && (
-                <button
-                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  onClick={() => window.open(detailedApplication.secondary_government_valid_id_url)}
-                >
-                  <ExternalLink size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        );
-
-      case 'houseFrontPicture':
-        if (!detailedApplication?.house_front_picture_url) return null;
-        return (
-          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'
-            }`}>
-            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-              }`}>House Front Picture</div>
-            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-              }`}>
-              <span className="truncate mr-2">
-                {detailedApplication.house_front_picture_url}
-              </span>
-              {detailedApplication?.house_front_picture_url && (
-                <button
-                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  onClick={() => window.open(detailedApplication.house_front_picture_url)}
-                >
-                  <ExternalLink size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        );
-
-      case 'promoImage':
-        if (!detailedApplication?.promo_url) return null;
-        return (
-          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'
-            }`}>
-            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-              }`}>Promo Image</div>
-            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-              }`}>
-              <span className="truncate mr-2">
-                {detailedApplication.promo_url}
-              </span>
-              {detailedApplication?.promo_url && (
-                <button
-                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  onClick={() => window.open(detailedApplication.promo_url)}
-                >
-                  <ExternalLink size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        );
-
-      case 'nearestLandmark1':
-        if (!detailedApplication?.nearest_landmark1_url) return null;
-        return (
-          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'
-            }`}>
-            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-              }`}>Nearest Landmark 1</div>
-            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-              }`}>
-              <span className="truncate mr-2">
-                {detailedApplication.nearest_landmark1_url}
-              </span>
-              {detailedApplication?.nearest_landmark1_url && (
-                <button
-                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  onClick={() => window.open(detailedApplication.nearest_landmark1_url)}
-                >
-                  <ExternalLink size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        );
-
-      case 'nearestLandmark2':
-        if (!detailedApplication?.nearest_landmark2_url) return null;
-        return (
-          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'
-            }`}>
-            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-              }`}>Nearest Landmark 2</div>
-            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-              }`}>
-              <span className="truncate mr-2">
-                {detailedApplication.nearest_landmark2_url}
-              </span>
-              {detailedApplication?.nearest_landmark2_url && (
-                <button
-                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  onClick={() => window.open(detailedApplication.nearest_landmark2_url)}
-                >
-                  <ExternalLink size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        );
-
-      case 'documentAttachment':
-        if (!detailedApplication?.document_attachment_url) return null;
-        return (
-          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'
-            }`}>
-            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-              }`}>Document Attachment</div>
-            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-              }`}>
-              <span className="truncate mr-2">
-                {detailedApplication.document_attachment_url}
-              </span>
-              {detailedApplication?.document_attachment_url && (
-                <button
-                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  onClick={() => window.open(detailedApplication.document_attachment_url)}
-                >
-                  <ExternalLink size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        );
-
-      case 'otherIspBill':
-        if (!detailedApplication?.other_isp_bill_url) return null;
-        return (
-          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'
-            }`}>
-            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-              }`}>Other ISP Bill</div>
-            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'
-              }`}>
-              <span className="truncate mr-2">
-                {detailedApplication.other_isp_bill_url}
-              </span>
-              {detailedApplication?.other_isp_bill_url && (
-                <button
-                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  onClick={() => window.open(detailedApplication.other_isp_bill_url)}
-                >
-                  <ExternalLink size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        );
+      }
 
       case 'remarks':
         if (!detailedApplication?.remarks) return null;
@@ -1131,6 +970,28 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
           </div>
 
           <div className="flex items-center space-x-3">
+            {isAgent && (
+              <button
+                className="px-3 py-1 rounded-sm flex items-center text-white"
+                style={{
+                  backgroundColor: colorPalette?.primary || '#7c3aed'
+                }}
+                onMouseEnter={(e) => {
+                  if (colorPalette?.accent) {
+                    e.currentTarget.style.backgroundColor = colorPalette.accent;
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (colorPalette?.primary) {
+                    e.currentTarget.style.backgroundColor = colorPalette.primary;
+                  }
+                }}
+                onClick={() => setShowEditModal(true)}
+                disabled={loading || !detailedApplication}
+              >
+                <span>Edit</span>
+              </button>
+            )}
             {!['scheduled', 'schedule'].includes(currentStatus) && hasPermission('application-management.move-to-jo') && (
               <button
                 className="px-3 py-1 rounded-sm flex items-center text-white"
@@ -1251,7 +1112,7 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
                       }`}>
                       Drag to reorder fields
                     </div>
-                    {fieldOrder.map((fieldKey, index) => (
+                    {fieldOrder.map((fieldKey, index) => hiddenFields.includes(fieldKey) ? null : (
                       <div
                         key={fieldKey}
                         draggable
@@ -1414,7 +1275,7 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
 
             {/* Related Data Section */}
             <div className="mt-8 space-y-4">
-              {[{ key: 'detailsUpdateLogs', label: 'Related Details Update Logs', dataKey: 'detailsUpdateLogs' }].map((section) => (
+              {[{ key: 'detailsUpdateLogs', label: 'Related Details Update Logs', dataKey: 'detailsUpdateLogs' }].filter(() => !isAgent).map((section) => (
                 <div key={section.key} className={`border-t pt-4 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
                   <div className={`w-full py-2 flex items-center justify-between`}>
                     <div className="flex items-center space-x-2">
@@ -1656,6 +1517,18 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
       )}
 
       {/* Application Attachment Modal */}
+      {isAgent && detailedApplication && (
+        <ApplicationEditModal
+          isOpen={showEditModal}
+          application={detailedApplication}
+          onClose={() => setShowEditModal(false)}
+          onSaved={async () => {
+            setDetailedApplication(await getApplication(application.id));
+            if (onApplicationUpdate) onApplicationUpdate();
+          }}
+        />
+      )}
+
       <ApplicationAttachmentModal
         isOpen={showAttachmentModal}
         onClose={() => setShowAttachmentModal(false)}

@@ -15,7 +15,6 @@ import { Filter, Download, RefreshCw, X, ExternalLink } from 'lucide-react-nativ
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import ApplicationDetails from '../components/ApplicationDetails';
-import AddApplicationModal from '../modals/AddApplicationModal';
 import ApplicationFunnelFilter, {
   allColumns as filterColumns,
   FilterValues,
@@ -24,6 +23,7 @@ import { useApplicationStore } from '../store/applicationStore';
 import { Application } from '../types/application';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { exportToCSV } from '../utils/exportUtils';
+import { AGENT_HIDDEN_APPLICATION_FIELDS, isAgentUser } from '../utils/agentReferral';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -140,7 +140,6 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
   const [timestampTo] = useState('');
 
   const [isSidebarVisible, setIsSidebarVisible] = useState(false);
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isFunnelFilterOpen, setIsFunnelFilterOpen] = useState(false);
   const [isRefreshingManual, setIsRefreshingManual] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -324,6 +323,13 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
     });
   }, [applications, searchQuery, funnelFilters, timestampFrom, timestampTo, isSuperUser, currentUserOrgId]);
 
+  const hiddenFields = useMemo<string[]>(
+    () => (isAgentUser(currentUserRole, currentUserRoleId) ? AGENT_HIDDEN_APPLICATION_FIELDS : []),
+    [currentUserRole, currentUserRoleId]
+  );
+  const showsStatus = !hiddenFields.includes('status');
+  const availableColumns = allColumns.filter((column) => !hiddenFields.includes(column.key));
+
   const statusItems = useMemo(() => {
     const statuses = [
       { name: 'Scheduled', value: 'scheduled' },
@@ -345,11 +351,12 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
     });
     return {
       items: statuses
+        .filter(() => showsStatus)
         .map((s) => ({ id: `status:${s.value}`, name: s.name, count: counts[s.value] || 0 }))
         .filter((s) => s.count > 0),
       total: globalFilteredApplications.length,
     };
-  }, [globalFilteredApplications]);
+  }, [globalFilteredApplications, showsStatus]);
 
   const filteredApplications = useMemo(() => {
     let filtered = globalFilteredApplications.filter((application) => {
@@ -408,7 +415,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
 
   const handleExport = () => {
     if (!filteredApplications.length) return;
-    exportToCSV('applications_export', allColumns, filteredApplications, renderCellValue);
+    exportToCSV('applications_export', availableColumns, filteredApplications, renderCellValue);
   };
 
   const handleApplyFilters = async (filters: FilterValues) => {
@@ -608,9 +615,11 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
             </Text>
           </View>
           <View style={{ flexDirection: 'column', alignItems: 'flex-end', gap: 4, marginLeft: 16, flexShrink: 0 }}>
-            <Text style={{ fontWeight: 'bold', textTransform: 'uppercase', color: statusColor }}>
-              {statusDisplay}
-            </Text>
+            {showsStatus && (
+              <Text style={{ fontWeight: 'bold', textTransform: 'uppercase', color: statusColor }}>
+                {statusDisplay}
+              </Text>
+            )}
           </View>
         </View>
       </TouchableOpacity>
@@ -929,16 +938,6 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
         </Modal>
       )}
 
-      {/* Add Application Modal */}
-      <AddApplicationModal
-        isOpen={isAddModalOpen}
-        onClose={() => setIsAddModalOpen(false)}
-        onSave={() => {
-          silentRefresh().catch(() => { });
-          setIsAddModalOpen(false);
-        }}
-      />
-
       {/* Funnel Filter */}
       <ApplicationFunnelFilter
         isOpen={isFunnelFilterOpen}
@@ -948,6 +947,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
           setIsFunnelFilterOpen(false);
         }}
         currentFilters={funnelFilters}
+        hiddenColumns={hiddenFields}
       />
     </View>
   );

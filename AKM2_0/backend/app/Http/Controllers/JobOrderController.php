@@ -1161,7 +1161,7 @@ class JobOrderController extends Controller
                 'house_front_picture_url' => $jobOrder->house_front_picture_url ?? $application->house_front_picture_url,
                 'proof_of_billing_url' => $application->proof_of_billing_url,
                 'government_valid_id_url' => $application->government_valid_id_url,
-                'second_government_valid_id_url' => $application->secondary_government_valid_id_url,
+                'second_government_valid_id_url' => $application->second_government_valid_id_url,
                 'document_attachment_url' => $application->document_attachment_url,
                 'other_isp_bill_url' => $application->other_isp_bill_url,
                 'organization_id' => $organizationId,

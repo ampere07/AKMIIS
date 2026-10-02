@@ -155,3 +155,15 @@ export const clockSkewFrom = (serverTime: unknown, deviceNow: number): number =>
   const server = parseResetsAt(serverTime);
   return server === null ? 0 : server - deviceNow;
 };
+
+export const AGENT_ROLE_ID = 4;
+
+export const isAgentUser = (role?: string | null, roleId?: number | string | null): boolean =>
+  (role || '').toLowerCase().trim() === 'agent' || String(roleId ?? '') === String(AGENT_ROLE_ID);
+
+export const AGENT_SECTIONS = ['applicationManagement', 'menu', 'release-notes'];
+
+export const AGENT_HIDDEN_APPLICATION_FIELDS = ['status', 'remarks'];
+
+export const agentSectionFor = (section: string): string =>
+  AGENT_SECTIONS.includes(section) ? section : AGENT_SECTIONS[0];

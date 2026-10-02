@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, FileWarning, List, Router, DollarSign, Receipt, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck, ReceiptText } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
+import { AGENT_SECTIONS, isAgentUser } from '../utils/agentReferral';
 import {
   navBadgeService,
   NAV_BADGE_SECTIONS,
@@ -368,6 +369,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     const isInventoryStaff = normalizedUserRole === 'inventorystaff' || String(roleId) === '5';
 
     if (normalizedUserRole === 'customer' || String(roleId) === '3') return [];
+    if (isAgentUser(userRole, roleId)) return items.filter(item => AGENT_SECTIONS.includes(item.id));
 
     return items.filter(item => {
       const effectiveUserData = JSON.parse(localStorage.getItem('authData') || '{}');

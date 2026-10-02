@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\AgentReferral;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -61,7 +62,7 @@ class NavBadgeCountController extends Controller
             // The route is behind auth:sanctum, so this is belt-and-braces —
             // but returning zeros rather than counts is the right failure for a
             // caller we cannot identify.
-            if (!$user) {
+            if (!$user || AgentReferral::isAgent($user)) {
                 return response()->json([
                     'success' => true,
                     'data' => $this->emptyCounts(),

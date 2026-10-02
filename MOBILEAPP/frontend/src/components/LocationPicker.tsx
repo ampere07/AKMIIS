@@ -12,6 +12,7 @@ interface LocationPickerProps {
   label?: string;
   required?: boolean;
   error?: string;
+  showCurrentLocation?: boolean;
 }
 
 interface Coordinates {
@@ -32,7 +33,8 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
   isDarkMode,
   label = 'Location',
   required = false,
-  error
+  error,
+  showCurrentLocation = true
 }) => {
   const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
   const [isGettingLocation, setIsGettingLocation] = useState(false);
@@ -217,6 +219,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
               />
             )}
           </MapView>
+          {showCurrentLocation && (
           <Pressable
             onPress={handleGetCurrentLocation}
             disabled={isGettingLocation}
@@ -234,6 +237,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
               {isGettingLocation ? 'Getting...' : 'Get My Location'}
             </Text>
           </Pressable>
+          )}
         </View>
 
         <View className={`p-3 border-t flex-row items-center space-x-2 ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'

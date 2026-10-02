@@ -36,7 +36,7 @@ class Application extends Model
         'referred_by',
         'proof_of_billing_url',
         'government_valid_id_url',
-        'secondary_government_valid_id_url',
+        'second_government_valid_id_url',
         'house_front_picture_url',
         'promo_url',
         'nearest_landmark1_url',

@@ -19,7 +19,7 @@ export interface Application {
   referred_by?: string;
   proof_of_billing_url?: string;
   government_valid_id_url?: string;
-  secondary_government_valid_id_url?: string;
+  second_government_valid_id_url?: string;
   house_front_picture_url?: string;
   promo_url?: string;
   nearest_landmark1_url?: string;

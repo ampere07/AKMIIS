@@ -29,7 +29,8 @@ export const SearchablePickerTrigger = ({
   error, 
   isDarkMode, 
   placeholder = "Select...",
-  required = false
+  required = false,
+  disabled = false
 }: {
   label: string;
   value: string;
@@ -38,6 +39,7 @@ export const SearchablePickerTrigger = ({
   isDarkMode?: boolean;
   placeholder?: string;
   required?: boolean;
+  disabled?: boolean;
 }) => (
   <View style={styles.inputGroup}>
     <Text style={[styles.label, { color: isDarkMode ? '#d1d5db' : '#374151' }]}>
@@ -45,7 +47,9 @@ export const SearchablePickerTrigger = ({
     </Text>
     <Pressable
       onPress={onPress}
+      disabled={disabled}
       style={[styles.searchContainer, {
+        opacity: disabled ? 0.5 : 1,
         backgroundColor: isDarkMode ? '#1f2937' : '#ffffff',
         borderColor: error ? '#ef4444' : (isDarkMode ? '#374151' : '#d1d5db'),
         height: 50,

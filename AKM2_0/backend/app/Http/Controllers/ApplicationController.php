@@ -11,6 +11,8 @@ use App\Models\AuditTrailLog;
 use App\Models\ActivityLog;
 use App\Models\User;
 use App\Events\ApplicationViewingUpdate;
+use App\Support\AgentReferral;
+use Illuminate\Database\Eloquent\Builder;
 
 class ApplicationController extends Controller
 {
@@ -41,17 +43,8 @@ class ApplicationController extends Controller
                 $columns = ['*'];
             }
 
-            $query = Application::select($columns)->orderBy('id', 'desc');
-
-            // Apply organization filter
-            $currentUser = auth()->user();
-            if ($currentUser) {
-                if ($currentUser->organization_id) {
-                    $query->where('organization_id', $currentUser->organization_id);
-                } else {
-                    $query->whereNull('organization_id');
-                }
-            }
+            $query = $this->visibleApplications()->select($columns)->orderBy('id', 'desc');
+            $hiddenFields = $this->hiddenFieldsForCurrentUser();
 
             // Apply 'since' filter if provided
             if ($since) {
@@ -84,7 +77,7 @@ class ApplicationController extends Controller
                 $applications = $applications->slice(0, $limit);
             }
 
-            $formattedApplications = $applications->map(function ($app) use ($fastMode) {
+            $formattedApplications = $applications->map(function ($app) use ($fastMode, $hiddenFields) {
                 $data = [
                     'id' => (string)$app->id,
                     'customer_name' => $this->getFullName($app),
@@ -117,7 +110,7 @@ class ApplicationController extends Controller
                         'referred_by' => $app->referred_by,
                         'proof_of_billing_url' => $app->proof_of_billing_url,
                         'government_valid_id_url' => $app->government_valid_id_url,
-                        'secondary_government_valid_id_url' => $app->secondary_government_valid_id_url,
+                        'second_government_valid_id_url' => $app->second_government_valid_id_url,
                         'house_front_picture_url' => $app->house_front_picture_url,
                         'promo_url' => $app->promo_url,
                         'nearest_landmark1_url' => $app->nearest_landmark1_url,
@@ -132,7 +125,7 @@ class ApplicationController extends Controller
                     ]);
                 }
 
-                return $data;
+                return array_diff_key($data, array_flip($hiddenFields));
             });
 
             return response()->json([
@@ -157,6 +150,29 @@ class ApplicationController extends Controller
         }
     }
     
+    private function visibleApplications(): Builder
+    {
+        $query = Application::query();
+        $currentUser = auth()->user();
+        if (!$currentUser) {
+            return $query;
+        }
+        if ($currentUser->organization_id) {
+            $query->where('organization_id', $currentUser->organization_id);
+        } else {
+            $query->whereNull('organization_id');
+        }
+        if (AgentReferral::isAgent($currentUser)) {
+            AgentReferral::restrictToReferrals($query, $currentUser);
+        }
+        return $query;
+    }
+
+    private function hiddenFieldsForCurrentUser(): array
+    {
+        return AgentReferral::isAgent(auth()->user()) ? AgentReferral::HIDDEN_APPLICATION_FIELDS : [];
+    }
+
     private function getFullName($app)
     {
         $parts = array_filter([
@@ -222,7 +238,7 @@ class ApplicationController extends Controller
                 'promo' => 'nullable|string|max:255',
                 'proof_of_billing_url' => 'nullable|string|max:255',
                 'government_valid_id_url' => 'nullable|string|max:255',
-                'secondary_government_valid_id_url' => 'nullable|string|max:255',
+                'second_government_valid_id_url' => 'nullable|string|max:255',
                 'house_front_picture_url' => 'nullable|string|max:255',
                 'promo_url' => 'nullable|string|max:255',
                 'nearest_landmark1_url' => 'nullable|string|max:255',
@@ -303,7 +319,7 @@ class ApplicationController extends Controller
                 'referred_by' => $application->referred_by,
                 'proof_of_billing_url' => $application->proof_of_billing_url,
                 'government_valid_id_url' => $application->government_valid_id_url,
-                'secondary_government_valid_id_url' => $application->secondary_government_valid_id_url,
+                'second_government_valid_id_url' => $application->second_government_valid_id_url,
                 'house_front_picture_url' => $application->house_front_picture_url,
                 'promo_url' => $application->promo_url,
                 'nearest_landmark1_url' => $application->nearest_landmark1_url,
@@ -343,18 +359,8 @@ class ApplicationController extends Controller
     {
         try {
             Log::info('ApplicationController show: Fetching application ID: ' . $id);
-            
-            $query = Application::query();
-            $currentUser = auth()->user();
-            if ($currentUser) {
-                if ($currentUser->organization_id) {
-                    $query->where('organization_id', $currentUser->organization_id);
-                } else {
-                    $query->whereNull('organization_id');
-                }
-            }
-            
-            $application = $query->findOrFail($id);
+
+            $application = $this->visibleApplications()->findOrFail($id);
             
             $formattedApplication = [
                 'id' => (string)$application->id,
@@ -381,7 +387,7 @@ class ApplicationController extends Controller
                 'referred_by' => $application->referred_by,
                 'proof_of_billing_url' => $application->proof_of_billing_url,
                 'government_valid_id_url' => $application->government_valid_id_url,
-                'secondary_government_valid_id_url' => $application->secondary_government_valid_id_url,
+                'second_government_valid_id_url' => $application->second_government_valid_id_url,
                 'house_front_picture_url' => $application->house_front_picture_url,
                 'promo_url' => $application->promo_url,
                 'nearest_landmark1_url' => $application->nearest_landmark1_url,
@@ -402,7 +408,7 @@ class ApplicationController extends Controller
             ];
             
             return response()->json([
-                'application' => $formattedApplication,
+                'application' => array_diff_key($formattedApplication, array_flip($this->hiddenFieldsForCurrentUser())),
                 'success' => true
             ]);
         } catch (\Exception $e) {
@@ -442,17 +448,11 @@ class ApplicationController extends Controller
                 'organization_id' => 'nullable|integer'
             ]);
 
-            $query = Application::query();
-            $currentUser = auth()->user();
-            if ($currentUser) {
-                if ($currentUser->organization_id) {
-                    $query->where('organization_id', $currentUser->organization_id);
-                } else {
-                    $query->whereNull('organization_id');
-                }
+            if (AgentReferral::isAgent(auth()->user())) {
+                $validatedData = array_diff_key($validatedData, array_flip(AgentReferral::LOCKED_APPLICATION_FIELDS));
             }
 
-            $application = $query->findOrFail($id);
+            $application = $this->visibleApplications()->findOrFail($id);
             $oldStatus = $application->status;
 
             Log::info("=== UPDATE PAYLOAD FOR APP #$id ===", $request->all());
@@ -522,7 +522,7 @@ class ApplicationController extends Controller
 
             return response()->json([
                 'message' => 'Application updated successfully',
-                'application' => $application,
+                'application' => $application->makeHidden($this->hiddenFieldsForCurrentUser()),
                 'success' => true
             ]);
         } catch (\Exception $e) {
@@ -539,17 +539,11 @@ class ApplicationController extends Controller
     public function destroy($id)
     {
         try {
-            $query = Application::query();
-            $currentUser = auth()->user();
-            if ($currentUser) {
-                if ($currentUser->organization_id) {
-                    $query->where('organization_id', $currentUser->organization_id);
-                } else {
-                    $query->whereNull('organization_id');
-                }
+            if (AgentReferral::isAgent(auth()->user())) {
+                return response()->json(['message' => 'Agents cannot delete applications', 'success' => false], 403);
             }
 
-            $application = $query->findOrFail($id);
+            $application = $this->visibleApplications()->findOrFail($id);
             $applicationData = $application->toArray();
             $application->delete();
 
@@ -624,7 +618,7 @@ class ApplicationController extends Controller
     public function uploadImages(Request $request, $id)
     {
         try {
-            $application = Application::findOrFail($id);
+            $application = $this->visibleApplications()->findOrFail($id);
             $driveService = resolve(\App\Services\GoogleDriveService::class);
 
             $folderName = $request->input('folder_name', "(application) " . $application->first_name . " " . $application->last_name);
@@ -634,7 +628,7 @@ class ApplicationController extends Controller
             $fields = [
                 'proof_of_billing' => 'proof_of_billing_url',
                 'government_valid_id' => 'government_valid_id_url',
-                'secondary_government_valid_id' => 'secondary_government_valid_id_url',
+                'secondary_government_valid_id' => 'second_government_valid_id_url',
                 'house_front_image' => 'house_front_picture_url',
                 'promo_image' => 'promo_url',
                 'nearest_landmark1' => 'nearest_landmark1_url',

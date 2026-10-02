@@ -45,13 +45,13 @@ export const useApplicationStore = create<ApplicationState>((set, get) => ({
     isFullyLoaded: false,
 
     fetchApplications: async (search = '', silent = false, since?: string) => {
-        const fetchId = Date.now();
-        set({ currentFetchId: fetchId });
-
         const { applications, isLoading } = get();
 
         // If already loading and this is not a forced re-load, ignore
         if (isLoading) return;
+
+        const fetchId = Date.now();
+        set({ currentFetchId: fetchId });
 
         // Show loading if not silent OR if we have no data
         if (!silent || applications.length === 0) {
