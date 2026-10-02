@@ -174,10 +174,9 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
 
     let dueDateString = 'Upon Receipt';
     if (latestInvoice?.due_date) {
-        // Read the date parts directly so the stored date is shown as-is, without a timezone shift.
-        const [y, m, d] = String(latestInvoice.due_date).split('T')[0].split(' ')[0].split('-').map(Number);
-        if (y && m && d) {
-            dueDateString = new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        const parsed = new Date(latestInvoice.due_date);
+        if (!isNaN(parsed.getTime())) {
+            dueDateString = parsed.toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric', year: 'numeric' });
         }
     }
 
