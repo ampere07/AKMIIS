@@ -29,6 +29,7 @@ interface CreateTransactionPayload {
   remarks?: string;
   status: string;
   image_url?: string;
+  proof_payment_url?: string;
   created_by_user?: string;
 }
 
@@ -183,6 +184,8 @@ export const transactionService = {
       console.error('Error uploading transaction images:', error);
       return {
         success: false,
+        message: error.response?.data?.message || error.message || 'Failed to upload image',
+        error: error.response?.data?.error || error.message
       };
     }
   },

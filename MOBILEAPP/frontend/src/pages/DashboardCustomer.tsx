@@ -159,14 +159,26 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
         return `${m.padStart(2, '0')}/${d.padStart(2, '0')}/${y}`;
     };
 
+    // The latest invoice is the most recently generated one (highest id), the same one the
+    // Invoices list shows first. The backend orders by invoice_date only, which has no
+    // tie-breaker, so invoiceRecords[0] is not reliably the latest.
+    const latestInvoice = useMemo(() => {
+        const list = invoiceRecords || [];
+        if (list.length === 0) return null;
+        return [...list].sort((a: any, b: any) => {
+            const byId = Number(b.id || 0) - Number(a.id || 0);
+            if (byId !== 0) return byId;
+            return String(b.invoice_date || '').localeCompare(String(a.invoice_date || ''));
+        })[0];
+    }, [invoiceRecords]);
+
     let dueDateString = 'Upon Receipt';
-    // Prefer the real due date stored on the latest invoice (invoiceRecords are
-    // ordered by invoice_date desc by the backend). Only fall back to deriving it
-    // from the billing day when the account has no invoice yet.
-    const latestInvoiceDueDate = formatDbDate(invoiceRecords?.[0]?.due_date);
+    // Show the due date stored on the latest invoice. Only derive one from the billing day
+    // when the account has no invoice yet.
+    const latestInvoiceDueDate = formatDbDate(latestInvoice?.due_date);
     if (latestInvoiceDueDate) {
         dueDateString = latestInvoiceDueDate;
-    } else if (customerDetail?.billingAccount?.billingDay) {
+    } else if (!latestInvoice && customerDetail?.billingAccount?.billingDay) {
         const today = new Date();
         const billingDay = customerDetail.billingAccount.billingDay;
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { View, Text, Pressable, useWindowDimensions, ActivityIndicator, TextInput, StyleSheet, Modal, Alert, ScrollView } from 'react-native';
+import { View, Text, Pressable, useWindowDimensions, ActivityIndicator, TextInput, StyleSheet, Modal, Alert, ScrollView, Platform } from 'react-native';
 import { MapPin, Search, Plus, Navigation, Check, X } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ExpoLocation from 'expo-location';
@@ -697,7 +697,15 @@ const LcpNapLocation: React.FC = () => {
                     longitudeDelta: pendingRegionRef.current.longitudeDelta,
                   }, 250);
                 }}
-                mapType="none"
+                /*
+                  "none" blanks the built-in basemap so only the ESRI tiles below
+                  show — but it is an Android-only value. iOS has no MKMapType for
+                  it and falls back to the standard Apple basemap, so the tiles
+                  would be drawn on top of Apple Maps rather than instead of it.
+                  The iOS equivalent is shouldReplaceMapContent on the opaque tile
+                  layers, set below.
+                */
+                mapType={Platform.OS === 'ios' ? 'standard' : 'none'}
                 showsPointsOfInterest={false}
                 // Disable Google-specific props
                 showsBuildings={false}
@@ -712,12 +720,22 @@ const LcpNapLocation: React.FC = () => {
                   and from 17 the aerial takes over at whatever depth the area on screen
                   actually has — see config/esriCoverage.ts.
                 */}
-                {/* ESRI ArcGIS World Light Gray Base — free tiles, no API key, designed for app use, hides POIs */}
+                {/*
+                  ESRI ArcGIS World Light Gray Base — free tiles, no API key, designed for
+                  app use, hides POIs.
+
+                  shouldReplaceMapContent is how iOS is told not to draw Apple Maps
+                  underneath (MKTileOverlay.canReplaceMapContent); it is ignored on
+                  Android, where mapType="none" has already done the same job. It is set
+                  only on the two opaque layers — claiming it for a transparent overlay
+                  would blank the map wherever that overlay shows through.
+                */}
                 <UrlTile
                   urlTemplate="https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
                   maximumZ={16}
                   flipY={false}
                   tileSize={256}
+                  shouldReplaceMapContent
                   // @ts-ignore
                   zIndex={-2}
                 />
@@ -738,6 +756,7 @@ const LcpNapLocation: React.FC = () => {
                   maximumNativeZ={aerialNativeZ}
                   flipY={false}
                   tileSize={256}
+                  shouldReplaceMapContent
                   // @ts-ignore
                   zIndex={-2}
                 />

@@ -24,6 +24,7 @@ class Transaction extends Model
         'remarks',
         'status',
         'image_url',
+        'proof_payment_url',
         'created_by_user',
         'updated_by_user',
         'approved_by',

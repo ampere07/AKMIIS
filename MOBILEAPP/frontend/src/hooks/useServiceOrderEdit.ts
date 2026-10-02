@@ -83,6 +83,7 @@ export interface ServiceOrderEditFormData {
   routerReadingImage: string;
   boxReadingImage: string;
   portLabelImage: string;
+  addressCoordinates: string;
 }
 
 export interface ImageFiles {
@@ -740,7 +741,7 @@ const initialFormState: ServiceOrderEditFormData = {
   itemName1: '', timeIn: '', modemSetupImage: '', timeOut: '', assignedEmail: '', concern: '', concernRemarks: '',
   modifiedBy: '', modifiedDate: '', serviceCharge: '0.00', status: 'unused',
   newRouterModemSN: '', newLcp: '', newNap: '', newPort: '', newVlan: '', routerModel: '', newPlan: '', newLcpnap: '', fullAddress: '', proofImage: '',
-  setupImage: '', routerReadingImage: '', boxReadingImage: '', portLabelImage: ''
+  setupImage: '', routerReadingImage: '', boxReadingImage: '', portLabelImage: '', addressCoordinates: ''
 };
 
 const mapApiToForm = (d: any): Partial<ServiceOrderEditFormData> => {
@@ -794,7 +795,8 @@ const mapApiToForm = (d: any): Partial<ServiceOrderEditFormData> => {
     newVlan: d.newVlan || d.new_vlan || '', routerModel: d.routerModel || d.router_model || '',
     newLcpnap: d.newLcpnap || d.new_lcpnap || '', fullAddress: d.fullAddress || d.full_address || '', proofImage: d.proofImage || d.proof_image_url || d.proof_image || '',
     setupImage: d.setupImage || d.setup_image_url || '', routerReadingImage: d.routerReadingImage || d.router_reading_image_url || '',
-    boxReadingImage: d.boxReadingImage || d.box_reading_image_url || '', portLabelImage: d.portLabelImage || d.speedtest_image_url || ''
+    boxReadingImage: d.boxReadingImage || d.box_reading_image_url || '', portLabelImage: d.portLabelImage || d.speedtest_image_url || '',
+    addressCoordinates: d.addressCoordinates || d.address_coordinates || ''
   };
 };
 
@@ -848,7 +850,9 @@ const mapFormToApi = (f: ServiceOrderEditFormData, uploads: any, user: string, o
         setup_image_url: uploads.setup_image_url || f.setupImage || '',
         router_reading_image_url: uploads.router_reading_image_url || f.routerReadingImage || '',
         box_reading_image_url: uploads.box_reading_image_url || f.boxReadingImage || '',
-        speedtest_image_url: uploads.speedtest_image_url || f.portLabelImage || ''
+        speedtest_image_url: uploads.speedtest_image_url || f.portLabelImage || '',
+        // Saved to the customer record by the backend
+        ...(f.addressCoordinates?.trim() ? { address_coordinates: f.addressCoordinates.trim() } : {})
       };
 
       if (!existingEndTime) {

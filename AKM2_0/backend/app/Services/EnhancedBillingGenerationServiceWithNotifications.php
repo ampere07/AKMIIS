@@ -29,13 +29,6 @@ class EnhancedBillingGenerationServiceWithNotifications
     protected const DAYS_UNTIL_DC_NOTICE = 4;
     protected const END_OF_MONTH_BILLING = 0;
 
-    /**
-     * Minimum number of days a subscriber must have been disconnected before the
-     * reconnection is prorated. Shorter outages are absorbed and the full plan price
-     * is charged. {@see calculateReconnectionProrate()}
-     */
-    protected const RECONNECTION_GRACE_DAYS = 7;
-
     public function __construct(BillingNotificationService $notificationService)
     {
         $this->notificationService = $notificationService;
@@ -854,14 +847,23 @@ class EnhancedBillingGenerationServiceWithNotifications
     /**
      * Proration owed for reconnections that have not been billed yet.
      *
-     * Only Active accounts are billed, so a disconnected subscriber is skipped by the
-     * generator entirely. On reconnection the days between the reconnection and the next
-     * billing date are therefore un-billed and are charged here, on top of the plan fee
-     * that covers the following cycle.
+     * Pro-rating threshold rule, per reconnection:
+     *   threshold = due date + disconnection_day + grace_charge_day (from BillingConfig),
+     *   the same date the grace period charge runs.
+     *   - Paid before the threshold: no proration. The next bill is generated normally at
+     *     the full plan price (this method contributes 0.00).
+     *   - Paid on or after the threshold: the next bill is prorated from the actual payment
+     *     date to the customer's billing day, and that amount replaces the plan fee.
      *
-     * 7-day grace rule: a subscriber who was disconnected for fewer than
-     * RECONNECTION_GRACE_DAYS days is not prorated at all — the outage is absorbed and the
-     * full plan price stands (this method contributes 0.00 for that log).
+     * Example (billing day 5th, due_date_day 0, disconnection_day 10, grace_charge_day 7):
+     * due 5th, DC 15th, threshold 22nd. Paying on the 20th gives a normal bill; paying on
+     * the 22nd or later gives a bill prorated from the payment date.
+     *
+     * The due date is the one stored on the customer's latest invoice dated on or before
+     * the reconnection — the bill they were disconnected over (resolveDueDateForReconnection).
+     * The payment date is the latest completed payment between the outage and the
+     * reconnection, or the reconnection date when none is on file
+     * (resolvePaymentDateForReconnection).
      *
      * @return array{total_prorate:float, pro_rate_start:?string, log_ids:array}
      */
@@ -955,39 +957,47 @@ class EnhancedBillingGenerationServiceWithNotifications
                 return $dcLog->created_at !== null && stripos((string) $dcLog->remarks, 'Auto DC') !== false;
             }) ?? $precedingDcs->first();
 
-            $hasNullTimestamp = ($initialDisconnection->created_at === null);
-            if ($hasNullTimestamp) {
-                // Legacy imported disconnection record without timestamp: outage is known to be long (> 7 days)
-                $daysDisconnected = self::RECONNECTION_GRACE_DAYS + 1;
-                $dcDate = null;
-            } else {
-                $dcDate = Carbon::parse($initialDisconnection->created_at)->startOfDay();
-                $daysDisconnected = $dcDate->diffInDays($reconDate);
-            }
+            // Legacy imported disconnection rows have no timestamp; they only confirm an outage.
+            $dcDate = $initialDisconnection->created_at !== null
+                ? Carbon::parse($initialDisconnection->created_at)->startOfDay()
+                : null;
 
-            // Only genuinely short disconnections (under grace threshold, e.g. < 7 days) absorb the outage
-            if ($daysDisconnected < self::RECONNECTION_GRACE_DAYS) {
-                $this->log('info', 'Disconnection is within grace threshold; keeping balance as-is without adding extra pro-rate', [
+            // Pro-rating threshold = due date + disconnection_day + grace_charge_day, the same
+            // date AutoDisconnectService runs the grace period charge.
+            $dueDate = $this->resolveDueDateForReconnection($account, $reconDate, $currentCycleStart);
+            $threshold = $this->resolveProrateThreshold($dueDate);
+
+            // The actual payment that settled the account; the reconnection date when none is on file.
+            $paymentDate = $this->resolvePaymentDateForReconnection($account, $dcDate ?? $dueDate, Carbon::parse($log->created_at));
+            $paymentSource = $paymentDate ? 'payment' : 'reconnection_fallback';
+            $paymentDate = $paymentDate ?? $reconDate->copy();
+
+            // Paid before the threshold: the next bill is generated normally at the full plan price.
+            if ($paymentDate->lt($threshold)) {
+                $this->log('info', 'Paid before the pro-rating threshold; billing normally without pro-rate', [
                     'account_no' => $account->account_no,
                     'reconnection_log_id' => $log->id,
                     'disconnected_log_id' => $initialDisconnection->id,
                     'disconnection_date' => $dcDate ? $dcDate->format('Y-m-d') : 'legacy_null',
                     'reconnection_date' => $reconDate->format('Y-m-d'),
-                    'days_disconnected' => $daysDisconnected
+                    'payment_date' => $paymentDate->format('Y-m-d'),
+                    'payment_date_source' => $paymentSource,
+                    'due_date' => $dueDate->format('Y-m-d'),
+                    'prorate_threshold' => $threshold->format('Y-m-d')
                 ]);
                 $logIds[] = $log->id;
                 continue;
             }
 
-            // Charge the days the service is actually active between the reconnection and
-            // this cycle's billing date, on the fixed 30-day divisor.
-            $daysActive = min($reconDate->diffInDays($currentCycleEnd), self::DAYS_IN_MONTH);
+            // Paid on or after the threshold: charge the days from the payment date to this
+            // cycle's billing day, on the fixed 30-day divisor.
+            $daysActive = min($paymentDate->diffInDays($currentCycleEnd), self::DAYS_IN_MONTH);
 
             if ($daysActive <= 0) {
-                $this->log('info', 'Reconnection falls on the billing date; no active days to prorate', [
+                $this->log('info', 'Payment falls on the billing date; no active days to prorate', [
                     'account_no' => $account->account_no,
                     'reconnection_log_id' => $log->id,
-                    'reconnection_date' => $reconDate->format('Y-m-d'),
+                    'payment_date' => $paymentDate->format('Y-m-d'),
                     'cycle_end' => $currentCycleEnd->format('Y-m-d')
                 ]);
                 $logIds[] = $log->id;
@@ -999,17 +1009,20 @@ class EnhancedBillingGenerationServiceWithNotifications
             $totalProrate += $proratedAmount;
             $logIds[] = $log->id;
 
-            if (!$proRateStart || $reconDate->lt(Carbon::parse($proRateStart))) {
-                $proRateStart = $reconDate->format('Y-m-d');
+            if (!$proRateStart || $paymentDate->lt(Carbon::parse($proRateStart))) {
+                $proRateStart = $paymentDate->format('Y-m-d');
             }
 
-            $this->log('info', 'Calculated reconnection prorate for active days after a qualifying disconnection', [
+            $this->log('info', 'Paid on or after the pro-rating threshold; prorating from payment date to billing day', [
                 'account_no' => $account->account_no,
                 'reconnection_log_id' => $log->id,
                 'disconnected_log_id' => $initialDisconnection->id,
                 'disconnection_date' => $dcDate ? $dcDate->format('Y-m-d') : 'legacy_null',
                 'reconnection_date' => $reconDate->format('Y-m-d'),
-                'days_disconnected' => $daysDisconnected,
+                'payment_date' => $paymentDate->format('Y-m-d'),
+                'payment_date_source' => $paymentSource,
+                'due_date' => $dueDate->format('Y-m-d'),
+                'prorate_threshold' => $threshold->format('Y-m-d'),
                 'cycle_end' => $currentCycleEnd->format('Y-m-d'),
                 'days_active' => $daysActive,
                 'monthly_fee' => $monthlyFee,
@@ -1035,6 +1048,83 @@ class EnhancedBillingGenerationServiceWithNotifications
             'pro_rate_start' => $proRateStart,
             'log_ids' => $logIds
         ];
+    }
+
+    /**
+     * The due date a reconnection is measured against: the stored due_date of the
+     * customer's latest invoice dated on or before the reconnection, which is the bill
+     * they were disconnected over. Falls back to the previous billing date plus the
+     * configured due date offset when no such invoice (or due date) exists.
+     */
+    protected function resolveDueDateForReconnection(BillingAccount $account, Carbon $reconDate, Carbon $currentCycleStart): Carbon
+    {
+        $invoice = Invoice::where('account_no', $account->account_no)
+            ->whereDate('invoice_date', '<=', $reconDate->format('Y-m-d'))
+            ->whereNotNull('due_date')
+            ->orderBy('invoice_date', 'desc')
+            ->orderBy('id', 'desc')
+            ->first(['id', 'due_date']);
+
+        if ($invoice) {
+            return Carbon::parse($invoice->due_date)->startOfDay();
+        }
+
+        return $currentCycleStart->copy()->startOfDay()->addDays($this->getDueDateOffset());
+    }
+
+    /**
+     * The date from which a payment makes the next bill pro-rated:
+     * due date + disconnection_day + grace_charge_day.
+     *
+     * It is the same date AutoDisconnectService::processGracePeriodCharge() runs, and uses
+     * the same fallbacks (disconnection_day 10, grace_charge_day 7 when unset or <= 0), so
+     * the two never drift apart.
+     */
+    protected function resolveProrateThreshold(Carbon $dueDate): Carbon
+    {
+        $config = BillingConfig::first();
+
+        $dcAfterDue = (int) ($config?->disconnection_day ?? 10);
+        $graceAfterDc = (int) ($config?->grace_charge_day ?? 7);
+        if ($graceAfterDc <= 0) {
+            $graceAfterDc = 7;
+        }
+
+        return $dueDate->copy()->startOfDay()->addDays(max(0, $dcAfterDue) + $graceAfterDc);
+    }
+
+    /**
+     * The actual date the customer paid to get reconnected: the latest completed payment on
+     * the account between the start of the outage and the reconnection. Covers both manual
+     * transactions (status Done, payment_date) and online payments (paid portal logs,
+     * date_time). Returns null when no such payment is on file.
+     */
+    protected function resolvePaymentDateForReconnection(BillingAccount $account, Carbon $outageStart, Carbon $reconnectedAt): ?Carbon
+    {
+        $from = $outageStart->copy()->startOfDay();
+        $to = $reconnectedAt->copy()->endOfDay();
+
+        $manualPaidAt = DB::table('transactions')
+            ->where('account_no', $account->account_no)
+            ->where('status', 'Done')
+            ->whereBetween('payment_date', [$from, $to])
+            ->max('payment_date');
+
+        $onlinePaidAt = DB::table('payment_portal_logs')
+            ->where('account_id', $account->id)
+            ->whereRaw('UPPER(status) IN (?, ?, ?)', ['PAID', 'SUCCESS', 'COMPLETED'])
+            ->whereBetween('date_time', [$from, $to])
+            ->max('date_time');
+
+        $dates = array_filter([$manualPaidAt, $onlinePaidAt]);
+        if (empty($dates)) {
+            return null;
+        }
+
+        return collect($dates)
+            ->map(fn ($d) => Carbon::parse($d)->startOfDay())
+            ->sortDesc()
+            ->first();
     }
 
     protected function markReconnectionProrateAsUsed(BillingAccount $account, int $userId, string $invoiceId, array $logIds = []): void

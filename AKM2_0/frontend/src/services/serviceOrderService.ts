@@ -21,6 +21,7 @@ export interface ServiceOrderData {
   date_installed?: string;
   email_address?: string;
   house_front_picture_url?: string;
+  address_coordinates?: string;
   plan?: string;
   group_name?: string;
   username?: string;

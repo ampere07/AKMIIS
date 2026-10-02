@@ -244,9 +244,8 @@ const TransactionFormModal: React.FC<TransactionFormModalProps> = memo(({
 
         setImagePreview(prev => {
           if (prev && prev.startsWith('blob:')) return prev;
-          return initialTransactionData?.image_url 
-            ? getProxiedImageUrl(initialTransactionData.image_url) 
-            : null;
+          const savedProofUrl = initialTransactionData?.proof_payment_url || initialTransactionData?.image_url;
+          return savedProofUrl ? getProxiedImageUrl(savedProofUrl) : null;
         });
 
         lastAccountIdRef.current = currentAccountId;
@@ -364,34 +363,55 @@ const TransactionFormModal: React.FC<TransactionFormModalProps> = memo(({
       return;
     }
 
+    if (isEdit && !initialTransactionData?.id) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Error',
+        message: 'Cannot update: the transaction ID is missing. Please close the form and open the transaction again.'
+      });
+      return;
+    }
+
     setLoading(true);
     try {
-      let imageUrl = undefined;
+      // Set only when a new proof of payment was uploaded; left undefined otherwise so an
+      // edit without a new image keeps the URL already saved on the transaction.
+      let proofPaymentUrl: string | undefined = undefined;
 
       if (formData.image) {
         setUploadProgress(10);
+        const showUploadError = (reason: string) => {
+          setModal({
+            isOpen: true,
+            type: 'error',
+            title: 'Upload Failed',
+            message: `The proof of payment could not be uploaded to Google Drive, so the transaction was not saved.\n\n${reason}`
+          });
+        };
+
+        let uploadResponse: any;
         try {
           const imageFormData = new FormData();
           const folderName = `transactionform - ${formData.fullName}`;
           imageFormData.append('folder_name', folderName);
           imageFormData.append('payment_proof_image', formData.image, formData.image.name);
 
-          const uploadResponse = await transactionService.uploadTransactionImage(imageFormData);
-
-          if (uploadResponse.success && uploadResponse.data?.payment_proof_image_url) {
-            imageUrl = uploadResponse.data.payment_proof_image_url;
-            setUploadProgress(60);
-          }
+          uploadResponse = await transactionService.uploadTransactionImage(imageFormData);
         } catch (uploadError: any) {
-          setModal({
-            isOpen: true,
-            type: 'error',
-            title: 'Upload Failed',
-            message: `Failed to upload image: ${uploadError.message}`
-          });
-          setLoading(false);
+          showUploadError(uploadError?.message || 'Unknown upload error');
           return;
         }
+
+        const uploadedUrl = uploadResponse?.data?.payment_proof_image_url;
+        // Save the transaction only after Google Drive returned a real URL.
+        if (!uploadResponse?.success || typeof uploadedUrl !== 'string' || !/^https?:\/\//i.test(uploadedUrl.trim())) {
+          showUploadError(uploadResponse?.message || 'Google Drive did not return a valid image URL.');
+          return;
+        }
+
+        proofPaymentUrl = uploadedUrl.trim();
+        setUploadProgress(60);
       }
 
       const authData = localStorage.getItem('authData');
@@ -409,7 +429,9 @@ const TransactionFormModal: React.FC<TransactionFormModalProps> = memo(({
         or_no: formData.orNo,
         remarks: formData.remarks || '',
         status: 'Pending',
-        image_url: imageUrl,
+        proof_payment_url: proofPaymentUrl,
+        // Kept in step with proof_payment_url for the screens that still read image_url.
+        image_url: proofPaymentUrl,
         created_by_user: formData.processedBy,
         ...(currentUser?.organization_id ? { organization_id: currentUser.organization_id } : {})
       };
@@ -442,7 +464,8 @@ const TransactionFormModal: React.FC<TransactionFormModalProps> = memo(({
           isOpen: true,
           type: 'error',
           title: 'Error',
-          message: `Failed to create transaction: ${result.message}`
+          message: `Failed to ${isEdit ? 'update' : 'create'} transaction: ${result.message}` +
+            (proofPaymentUrl ? '\n\nThe proof of payment was uploaded, but it was not saved to the transaction.' : '')
         });
       }
     } catch (error) {
