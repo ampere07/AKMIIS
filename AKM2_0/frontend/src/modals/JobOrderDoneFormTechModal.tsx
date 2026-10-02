@@ -1423,6 +1423,22 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
         text: 'Job order updated successfully'
       });
 
+      // Backend sends the installation fee invoice (email with PDF + SMS) when onsite status becomes Done
+      const installationFeeNotification = (jobOrderResponse as any).installation_fee_notification;
+      if (installationFeeNotification && !installationFeeNotification.skipped) {
+        console.log('[SAVE INSTALLATION FEE] Notification result:', installationFeeNotification);
+
+        if (installationFeeNotification.email_queued) {
+          saveMessages.push({ type: 'success', text: 'Installation fee invoice email queued with PDF' });
+        }
+        if (installationFeeNotification.sms_sent) {
+          saveMessages.push({ type: 'success', text: 'Installation fee invoice SMS sent' });
+        }
+        (installationFeeNotification.errors || []).forEach((err: string) => {
+          saveMessages.push({ type: 'warning', text: `Installation fee invoice: ${err}` });
+        });
+      }
+
       // --- MOVED RADIUS CREATION LOGIC START ---
       // Now that LCPNAP and Port are saved, we can try to create the RADIUS account if needed
       if (updatedFormData.onsiteStatus === 'Done') {

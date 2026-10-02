@@ -264,7 +264,8 @@ const SMSTemplate: React.FC = () => {
     'Application',
     'Welcome',
     'Paid',
-    'Due'
+    'Due',
+    'InstallationFee'
   ];
 
   const availableVariables = [

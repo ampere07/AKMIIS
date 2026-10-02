@@ -213,6 +213,7 @@ class ServiceOrderApiController extends Controller
                 $so->contact_address = $c ? $c->address : null;
                 $so->email_address = $c ? $c->email_address : null;
                 $so->house_front_picture_url = $c ? $c->house_front_picture_url : null;
+                $so->address_coordinates = $c ? $c->address_coordinates : null;
                 $so->plan = $c ? $c->desired_plan : null;
 
                 // Technical details
@@ -473,6 +474,7 @@ class ServiceOrderApiController extends Controller
                     'c.address as contact_address',
                     'c.email_address',
                     'c.house_front_picture_url',
+                    'c.address_coordinates',
                     'c.desired_plan as plan',
                     'td.username',
                     'td.connection_type',
@@ -782,6 +784,36 @@ class ServiceOrderApiController extends Controller
                         'account_no' => $serviceOrder->account_no,
                         'customer_id' => $billingAccount->customer_id
                     ]);
+                }
+            }
+
+            // Technician-captured location ("Get My Location") belongs to the customer,
+            // not the ticket. Only written when it actually changed.
+            if ($request->filled('address_coordinates')) {
+                $newCoordinates = trim((string) $request->input('address_coordinates'));
+                $coordinateAccount = DB::table('billing_accounts')
+                    ->where('account_no', $serviceOrder->account_no)
+                    ->first();
+
+                if ($coordinateAccount && strlen($newCoordinates) <= 255) {
+                    $currentCoordinates = DB::table('customers')
+                        ->where('id', $coordinateAccount->customer_id)
+                        ->value('address_coordinates');
+
+                    if ($newCoordinates !== trim((string) $currentCoordinates)) {
+                        DB::table('customers')
+                            ->where('id', $coordinateAccount->customer_id)
+                            ->update([
+                                'address_coordinates' => $newCoordinates,
+                                'updated_at' => now()
+                            ]);
+                        Log::info('Updated customer address_coordinates from service order', [
+                            'account_no' => $serviceOrder->account_no,
+                            'customer_id' => $coordinateAccount->customer_id,
+                            'old' => $currentCoordinates,
+                            'new' => $newCoordinates
+                        ]);
+                    }
                 }
             }
 

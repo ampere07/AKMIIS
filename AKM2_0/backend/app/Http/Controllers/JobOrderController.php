@@ -790,7 +790,9 @@ class JobOrderController extends Controller
                 $jobOrder->refresh();
             }
             
-            if (($data['onsite_status'] ?? null) === 'Done' && $oldStatus !== 'Done') {
+            $becameDone = ($data['onsite_status'] ?? null) === 'Done' && $oldStatus !== 'Done';
+
+            if ($becameDone) {
                 $this->broadcastJobOrderDone($jobOrder);
                 
                 // Trigger RADIUS account creation
@@ -887,10 +889,18 @@ class JobOrderController extends Controller
 
             DB::commit();
 
+            // Sent only after commit so a rolled-back save never bills the customer
+            $installationFeeNotification = null;
+            if ($becameDone) {
+                $installationFeeNotification = app(\App\Services\InstallationFeeNotificationService::class)
+                    ->notify($jobOrder);
+            }
+
             return response()->json([
                 'success' => true,
                 'message' => 'Job order updated successfully',
                 'data' => $jobOrder,
+                'installation_fee_notification' => $installationFeeNotification,
             ]);
         } catch (\Exception $e) {
             DB::rollBack();

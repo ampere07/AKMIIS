@@ -5,6 +5,7 @@ import { X, ChevronDown, Search, Check, ChevronLeft, Camera, Plus } from 'lucide
 import SignatureScreen from 'react-native-signature-canvas';
 
 import ImagePreview from '../components/ImagePreview';
+import LocationPicker from '../components/LocationPicker';
 import { SearchablePicker, SearchablePickerTrigger } from '../components/SearchablePicker';
 import { useServiceOrderEdit, ServiceOrderEditFormData, OrderItem, ImageFiles } from '../hooks/useServiceOrderEdit';
 
@@ -365,6 +366,15 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                           <SearchablePickerTrigger label="Visit With Other" value={formData.visitWithOther} onPress={() => { setActiveTechField('visitWithOther'); setActivePicker('technician'); }} error={errors.visitWithOther} isDarkMode={isDarkMode} />
 
                           {renderInput('visitRemarks', 'Visit Remarks')}
+
+                          <View style={styles.inputGroup}>
+                            <LocationPicker
+                              value={formData.addressCoordinates}
+                              onChange={(coordinates) => handleInputChange('addressCoordinates', coordinates)}
+                              isDarkMode={isDarkMode}
+                              label="Address Coordinates"
+                            />
+                          </View>
 
                           {/* SIGNATURE SECTION */}
                           <View style={styles.inputGroup}>

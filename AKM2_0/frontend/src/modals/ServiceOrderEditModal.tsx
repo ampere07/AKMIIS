@@ -15,6 +15,7 @@ import { getBillingRecordDetails } from '../services/billingService';
 import { technicianService } from '../services/technicianService';
 import { logBlockedTechnicianTransfer } from '../services/serviceOrderService';
 import SearchableField from '../components/common/SearchableField';
+import LocationPicker from '../components/LocationPicker';
 
 
 
@@ -86,6 +87,7 @@ interface ServiceOrderEditFormData {
   routerModel: string;
   newPlan: string;
   newLcpnap: string;
+  addressCoordinates: string;
 }
 
 interface ImageFiles {
@@ -197,7 +199,8 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     newVlan: '',
     routerModel: '',
     newPlan: '',
-    newLcpnap: ''
+    newLcpnap: '',
+    addressCoordinates: ''
   });
 
 
@@ -603,6 +606,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         userEmail: serviceOrderData.userEmail || serviceOrderData.assignedEmail || serviceOrderData.assigned_email || currentUserEmail,
         supportRemarks: serviceOrderData.supportRemarks || serviceOrderData.support_remarks || '',
         newPlan: serviceOrderData.new_plan || '',
+        addressCoordinates: serviceOrderData.addressCoordinates || serviceOrderData.address_coordinates || '',
         serviceCharge: serviceOrderData.serviceCharge ? serviceOrderData.serviceCharge.toString().replace('₱', '').trim() : (serviceOrderData.service_charge ? serviceOrderData.service_charge.toString().replace('₱', '').trim() : '0.00'),
         status: serviceOrderData.status || 'unused',
         newRouterModemSN: '',
@@ -1152,6 +1156,8 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
             router_model: updatedFormData.routerModel,
           } : {}),
           ...(showNewVlan ? { new_vlan: updatedFormData.newVlan } : {}),
+          // Saved to the customer record by the backend
+          ...(updatedFormData.addressCoordinates.trim() ? { address_coordinates: updatedFormData.addressCoordinates.trim() } : {}),
         } : {}),
 
         concern: updatedFormData.concern,
@@ -1916,6 +1922,13 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                         </div>
                       )}
                     </div>
+
+                    <LocationPicker
+                      value={formData.addressCoordinates}
+                      onChange={(coordinates) => handleInputChange('addressCoordinates', coordinates)}
+                      isDarkMode={isDarkMode}
+                      label="Address Coordinates"
+                    />
 
                     <div>
                       <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'

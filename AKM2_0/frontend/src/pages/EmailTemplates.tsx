@@ -36,6 +36,10 @@ interface ModalConfig {
   onCancel?: () => void;
 }
 
+// Templates rendered to PDF — edited on the paper (TinyMCE) editor
+const PAPER_TEMPLATE_CODES = ['SOA_TEMPLATE', 'INSTALLATION_TEMPLATE'];
+const isPaperTemplate = (code?: string) => !!code && PAPER_TEMPLATE_CODES.includes(code);
+
 const EmailTemplates: React.FC = () => {
   const [templates, setTemplates] = useState<EmailTemplateData[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<EmailTemplateData | null>(null);
@@ -259,7 +263,7 @@ const EmailTemplates: React.FC = () => {
       }
 
       let currentBodyHtml = formData.Body_HTML;
-      if (formData.Template_Code === 'SOA_TEMPLATE' && tinymceRef.current) {
+      if (isPaperTemplate(formData.Template_Code) && tinymceRef.current) {
         currentBodyHtml = tinymceRef.current.getContent();
       }
 
@@ -410,7 +414,7 @@ const EmailTemplates: React.FC = () => {
   };
 
   const insertTag = (tag: string) => {
-    if (formData.Template_Code === 'SOA_TEMPLATE' && (isEditing || isCreating) && tinymceRef.current) {
+    if (isPaperTemplate(formData.Template_Code) && (isEditing || isCreating) && tinymceRef.current) {
       tinymceRef.current.insertContent(tag);
     } else {
       insertVariableToBody(tag);
@@ -474,7 +478,7 @@ const EmailTemplates: React.FC = () => {
 
   const insertHeader = () => {
     const html = '<img src="https://via.placeholder.com/800x150?text=FULL+BLEED+HEADER" alt="Header" style="width: 100%; height: auto; display: block; margin: 0; border: 0;">';
-    if (formData.Template_Code === 'SOA_TEMPLATE' && (isEditing || isCreating) && tinymceRef.current) {
+    if (isPaperTemplate(formData.Template_Code) && (isEditing || isCreating) && tinymceRef.current) {
       tinymceRef.current.insertContent(html);
     } else {
       insertVariableToBody(html);
@@ -483,7 +487,7 @@ const EmailTemplates: React.FC = () => {
 
   const insertFooter = () => {
     const html = '<img src="https://via.placeholder.com/800x100?text=FULL+BLEED+FOOTER" alt="Footer" style="width: 100%; height: auto; display: block; margin: 0; border: 0;">';
-    if (formData.Template_Code === 'SOA_TEMPLATE' && (isEditing || isCreating) && tinymceRef.current) {
+    if (isPaperTemplate(formData.Template_Code) && (isEditing || isCreating) && tinymceRef.current) {
       tinymceRef.current.insertContent(html);
     } else {
       insertVariableToBody(html);
@@ -594,7 +598,7 @@ const EmailTemplates: React.FC = () => {
         {/* Variable Tags */}
         <div className={`p-4 border-t ${isDarkMode ? 'border-gray-700' : 'border-gray-300'
           }`}>
-          {formData.Template_Code === 'SOA_TEMPLATE' && (
+          {isPaperTemplate(formData.Template_Code) && (
             <>
               <h3 className={`text-xs font-semibold mb-2 uppercase ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
                 }`}>Design Elements</h3>
@@ -618,7 +622,11 @@ const EmailTemplates: React.FC = () => {
               >
                 [+] Footer (Full Bleed)
               </button>
+            </>
+          )}
 
+          {formData.Template_Code === 'SOA_TEMPLATE' && (
+            <>
               <h3 className={`text-xs font-semibold mb-2 uppercase ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
                 }`}>Smart Rows</h3>
               {['Row_Discounts', 'Row_Rebates', 'Row_Service', 'Row_Staggered', 'Row_Install'].map(tag => (
@@ -776,11 +784,11 @@ const EmailTemplates: React.FC = () => {
           ? 'bg-gray-800 border-gray-700'
           : 'bg-white border-gray-300'
           }`}>
-          {/* Collapse toggle bar — only shown for SOA_TEMPLATE */}
-          {(formData.Template_Code === 'SOA_TEMPLATE' || selectedTemplate?.Template_Code === 'SOA_TEMPLATE') && (
+          {/* Collapse toggle bar — only shown for paper (PDF) templates */}
+          {(isPaperTemplate(formData.Template_Code) || isPaperTemplate(selectedTemplate?.Template_Code)) && (
             <div className={`flex items-center justify-between px-4 py-2 border-b ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`}>
               <span className={`text-xs font-semibold uppercase tracking-wide ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                SOA_TEMPLATE — Header
+                {formData.Template_Code || selectedTemplate?.Template_Code} — Header
               </span>
               <button
                 onClick={() => setIsHeaderCollapsed(prev => !prev)}
@@ -801,8 +809,8 @@ const EmailTemplates: React.FC = () => {
               </button>
             </div>
           )}
-          {/* Main header content — hidden when collapsed for SOA_TEMPLATE */}
-          {!(isHeaderCollapsed && (formData.Template_Code === 'SOA_TEMPLATE' || selectedTemplate?.Template_Code === 'SOA_TEMPLATE')) && (
+          {/* Main header content — hidden when collapsed for paper (PDF) templates */}
+          {!(isHeaderCollapsed && (isPaperTemplate(formData.Template_Code) || isPaperTemplate(selectedTemplate?.Template_Code))) && (
             <div className="flex items-center justify-between p-4">
               <div className="flex-1">
                 {isCreating || isEditing ? (
@@ -820,6 +828,7 @@ const EmailTemplates: React.FC = () => {
                       {[
                         'WELCOME',
                         'SOA_TEMPLATE',
+                        'INSTALLATION_TEMPLATE',
                         'RECONNECT',
                         'PAID',
                         'OVERDUE_DESIGN',
@@ -1036,7 +1045,7 @@ const EmailTemplates: React.FC = () => {
         <div className="flex-1 overflow-auto p-4">
           {(selectedTemplate || isCreating) ? (
             <div className="max-w-5xl mx-auto h-full flex flex-col">
-              {formData.Template_Code === 'SOA_TEMPLATE' ? (
+              {isPaperTemplate(formData.Template_Code) ? (
                 <div className="flex-1 flex flex-col">
                   {isEditing || isCreating ? (
                     <div className="flex-1 min-h-[600px] border rounded overflow-hidden">

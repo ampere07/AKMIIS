@@ -13,6 +13,7 @@ interface ServiceOrder {
     contactNumber: string;
     fullAddress: string;
     houseFrontPicture: string;
+    addressCoordinates?: string;
     emailAddress: string;
     plan: string;
     provider: string;
@@ -110,6 +111,7 @@ const transformServiceOrder = (order: ServiceOrderData): ServiceOrder => {
         contactNumber: order.contact_number || '',
         fullAddress: order.full_address || '',
         houseFrontPicture: order.house_front_picture_url || '',
+        addressCoordinates: order.address_coordinates || '',
         emailAddress: order.email_address || '',
         plan: order.plan || '',
         provider: '',
