@@ -409,7 +409,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     };
 
     const handleOpenChat = async () => {
-        const webUrl = 'https://m.me/atssfiber';
+        const webUrl = 'https://m.me/akmiis';
         const messengerAppUrl = 'fb-messenger://user-thread/';
         try {
             const canOpenMessenger = await Linking.canOpenURL(messengerAppUrl);
