@@ -12,7 +12,7 @@ class RoleController extends Controller
     {
         try {
             $user = auth()->user();
-            $organizationId = $user ? $user->organization_id : null;
+            $organizationId = $user->organization_id;
 
             $query = Role::withCount(['users']);
 
@@ -56,11 +56,11 @@ class RoleController extends Controller
 
         try {
             $user = auth()->user();
-            $organizationId = $user ? $user->organization_id : null;
+            $organizationId = $user->organization_id;
 
             $role = Role::create($request->all() + [
-                'created_by_user_id' => $user->id ?? 1,
-                'updated_by_user_id' => $user->id ?? 1,
+                'created_by_user_id' => $user->id,
+                'updated_by_user_id' => $user->id,
                 'organization_id' => $organizationId
             ]);
 
@@ -119,7 +119,7 @@ class RoleController extends Controller
 
         try {
             $user = auth()->user();
-            $organizationId = $user ? $user->organization_id : null;
+            $organizationId = $user->organization_id;
 
             $role = Role::findOrFail($id);
 
@@ -136,7 +136,7 @@ class RoleController extends Controller
             $updateData = $request->except('organization_id');
 
             $role->update($updateData + [
-                'updated_by_user_id' => $user->id ?? 1
+                'updated_by_user_id' => $user->id
             ]);
 
             return response()->json([
@@ -163,7 +163,7 @@ class RoleController extends Controller
         }
         try {
             $user = auth()->user();
-            $organizationId = $user ? $user->organization_id : null;
+            $organizationId = $user->organization_id;
 
             $role = Role::findOrFail($id);
 

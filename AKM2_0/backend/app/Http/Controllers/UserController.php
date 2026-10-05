@@ -16,8 +16,8 @@ class UserController extends Controller
     {
         try {
             $user = auth()->user();
-            $organizationId = $user ? $user->organization_id : null;
-            $roleId = $user ? $user->role_id : null;
+            $organizationId = $user->organization_id;
+            $roleId = $user->role_id;
 
             $query = User::with(['organization', 'role', 'agent', 'agentBalance']);
             
@@ -104,10 +104,10 @@ class UserController extends Controller
 
         try {
             $authUser = auth()->user();
-            $organizationId = $authUser ? $authUser->organization_id : null;
-            $roleId = $authUser ? $authUser->role_id : null;
+            $organizationId = $authUser->organization_id;
+            $roleId = $authUser->role_id;
             
-            $isGlobalAdmin = !$authUser || ($roleId == 7 && $organizationId === null);
+            $isGlobalAdmin = ($roleId == 7 && $organizationId === null);
 
             // Generate user ID with proper error handling
             
@@ -180,8 +180,8 @@ class UserController extends Controller
     {
         try {
             $authUser = auth()->user();
-            $organizationId = $authUser ? $authUser->organization_id : null;
-            $roleId = $authUser ? $authUser->role_id : null;
+            $organizationId = $authUser->organization_id;
+            $roleId = $authUser->role_id;
             $isGlobalAdmin = ($roleId == 7 && $organizationId === null);
             
             $user = User::with(['organization', 'role', 'agent', 'agentBalance'])->findOrFail($id);
@@ -256,8 +256,8 @@ class UserController extends Controller
 
         try {
             $authUser = auth()->user();
-            $organizationId = $authUser ? $authUser->organization_id : null;
-            $roleId = $authUser ? $authUser->role_id : null;
+            $organizationId = $authUser->organization_id;
+            $roleId = $authUser->role_id;
             
             $isGlobalAdmin = ($roleId == 7 && $organizationId === null);
 
@@ -382,8 +382,8 @@ class UserController extends Controller
     {
         try {
             $authUser = auth()->user();
-            $organizationId = $authUser ? $authUser->organization_id : null;
-            $roleId = $authUser ? $authUser->role_id : null;
+            $organizationId = $authUser->organization_id;
+            $roleId = $authUser->role_id;
             
             $isGlobalAdmin = ($roleId == 7 && $organizationId === null);
 
