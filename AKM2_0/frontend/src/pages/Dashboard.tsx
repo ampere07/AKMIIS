@@ -506,7 +506,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 {/* <ApplicationVisitProvider> */}
                 {/* <JobOrderProvider> */}
                 {/* <ServiceOrderProvider> */}
-                <div className={`h-screen flex flex-col overflow-hidden ${isDarkMode ? 'bg-gray-950' : 'bg-gray-50'
+                <div data-testid="dashboard-screen" className={`h-screen flex flex-col overflow-hidden ${isDarkMode ? 'bg-gray-950' : 'bg-gray-50'
                     }`}>
                     {/* Fixed Header */}
                     <div className="flex-shrink-0">

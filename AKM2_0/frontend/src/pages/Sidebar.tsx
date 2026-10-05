@@ -577,6 +577,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
               onSectionChange(item.id);
             }
           }}
+          aria-label={hasChildren ? `${item.label} menu` : `Open ${item.label}`}
           className={`w-full flex items-center justify-between px-4 py-3 text-sm transition-colors ${level > 0 ? 'pl-8' : 'pl-4'
             } ${isCurrentItemActive
               ? ''

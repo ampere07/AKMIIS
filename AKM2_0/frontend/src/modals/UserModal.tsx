@@ -310,7 +310,7 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
   const labelClass = `block text-sm font-medium mb-1.5 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`;
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex justify-end z-[5000]">
+    <div data-testid="user-form-screen" className="fixed inset-0 bg-black/50 backdrop-blur-sm flex justify-end z-[5000]">
       <div className={`h-full w-full max-w-xl flex flex-col shadow-2xl animate-in slide-in-from-right duration-300 ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white text-gray-900'}`}>
         {/* Header */}
         <div className={`px-6 py-4 border-b flex items-center justify-between ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
@@ -381,7 +381,7 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
 
 
             <div className="col-span-2">
-              <label className={labelClass}>Role*</label>
+              <label htmlFor="user-role" className={labelClass}>Role*</label>
               {agentOnly ? (
                 <input
                   value="Agent"
@@ -390,7 +390,7 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
                   style={{ pointerEvents: 'none' }}
                 />
               ) : (
-                <select name="role_id" value={formData.role_id || ''} onChange={handleInputChange} className={`${inputClass} ${errors.role_id ? 'border-red-500' : ''}`}>
+                <select id="user-role" name="role_id" value={formData.role_id || ''} onChange={handleInputChange} className={`${inputClass} ${errors.role_id ? 'border-red-500' : ''}`}>
                   <option value="">Select Role</option>
                   {roles.map(r => <option key={r.id} value={r.id}>{r.role_name}</option>)}
                 </select>
