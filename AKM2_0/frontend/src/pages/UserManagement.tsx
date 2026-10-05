@@ -194,6 +194,7 @@ const UserManagement: React.FC<{ agentOnly?: boolean }> = ({ agentOnly = false }
               </button>
               <button
                 onClick={() => { setSelectedUser(null); setShowModal(true); }}
+                aria-label={agentOnly ? 'Add agent' : 'Add user'}
                 className="p-2 rounded-lg text-white shadow-lg transition-transform active:scale-95"
                 style={{ backgroundColor: colorPalette?.primary || '#3b82f6' }}
               >
