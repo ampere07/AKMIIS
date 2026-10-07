@@ -1,6 +1,6 @@
 {
   "name": "akm",
-  "version": "2.5.57",
+  "version": "2.5.58",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
