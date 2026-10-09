@@ -78,6 +78,11 @@ class AutoDisconnectService
     private const QUEUE_SOURCE_AUTO_DC = 'auto_disconnect';
     private const QUEUE_SOURCE_AUTO_PULLOUT = 'auto_pullout';
     private const QUEUE_OPERATION_RESTRICT = 'restricted_user';
+    private const QUEUE_SOURCE_REVERSAL = 'auto_disconnect_reversal';
+
+    // Balance at or below which an account counts as paid — the same tolerance the payment
+    // worker uses when it decides to reconnect, so the two never disagree about a customer.
+    private const SETTLED_EPSILON = 0.01;
 
     // Connectivity probe budget per RADIUS endpoint (seconds). Mirrors the timeouts used by
     // RadiusServerResolver so a dead server is detected in ~2s instead of hanging the run.
@@ -390,11 +395,17 @@ class AutoDisconnectService
             return ['success' => false, 'reason' => 'Already disconnected today'];
         }
 
+        // The invoices and their accounts were loaded once at the start of the run, which can
+        // be many minutes before this account is reached. Re-read the account (and its status)
+        // so a payment posted by the payment worker in the meantime is seen, instead of
+        // restricting a customer who has already paid.
+        $billingAccount->refresh();
+
         // Validate account balance
         $currentBalance = floatval($billingAccount->account_balance);
         $this->writeLog("  [INFO] Current Balance: ₱" . number_format($currentBalance, 2));
 
-        if ($currentBalance <= 0.00) {
+        if ($currentBalance <= self::SETTLED_EPSILON) {
             $this->writeLog("  [SKIP] Balance is zero or negative (already paid)");
             return ['success' => false, 'reason' => 'Balance already paid'];
         }
@@ -471,6 +482,31 @@ class AutoDisconnectService
         // Create transaction to ensure atomicity
         DB::beginTransaction();
         try {
+            // Re-read the balance under a row lock. The RADIUS restriction above takes
+            // seconds, and a payment posted during it must neither be overwritten by the fee
+            // below nor leave the customer restricted: if the payment worker checked this
+            // account before the restriction landed, it found them still online and did not
+            // reconnect them.
+            $currentBalance = floatval(
+                DB::table('billing_accounts')
+                    ->where('id', $billingAccount->id)
+                    ->lockForUpdate()
+                    ->value('account_balance')
+            );
+
+            if ($currentBalance <= self::SETTLED_EPSILON) {
+                DB::rollBack();
+                $this->writeLog("  [SKIP] Balance was paid while the account was being restricted (now ₱" . number_format($currentBalance, 2) . ")");
+
+                // Only an attempted restriction has anything to undo; an unreachable server
+                // never got one, and its retry has not been queued yet.
+                if ($connection['reachable']) {
+                    $this->reverseRestriction($billingAccount, $accountNo, $username);
+                }
+
+                return ['success' => false, 'reason' => 'Balance paid during disconnection'];
+            }
+
             // 2. Apply disconnection fee if configured
             $config = BillingConfig::first();
             $dcFee = floatval($config->disconnection_fee ?? 0);
@@ -771,6 +807,63 @@ class AutoDisconnectService
             $this->writeLog("  [QUEUE] ✗ Exception while queuing operation for {$accountNo}: " . $e->getMessage());
             \Log::channel('radiusrelated')->error('[AUTO DC RADIUS QUEUE EXCEPTION] Account: ' . $accountNo . ' - ' . $e->getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Reconnect a customer this run restricted while their payment was being posted.
+     *
+     * The payment worker settles the account in its own transaction, so it can land
+     * between the balance check and the restriction. If its reconnect check ran before
+     * the restriction landed, it found the customer still active and online and left
+     * them alone — and the restriction then cut off a customer who had already paid.
+     *
+     * A failed reconnect is queued like any other. Never throws: one customer's
+     * reversal must not stop the run for the rest.
+     */
+    private function reverseRestriction(BillingAccount $billingAccount, string $accountNo, string $username): void
+    {
+        try {
+            $plan = $billingAccount->customer->desired_plan ?? null;
+
+            if (empty($plan)) {
+                $this->writeLog("  [REVERSE] ✗ No plan on record for {$accountNo}; reconnect this customer manually");
+                \Log::channel('radiusrelated')->error('[AUTO DC REVERSE] No plan on record - paid customer left restricted. Account: ' . $accountNo);
+                return;
+            }
+
+            $params = [
+                'accountNumber' => $accountNo,
+                'username'      => $username,
+                'plan'          => $plan,
+                'updatedBy'     => 'System',
+                'remarks'       => 'Auto DC reversed - payment received during disconnection',
+            ];
+
+            $this->writeLog("  [REVERSE] Reconnecting {$username}: payment received while the restriction was being applied");
+            $result = $this->radiusService->reconnectUser($params);
+
+            if (($result['status'] ?? '') === 'success') {
+                $this->writeLog("  [REVERSE] ✓ Customer reconnected");
+                return;
+            }
+
+            $error = $result['message'] ?? 'Unknown RADIUS error';
+            $this->writeLog("  [REVERSE] ✗ Reconnect failed: {$error} — queued for retry");
+
+            RadiusQueueService::queue([
+                'organization_id' => $billingAccount->customer->organization_id ?? null,
+                'source_type'     => self::QUEUE_SOURCE_REVERSAL,
+                'source_id'       => $billingAccount->id,
+                'account_no'      => $accountNo,
+                'operation'       => 'reconnect_user',
+                'params'          => $params,
+                'last_error'      => $error,
+                'created_by'      => 'System',
+            ]);
+        } catch (Throwable $e) {
+            $this->writeLog("  [REVERSE] ✗ Exception while reconnecting {$accountNo}: " . $e->getMessage());
+            \Log::channel('radiusrelated')->error('[AUTO DC REVERSE EXCEPTION] Account: ' . $accountNo . ' - ' . $e->getMessage());
         }
     }
 
@@ -1426,6 +1519,18 @@ class AutoDisconnectService
                         continue;
                     }
 
+                    // Loaded once at the start of the run; re-read so a payment posted since
+                    // is seen, rather than pulling out a customer who has already paid.
+                    $billingAccount->refresh();
+                    $currentBalance = floatval($billingAccount->account_balance);
+
+                    if ($currentBalance <= self::SETTLED_EPSILON) {
+                        $this->writeLog("  [SKIP] Balance is settled (₱" . number_format($currentBalance, 2) . ") - no pullout needed");
+                        $this->writeLog("[{$counter}/{$totalCount}] ⊘ SKIPPED");
+                        $skippedCount++;
+                        continue;
+                    }
+
                     // Check if account is already Pullout or Disconnected - skip entirely
                     $statusName = $billingAccount->billingStatus ? $billingAccount->billingStatus->status_name : null;
                     if (in_array($statusName, ['Pullout', 'Disconnected', 'Pullout Restricted'])) {
@@ -1495,6 +1600,26 @@ class AutoDisconnectService
                             $reason,
                             $organizationId
                         );
+                    }
+
+                    // A payment posted while the restriction was being applied: the payment
+                    // worker may already have reconnected the customer, and the restriction
+                    // above would then have cut them off again. Undo it and close the pullout
+                    // just created. A queued retry is cancelled by the queue on the balance.
+                    $balanceAfter = floatval(DB::table('billing_accounts')->where('id', $billingAccount->id)->value('account_balance'));
+
+                    if ($balanceAfter <= self::SETTLED_EPSILON) {
+                        $this->writeLog("  [SKIP] Balance was paid while the account was being restricted (now ₱" . number_format($balanceAfter, 2) . ")");
+
+                        if ($connection['reachable']) {
+                            $this->reverseRestriction($billingAccount, $accountNo, $username);
+                        }
+
+                        app(PulloutServiceOrderCloser::class)->closeIfSettled($accountNo, $balanceAfter, 'auto pullout');
+
+                        $this->writeLog("[{$counter}/{$totalCount}] ⊘ SKIPPED");
+                        $skippedCount++;
+                        continue;
                     }
 
                     // 3. Update billing status to Inactive
