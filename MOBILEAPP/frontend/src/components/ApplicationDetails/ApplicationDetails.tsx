@@ -765,15 +765,19 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
         onCancel={handleCancelStatusChange}
       />
 
-      <JOAssignFormModal
-        isOpen={showJOAssignForm}
-        onClose={() => setShowJOAssignForm(false)}
-        onSave={handleSaveJOForm}
-        applicationData={{
-          ...detailedApplication,
-          installation_address: detailedApplication?.installation_address || application.address,
-        }}
-      />
+      {/* JOAssignFormModal and ApplicationVisitFormModal read web-only globals (localStorage, document)
+          as soon as they mount, so keep them unmounted until opened or they crash the details screen */}
+      {showJOAssignForm && (
+        <JOAssignFormModal
+          isOpen={showJOAssignForm}
+          onClose={() => setShowJOAssignForm(false)}
+          onSave={handleSaveJOForm}
+          applicationData={{
+            ...detailedApplication,
+            installation_address: detailedApplication?.installation_address || application.address,
+          }}
+        />
+      )}
 
       <ConfirmationModal
         isOpen={showVisitExistsConfirmation}
@@ -785,16 +789,18 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
         onCancel={handleCancelCreateNewVisit}
       />
 
-      <ApplicationVisitFormModal
-        isOpen={showVisitForm}
-        onClose={() => setShowVisitForm(false)}
-        onSave={handleSaveVisitForm}
-        applicationData={{
-          ...detailedApplication,
-          id: detailedApplication?.id || application.id,
-          secondaryNumber: detailedApplication?.mobile_alt || ''
-        }}
-      />
+      {showVisitForm && (
+        <ApplicationVisitFormModal
+          isOpen={showVisitForm}
+          onClose={() => setShowVisitForm(false)}
+          onSave={handleSaveVisitForm}
+          applicationData={{
+            ...detailedApplication,
+            id: detailedApplication?.id || application.id,
+            secondaryNumber: detailedApplication?.mobile_alt || ''
+          }}
+        />
+      )}
 
       <ConfirmationModal
         isOpen={showSuccessModal}
