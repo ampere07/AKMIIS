@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { X, Layers, MapPin, Tag } from 'lucide-react';
+import { X, Layers, MapPin, Tag, ListChecks } from 'lucide-react';
 import { updateApplication, uploadApplicationImages } from '../services/applicationService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LocationPicker from '../components/LocationPicker';
@@ -10,6 +10,7 @@ import { useAddressOptions } from '../hooks/useAddressOptions';
 import ImageUploadField from '../components/common/ImageUploadField';
 import { useApplicationImageUploads } from '../hooks/useApplicationImageUploads';
 import { APPLICATION_IMAGE_FIELDS } from '../utils/applicationImages';
+import { AGENT_APPLICATION_STATUSES } from '../utils/agentReferral';
 
 interface ApplicationEditModalProps {
   isOpen: boolean;
@@ -21,7 +22,7 @@ interface ApplicationEditModalProps {
 const TEXT_KEYS = [
   'first_name', 'middle_initial', 'last_name', 'email_address', 'mobile_number', 'secondary_mobile_number',
   'installation_address', 'landmark', 'region', 'city', 'barangay', 'location', 'desired_plan', 'promo',
-  'long_lat'
+  'long_lat', 'status', 'remarks'
 ] as const;
 
 type FormKey = typeof TEXT_KEYS[number];
@@ -42,6 +43,11 @@ const ApplicationEditModal: React.FC<ApplicationEditModalProps> = ({ isOpen, app
   const planOptions = useMemo(
     () => plans.map(p => ({ id: p.id, name: `${p.name} - P${Number(p.price || 0).toFixed(2)}` })),
     [plans]
+  );
+  // The current status stays selectable even if the agent list does not offer it, so saving never blanks it
+  const statusOptions = useMemo(
+    () => Array.from(new Set([...AGENT_APPLICATION_STATUSES, application?.status].filter(Boolean))).map(name => ({ id: name, name })),
+    [application?.status]
   );
   const { previews, handleFileChange, clearFile, pendingUpload } = useApplicationImageUploads(isOpen, application);
 
@@ -301,6 +307,18 @@ const ApplicationEditModal: React.FC<ApplicationEditModalProps> = ({ isOpen, app
             placeholder="Select promo"
             icon={pickerIcon(Tag)}
           />
+          <SearchableField
+            label="Status"
+            value={formData.status}
+            onSelect={(value) => setFormData(prev => ({ ...prev, status: value }))}
+            options={statusOptions}
+            optionLabelKey="name"
+            isDarkMode={isDarkMode}
+            colorPalette={colorPalette}
+            placeholder="Select status"
+            icon={pickerIcon(ListChecks)}
+          />
+          {field('remarks', 'Remarks', { multiline: true, placeholder: 'Remarks' })}
           {readOnly('referred_by', 'Referred By', application?.referred_by || 'None')}
           {readOnly('terms_agreed', 'Terms and Conditions', application?.terms_agreed ? 'Agreed' : 'Not agreed')}
           <div className="space-y-6">

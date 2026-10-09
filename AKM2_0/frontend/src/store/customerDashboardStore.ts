@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import { soaService } from '../services/soaService';
-import { invoiceService } from '../services/invoiceService';
+import { invoiceService, InstallationInvoice } from '../services/invoiceService';
 import { paymentPortalLogsService } from '../services/paymentPortalLogsService';
 import { transactionService } from '../services/transactionService';
 import { serviceChargeService, ServiceChargeRecord } from '../services/serviceChargeService';
@@ -19,6 +19,8 @@ interface CustomerDashboardState {
     customerDetail: CustomerDetailData | null;
     soaRecords: any[];
     invoiceRecords: any[];
+    // Kept apart from invoiceRecords, which the dashboard reads for the latest billing due date
+    installationInvoices: InstallationInvoice[];
     paymentRecords: Payment[];
     serviceChargeRecords: ServiceChargeRecord[];
     isLoading: boolean;
@@ -42,6 +44,7 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
     customerDetail: null,
     soaRecords: [],
     invoiceRecords: [],
+    installationInvoices: [],
     paymentRecords: [],
     serviceChargeRecords: [],
     isLoading: false,
@@ -63,9 +66,10 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
             if (detail && detail.billingAccount) {
                 const accNo = detail.billingAccount.accountNo;
 
-                const [soaRes, invoiceRes, logsRes, txRes, serviceChargeLogsRes, serviceOrdersRes] = await Promise.all([
+                const [soaRes, invoiceRes, installationInvoiceRes, logsRes, txRes, serviceChargeLogsRes, serviceOrdersRes] = await Promise.all([
                     soaService.getStatementsByAccountNo(accNo).catch(() => []),
                     invoiceService.getInvoicesByAccountNo(accNo).catch(() => []),
+                    invoiceService.getInstallationInvoicesByAccountNo(accNo).catch(() => []),
                     paymentPortalLogsService.getLogsByAccountNo(accNo).catch(() => []),
                     transactionService.getTransactionsByAccountNo(accNo).catch(() => ({ success: false, data: [] })),
                     serviceChargeService.getServiceChargeLogsByAccountNo(accNo).catch(() => []),
@@ -130,6 +134,7 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
                     customerDetail: detail,
                     soaRecords: soaRes || [],
                     invoiceRecords: newestInvoiceFirst(invoiceRes || []),
+                    installationInvoices: installationInvoiceRes,
                     paymentRecords: allPayments,
                     serviceChargeRecords: allServiceCharges,
                     fetchedAccountNo: usernameOrAccountNo,

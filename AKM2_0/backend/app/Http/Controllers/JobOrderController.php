@@ -17,6 +17,7 @@ use App\Models\AuditTrailLog;
 use App\Models\User;
 use App\Models\Role;
 use App\Models\OnlineStatus;
+use App\Support\AgentReferral;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Validator;
@@ -60,8 +61,11 @@ class JobOrderController extends Controller
                 } else {
                     $query->whereNull('organization_id');
                 }
+                if (AgentReferral::isAgent($currentUser)) {
+                    AgentReferral::restrictToLastMonth($query);
+                }
             }
-            
+
             if ($request->has('assigned_email')) {
                 $assignedEmail = $request->query('assigned_email');
                 \Log::info('Filtering job orders by assigned_email: ' . $assignedEmail);
@@ -435,8 +439,11 @@ class JobOrderController extends Controller
                 } else {
                     $query->whereNull('organization_id');
                 }
+                if (AgentReferral::isAgent($currentUser)) {
+                    AgentReferral::restrictToLastMonth($query);
+                }
             }
-            
+
             $jobOrder = $query->with(['application', 'items', 'billingAccount.customer'])->findOrFail($id);
 
             return response()->json([

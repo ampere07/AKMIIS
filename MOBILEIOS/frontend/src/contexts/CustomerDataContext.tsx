@@ -29,6 +29,15 @@ interface InvoiceRecord {
     print_link?: string;
 }
 
+// The installation fee invoice of a job order, read from job_orders.invoice_url
+export interface InstallationInvoice {
+    id: number;
+    invoiceNo: string;
+    date: string | null;
+    amount: number;
+    url: string;
+}
+
 interface ServiceOrderRecord {
     id: string;
     date: string;
@@ -48,6 +57,7 @@ interface CustomerDataContextType {
     payments: PaymentRecord[];
     soaRecords: SOARecord[];
     invoiceRecords: InvoiceRecord[];
+    installationInvoices: InstallationInvoice[];
     serviceOrders: ServiceOrderRecord[];
     isLoading: boolean;
     error: string | null;
@@ -71,6 +81,7 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
     const [payments, setPayments] = useState<PaymentRecord[]>([]);
     const [soaRecords, setSoaRecords] = useState<SOARecord[]>([]);
     const [invoiceRecords, setInvoiceRecords] = useState<InvoiceRecord[]>([]);
+    const [installationInvoices, setInstallationInvoices] = useState<InstallationInvoice[]>([]);
     const [serviceOrders, setServiceOrders] = useState<ServiceOrderRecord[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
@@ -112,12 +123,13 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
 
             if (accNo) {
                 // 2. Fetch everything else in parallel using correct backend routes
-                const [logsRes, txRes, soaRes, invoiceRes, soRes] = await Promise.all([
+                const [logsRes, txRes, soaRes, invoiceRes, soRes, joRes] = await Promise.all([
                     apiClient.get(`/payment-portal-logs/account/${accNo}`).catch((e) => { console.error('Payment logs fetch error:', e); return { data: { data: [] } }; }),
                     apiClient.get(`/transactions/by-account/${accNo}`).catch((e) => { console.error('Transactions fetch error:', e); return { data: { data: [] } }; }),
                     apiClient.get(`/statement-of-accounts/by-account/${accNo}`).catch((e) => { console.error('SOA fetch error:', e); return { data: { data: [] } }; }),
                     apiClient.get(`/invoices/by-account/${accNo}`).catch((e) => { console.error('Invoices fetch error:', e); return { data: { data: [] } }; }),
-                    apiClient.get(`/service-orders`, { params: { account_no: accNo, page: 1, limit: 50 } }).catch((e) => { console.error('Service orders fetch error:', e); return { data: { success: false, data: [] } }; })
+                    apiClient.get(`/service-orders`, { params: { account_no: accNo, page: 1, limit: 50 } }).catch((e) => { console.error('Service orders fetch error:', e); return { data: { success: false, data: [] } }; }),
+                    apiClient.get(`/job-orders/by-account/${accNo}`).catch((e) => { console.error('Job orders fetch error:', e); return { data: { data: [] } }; })
                 ]);
 
                 // Process Payment Portal Logs
@@ -149,6 +161,18 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                 setPayments(allPayments);
                 setSoaRecords(soaRes?.data?.data || []);
                 setInvoiceRecords(invoiceRes?.data?.data || []);
+
+                // Installation fee invoices: job orders whose invoice PDF link was saved
+                const joData = joRes?.data?.data || [];
+                setInstallationInvoices(Array.isArray(joData) ? joData
+                    .filter((jo: any) => jo.invoice_url)
+                    .map((jo: any) => ({
+                        id: jo.id,
+                        invoiceNo: `JO-${jo.id}`,
+                        date: jo.date_installed || jo.timestamp || null,
+                        amount: parseFloat(jo.installation_fee) || 0,
+                        url: jo.invoice_url
+                    })) : []);
 
                 // Process Service Orders
                 const soData = soRes?.data?.data || [];
@@ -199,6 +223,7 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                 payments,
                 soaRecords,
                 invoiceRecords,
+                installationInvoices,
                 serviceOrders,
                 isLoading,
                 error,

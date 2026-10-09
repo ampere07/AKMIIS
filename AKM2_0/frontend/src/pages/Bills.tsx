@@ -47,7 +47,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
     const [displayName, setDisplayName] = useState('');
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
 
-    const { soaRecords, invoiceRecords, paymentRecords, serviceChargeRecords, customerDetail, isLoading, fetchCustomerData, refreshCustomerData } = useCustomerDashboardStore();
+    const { soaRecords, invoiceRecords, installationInvoices, paymentRecords, serviceChargeRecords, customerDetail, isLoading, fetchCustomerData, refreshCustomerData } = useCustomerDashboardStore();
 
     const accountNo = customerDetail?.billingAccount?.accountNo || '';
     const balance = customerDetail?.billingAccount?.accountBalance || 0;
@@ -413,10 +413,28 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
 
                 {activeTab === 'invoices' && (
                     <div className="w-full">
+                        {/* Installation fee invoices (job_orders.invoice_url) */}
+                        {installationInvoices.map((invoice) => (
+                            <div key={`installation-${invoice.id}`} className="p-4 md:px-6 border-b border-gray-100 flex flex-wrap justify-between items-center gap-3">
+                                <div>
+                                    <p className="text-xs font-bold text-gray-400 uppercase">Installation Invoice</p>
+                                    <p className="text-sm font-bold text-gray-900">{invoice.invoiceNo} · {formatCurrency(invoice.amount)}</p>
+                                    <p className="text-xs text-gray-500">Installed {formatDate(invoice.date ?? undefined)}</p>
+                                </div>
+                                <button
+                                    onClick={() => window.open(invoice.url, '_blank', 'noopener,noreferrer')}
+                                    className="inline-flex items-center space-x-2 px-4 py-2 border border-red-500 text-red-500 rounded-full text-xs font-bold hover:bg-red-50 transition"
+                                >
+                                    <Download className="w-3 h-3" />
+                                    <span>PDF</span>
+                                </button>
+                            </div>
+                        ))}
+
                         {/* Mobile List View */}
                         <div className="md:hidden">
                             {currentInvoiceRecords.length === 0 ? (
-                                <div className="p-8 text-center text-gray-500">No invoices found.</div>
+                                installationInvoices.length === 0 && <div className="p-8 text-center text-gray-500">No invoices found.</div>
                             ) : (
                                 currentInvoiceRecords.map((record) => (
                                     <div key={record.id} className="p-4 border-b border-gray-100 last:border-0">
@@ -458,7 +476,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
                                 </thead>
                                 <tbody>
                                     {currentInvoiceRecords.length === 0 ? (
-                                        <tr><td colSpan={4} className="p-8 text-center text-gray-500">No invoices found.</td></tr>
+                                        installationInvoices.length === 0 && <tr><td colSpan={4} className="p-8 text-center text-gray-500">No invoices found.</td></tr>
                                     ) : (
                                         currentInvoiceRecords.map((record) => (
                                             <tr key={record.id} className="border-b border-gray-50 hover:bg-gray-50 transition">

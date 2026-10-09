@@ -163,7 +163,8 @@ class ApplicationController extends Controller
             $query->whereNull('organization_id');
         }
         if (AgentReferral::isAgent($currentUser)) {
-            AgentReferral::restrictToReferrals($query, $currentUser);
+            AgentReferral::excludeHiddenStatuses($query);
+            AgentReferral::restrictToLastMonth($query);
         }
         return $query;
     }
@@ -450,6 +451,14 @@ class ApplicationController extends Controller
 
             if (AgentReferral::isAgent(auth()->user())) {
                 $validatedData = array_diff_key($validatedData, array_flip(AgentReferral::LOCKED_APPLICATION_FIELDS));
+
+                // Agents cannot see Scheduled applications, so they cannot move one there either
+                if (AgentReferral::isHiddenStatus($validatedData['status'] ?? null)) {
+                    return response()->json([
+                        'message' => 'Agents cannot set an application to Scheduled',
+                        'success' => false
+                    ], 422);
+                }
             }
 
             $application = $this->visibleApplications()->findOrFail($id);

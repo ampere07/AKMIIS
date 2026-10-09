@@ -24,6 +24,8 @@ class InstallationFeeNotificationService
 
     public const SMS_TEMPLATE_TYPE = 'InstallationFee';
 
+    public const DRIVE_FOLDER = 'Installation Invoices';
+
     protected EmailQueueService $emailQueueService;
     protected ItexmoSmsService $smsService;
 
@@ -38,6 +40,7 @@ class InstallationFeeNotificationService
         $results = [
             'skipped' => false,
             'pdf_generated' => false,
+            'invoice_url' => null,
             'email_queued' => false,
             'sms_sent' => false,
             'errors' => []
@@ -64,6 +67,11 @@ class InstallationFeeNotificationService
             if ($pdfResult['success']) {
                 $results['pdf_generated'] = true;
                 $pdfPath = $pdfResult['path'];
+
+                $results['invoice_url'] = $this->storeInvoiceUrl($jobOrder, $pdfPath);
+                if (!$results['invoice_url']) {
+                    $results['errors'][] = 'Installation invoice PDF could not be saved to Google Drive';
+                }
             } else {
                 $results['errors'][] = 'Installation invoice PDF generation failed: ' . $pdfResult['error'];
             }
@@ -114,6 +122,7 @@ class InstallationFeeNotificationService
                 'job_order_id' => $jobOrder->id,
                 'installation_fee' => $installationFee,
                 'pdf_generated' => $results['pdf_generated'],
+                'invoice_url' => $results['invoice_url'],
                 'email_queued' => $results['email_queued'],
                 'sms_sent' => $results['sms_sent'],
                 'errors' => $results['errors']
@@ -239,6 +248,33 @@ class InstallationFeeNotificationService
             ]);
 
             return ['success' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Uploads the invoice PDF to Google Drive and records the link in job_orders.invoice_url,
+     * which the customer's Bills page reads. The local file stays for the email attachment.
+     */
+    protected function storeInvoiceUrl(JobOrder $jobOrder, string $pdfPath): ?string
+    {
+        try {
+            // Resolved here, not injected: a Drive client that fails to build must not stop the email and SMS
+            $drive = app(GoogleDriveService::class);
+            $folderId = $drive->createFolder(self::DRIVE_FOLDER);
+            $url = $drive->uploadFile($pdfPath, $folderId, "INSTALLATION-JO{$jobOrder->id}.pdf", 'application/pdf');
+
+            // Query builder, so recording the link does not touch updated_at or fire model events
+            DB::table('job_orders')->where('id', $jobOrder->id)->update(['invoice_url' => $url]);
+            $jobOrder->invoice_url = $url;
+
+            return $url;
+        } catch (\Throwable $e) {
+            Log::error('Installation invoice PDF upload failed', [
+                'job_order_id' => $jobOrder->id,
+                'error' => $e->getMessage()
+            ]);
+
+            return null;
         }
     }
 

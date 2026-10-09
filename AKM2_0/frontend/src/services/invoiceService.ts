@@ -38,6 +38,15 @@ export interface InvoiceRecord {
   };
 }
 
+// The installation fee invoice of a job order, read from job_orders.invoice_url
+export interface InstallationInvoice {
+  id: number;
+  invoiceNo: string;
+  date: string | null;
+  amount: number;
+  url: string;
+}
+
 export interface InvoiceResponse {
   success: boolean;
   data: InvoiceRecord[];
@@ -73,6 +82,19 @@ export const invoiceService = {
         message: error instanceof Error ? error.message : 'Failed to fetch invoices'
       };
     }
+  },
+
+  async getInstallationInvoicesByAccountNo(accountNo: string): Promise<InstallationInvoice[]> {
+    const response = await apiClient.get<{ success: boolean; data?: any[] }>(`/job-orders/by-account/${accountNo}`);
+    return (response.data.data || [])
+      .filter((jo: any) => jo.invoice_url)
+      .map((jo: any) => ({
+        id: jo.id,
+        invoiceNo: `JO-${jo.id}`,
+        date: jo.date_installed || jo.timestamp || null,
+        amount: parseFloat(jo.installation_fee) || 0,
+        url: jo.invoice_url,
+      }));
   },
 
   async getInvoicesByAccountNo(accountNo: string, fast: boolean = true): Promise<InvoiceRecord[]> {

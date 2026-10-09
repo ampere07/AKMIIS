@@ -161,9 +161,13 @@ export const AGENT_ROLE_ID = 4;
 export const isAgentUser = (role?: string | null, roleId?: number | string | null): boolean =>
   (role || '').toLowerCase().trim() === 'agent' || String(roleId ?? '') === String(AGENT_ROLE_ID);
 
-export const AGENT_SECTIONS = ['applicationManagement', 'menu', 'release-notes'];
+export const AGENT_SECTIONS = ['applicationManagement', 'job-order', 'menu', 'release-notes'];
 
-export const AGENT_HIDDEN_APPLICATION_FIELDS = ['status', 'remarks'];
+// Application fields hidden from agents (none at present)
+export const AGENT_HIDDEN_APPLICATION_FIELDS: string[] = [];
+
+// Statuses an agent can set. Scheduled is left out: agents cannot see Scheduled applications.
+export const AGENT_APPLICATION_STATUSES = ['Pending', 'In Progress', 'No Facility', 'No Slot', 'Duplicate', 'Cancelled'];
 
 export const agentSectionFor = (section: string): string =>
   AGENT_SECTIONS.includes(section) ? section : AGENT_SECTIONS[0];

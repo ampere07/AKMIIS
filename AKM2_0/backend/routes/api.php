@@ -1557,9 +1557,10 @@ Route::prefix('applications')->middleware('auth:sanctum')->group(function () {
 });
 
 // Job Orders Management Routes
-Route::prefix('job-orders')->middleware(['auth:sanctum', 'ensure.database.tables'])->group(function () {
+// Agents can view job orders but not change them; broadcast-viewing only announces who is viewing.
+Route::prefix('job-orders')->middleware(['auth:sanctum', 'ensure.database.tables', \App\Http\Middleware\RejectAgentWrites::class])->group(function () {
     Route::get('/validate-sn', [JobOrderController::class , 'validateModemRouterSN']);
-    Route::post('/broadcast-viewing', [JobOrderController::class, 'broadcastViewing'])->withoutMiddleware([\App\Http\Middleware\EnsureDatabaseTables::class]);
+    Route::post('/broadcast-viewing', [JobOrderController::class, 'broadcastViewing'])->withoutMiddleware([\App\Http\Middleware\EnsureDatabaseTables::class, \App\Http\Middleware\RejectAgentWrites::class]);
     Route::get('/', [JobOrderController::class , 'index']);
     Route::post('/', [JobOrderController::class , 'store']);
     Route::get('/{id}', [JobOrderController::class , 'show']);
