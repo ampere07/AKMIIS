@@ -847,6 +847,11 @@ class EnhancedBillingGenerationServiceWithNotifications
     /**
      * Proration owed for reconnections that have not been billed yet.
      *
+     * Only one reconnection is prorated per billing cycle. A single outage can leave several
+     * reconnection logs (each failed RADIUS retry writes one, and a manual reconnect can follow
+     * the auto-reconnect); the first one that qualifies is charged and the rest are consumed
+     * without charging the same days again.
+     *
      * Pro-rating threshold rule, per reconnection:
      *   threshold = due date + disconnection_day + grace_charge_day (from BillingConfig),
      *   the same date the grace period charge runs.
@@ -989,6 +994,18 @@ class EnhancedBillingGenerationServiceWithNotifications
                 continue;
             }
 
+            // A reconnection was already prorated this cycle; consume this log without charging.
+            if ($proRateStart !== null) {
+                $this->log('info', 'Reconnection already prorated this cycle; consuming log without charging', [
+                    'account_no' => $account->account_no,
+                    'reconnection_log_id' => $log->id,
+                    'reconnection_date' => $reconDate->format('Y-m-d'),
+                    'pro_rate_start' => $proRateStart
+                ]);
+                $logIds[] = $log->id;
+                continue;
+            }
+
             // Paid on or after the threshold: charge the days from the payment date to this
             // cycle's billing day, on the fixed 30-day divisor.
             $daysActive = min($paymentDate->diffInDays($currentCycleEnd), self::DAYS_IN_MONTH);
@@ -1009,9 +1026,7 @@ class EnhancedBillingGenerationServiceWithNotifications
             $totalProrate += $proratedAmount;
             $logIds[] = $log->id;
 
-            if (!$proRateStart || $paymentDate->lt(Carbon::parse($proRateStart))) {
-                $proRateStart = $paymentDate->format('Y-m-d');
-            }
+            $proRateStart = $paymentDate->format('Y-m-d');
 
             $this->log('info', 'Paid on or after the pro-rating threshold; prorating from payment date to billing day', [
                 'account_no' => $account->account_no,
