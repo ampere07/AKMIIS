@@ -1,11 +1,12 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { X, ArrowUp, ChevronLeft, ChevronRight ,ArrowDown, Columns3, ChevronsLeft, ChevronsRight, Menu, Globe, Calendar, ChevronDown, Filter, RefreshCw, Download } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { X, ArrowUp, ChevronLeft, ChevronRight ,ArrowDown, Columns3, ChevronsLeft, ChevronsRight, Menu, Globe, Calendar, ChevronDown, Filter, RefreshCw, Download, ExternalLink } from 'lucide-react';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import DropdownPortal from '../components/common/DropdownPortal';
 import InvoiceDetails from '../components/InvoiceDetails';
 
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { paymentService, PendingPayment } from '../services/paymentService';
+import { invoiceService, JobOrderInvoiceRecord } from '../services/invoiceService';
 import { useInvoiceStore, InvoiceRecordUI } from '../store/invoiceStore';
 import BillingDetails from '../components/CustomerDetails';
 import { getCustomerDetail, CustomerDetailData, convertCustomerDataToBillingDetail } from '../services/customerDetailService';
@@ -62,6 +63,21 @@ const allColumns = [
   { key: 'barangay', label: 'Barangay', width: 'min-w-32' },
   { key: 'city', label: 'City', width: 'min-w-32' },
   { key: 'region', label: 'Region', width: 'min-w-32' },
+];
+
+// Job Order Invoice tab: the installation fee invoice (JO-{id}) of each completed job order
+const jobOrderInvoiceColumns = [
+  { key: 'invoiceNo', label: 'Invoice No', width: 'min-w-28' },
+  { key: 'invoiceDate', label: 'Invoice Date', width: 'min-w-36' },
+  { key: 'dueDate', label: 'Due Date', width: 'min-w-32' },
+  { key: 'accountNo', label: 'Account No', width: 'min-w-36' },
+  { key: 'fullName', label: 'Full Name', width: 'min-w-40' },
+  { key: 'installationFee', label: 'Installation Fee', width: 'min-w-36' },
+  { key: 'plan', label: 'Plan', width: 'min-w-32' },
+  { key: 'contactNumber', label: 'Contact Number', width: 'min-w-36' },
+  { key: 'emailAddress', label: 'Email Address', width: 'min-w-48' },
+  { key: 'address', label: 'Address', width: 'min-w-56' },
+  { key: 'invoicePdf', label: 'Invoice PDF', width: 'min-w-32' },
 ];
 
 const customerColumns = [
@@ -168,6 +184,11 @@ const Invoice: React.FC = () => {
   const [hasNewData, setHasNewData] = useState<boolean>(false);
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [selectedDate, setSelectedDate] = useState<string>('All');
+  // Sidebar tab: the monthly invoices, or the installation fee invoices of job orders
+  const [activeTab, setActiveTab] = useState<'invoice' | 'jobOrder'>('invoice');
+  const [jobOrderInvoices, setJobOrderInvoices] = useState<JobOrderInvoiceRecord[]>([]);
+  const [isLoadingJobOrderInvoices, setIsLoadingJobOrderInvoices] = useState<boolean>(false);
+  const [jobOrderInvoicesError, setJobOrderInvoicesError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [sidebarWidth, setSidebarWidth] = useState<number>(256);
   const [isResizingSidebar, setIsResizingSidebar] = useState<boolean>(false);
@@ -533,6 +554,26 @@ const Invoice: React.FC = () => {
     fetchInvoiceRecords();
   }, [fetchInvoiceRecords]);
 
+  const fetchJobOrderInvoices = useCallback(async () => {
+    setIsLoadingJobOrderInvoices(true);
+    setJobOrderInvoicesError(null);
+    try {
+      setJobOrderInvoices(await invoiceService.getJobOrderInvoices());
+    } catch (err) {
+      console.error('Failed to fetch job order invoices:', err);
+      setJobOrderInvoicesError(err instanceof Error ? err.message : 'Failed to fetch job order invoices');
+    } finally {
+      setIsLoadingJobOrderInvoices(false);
+    }
+  }, []);
+
+  // Job order invoices are a staff view; customers never get the sidebar tab
+  useEffect(() => {
+    if (userRole && userRole !== 'customer') {
+      fetchJobOrderInvoices();
+    }
+  }, [userRole, fetchJobOrderInvoices]);
+
   // Pusher/Soketi connection for real-time invoice updates
   useEffect(() => {
     const handleUpdate = async (data: any) => {
@@ -742,7 +783,7 @@ const Invoice: React.FC = () => {
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedDate, searchQuery, itemsPerPage, invoiceDateFrom, invoiceDateTo, activeFilters]);
+  }, [selectedDate, activeTab, searchQuery, itemsPerPage, invoiceDateFrom, invoiceDateTo, activeFilters]);
 
   // Scroll to top on page change
   useEffect(() => {
@@ -765,8 +806,58 @@ const Invoice: React.FC = () => {
 
   const totalPages = Math.ceil(totalDisplayCount / itemsPerPage);
 
+  // Job Order Invoice tab: same organization, search and sidebar date range rules as the invoices
+  const filteredJobOrderInvoices = useMemo(() => {
+    let filtered = jobOrderInvoices.filter(record =>
+      userOrgId ? record.organization_id === userOrgId : !record.organization_id
+    );
+
+    if (searchQuery) {
+      const normalizedQuery = searchQuery.toLowerCase().replace(/\s+/g, '');
+      filtered = filtered.filter(record =>
+        Object.values(record).some(val =>
+          val !== null && val !== undefined && String(val).toLowerCase().replace(/\s+/g, '').includes(normalizedQuery)
+        )
+      );
+    }
+
+    if (invoiceDateFrom || invoiceDateTo) {
+      filtered = filtered.filter(record => {
+        const dateStr = dateRangeType === 'invoice' ? record.invoice_date : record.due_date;
+        if (!dateStr) return false;
+
+        const dateValue = new Date(dateStr).getTime();
+        if (isNaN(dateValue)) return false;
+
+        if (invoiceDateFrom) {
+          const fromDate = new Date(invoiceDateFrom);
+          fromDate.setHours(0, 0, 0, 0);
+          if (dateValue < fromDate.getTime()) return false;
+        }
+
+        if (invoiceDateTo) {
+          const toDate = new Date(invoiceDateTo);
+          toDate.setHours(23, 59, 59, 999);
+          if (dateValue > toDate.getTime()) return false;
+        }
+
+        return true;
+      });
+    }
+
+    return filtered;
+  }, [jobOrderInvoices, userOrgId, searchQuery, invoiceDateFrom, invoiceDateTo, dateRangeType]);
+
+  const paginatedJobOrderInvoices = useMemo(() => {
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    return filteredJobOrderInvoices.slice(startIndex, startIndex + itemsPerPage);
+  }, [filteredJobOrderInvoices, currentPage, itemsPerPage]);
+
+  const jobOrderTotalPages = Math.ceil(filteredJobOrderInvoices.length / itemsPerPage);
+
   const handlePageChange = (newPage: number) => {
-    if (newPage >= 1 && newPage <= totalPages) {
+    const pageCount = activeTab === 'jobOrder' ? jobOrderTotalPages : totalPages;
+    if (newPage >= 1 && newPage <= pageCount) {
       setCurrentPage(newPage);
     }
   };
@@ -798,6 +889,11 @@ const Invoice: React.FC = () => {
   };
 
   const handleRefresh = async () => {
+    if (activeTab === 'jobOrder') {
+      await fetchJobOrderInvoices();
+      return;
+    }
+
     setHasNewData(false);
     setIsRefreshingManual(true);
     try {
@@ -805,6 +901,11 @@ const Invoice: React.FC = () => {
     } finally {
       setIsRefreshingManual(false);
     }
+  };
+
+  const handleSelectJobOrderTab = () => {
+    setActiveTab('jobOrder');
+    setSelectedRecord(null);
   };
 
   const handlePayNow = async () => {
@@ -1126,7 +1227,147 @@ const Invoice: React.FC = () => {
     }
   };
 
+  const getJobOrderInvoiceValue = (record: JobOrderInvoiceRecord, columnKey: string): string => {
+    switch (columnKey) {
+      case 'invoiceNo':
+        return record.invoice_no;
+      case 'invoiceDate':
+        return record.invoice_date ? formatDate(record.invoice_date) : '-';
+      case 'dueDate':
+        return record.due_date ? formatDate(record.due_date) : '-';
+      case 'accountNo':
+        return record.account_no || '-';
+      case 'fullName':
+        return record.full_name || '-';
+      case 'installationFee':
+        return `₱ ${(record.installation_fee ?? 0).toFixed(2)}`;
+      case 'plan':
+        return record.plan || '-';
+      case 'contactNumber':
+        return record.contact_number || '-';
+      case 'emailAddress':
+        return record.email_address || '-';
+      case 'address':
+        return record.address || '-';
+      case 'invoicePdf':
+        return record.invoice_url || 'Not generated';
+      default:
+        return '-';
+    }
+  };
+
+  const renderJobOrderInvoiceCell = (record: JobOrderInvoiceRecord, columnKey: string) => {
+    switch (columnKey) {
+      case 'accountNo':
+        return <span className="text-red-400">{record.account_no || '-'}</span>;
+      case 'address':
+        return <span title={record.address}>{record.address || '-'}</span>;
+      case 'invoicePdf':
+        return record.invoice_url ? (
+          <a
+            href={record.invoice_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex items-center gap-1 hover:underline"
+            style={{ color: colorPalette?.primary || '#7c3aed' }}
+          >
+            View PDF <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        ) : (
+          <span className={isDarkMode ? 'text-gray-500' : 'text-gray-400'}>Not generated</span>
+        );
+      default:
+        return getJobOrderInvoiceValue(record, columnKey);
+    }
+  };
+
+  const isExportDisabled = activeTab === 'jobOrder'
+    ? isLoadingJobOrderInvoices || filteredJobOrderInvoices.length === 0
+    : isLoading || filteredRecords.length === 0;
+
+  const isRefreshBusy = activeTab === 'jobOrder'
+    ? isLoadingJobOrderInvoices
+    : isLoading || !isFullyLoaded || isRefreshingManual;
+
+  const jobOrderInvoiceContent = isLoadingJobOrderInvoices && jobOrderInvoices.length === 0 ? (
+    <div className={`px-4 py-12 text-center ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+      <div className="animate-pulse flex flex-col items-center">
+        <div className={`h-4 w-1/3 rounded mb-4 ${isDarkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+        <div className={`h-4 w-1/2 rounded ${isDarkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+      </div>
+      <p className="mt-4">Loading Job Order Invoices...</p>
+    </div>
+  ) : jobOrderInvoicesError ? (
+    <div className={`px-4 py-12 text-center ${isDarkMode ? 'text-red-400' : 'text-red-600'}`}>
+      <p>{jobOrderInvoicesError}</p>
+      <button
+        onClick={fetchJobOrderInvoices}
+        className={`mt-4 px-4 py-2 rounded ${isDarkMode
+          ? 'bg-gray-700 hover:bg-gray-600 text-white'
+          : 'bg-gray-200 hover:bg-gray-300 text-gray-900'
+          }`}>
+        Retry
+      </button>
+    </div>
+  ) : (
+    <div className="h-full overflow-auto" ref={scrollRef}>
+      <table className="w-max min-w-full text-sm border-separate border-spacing-0">
+        <thead>
+          <tr className={`border-b sticky top-0 z-10 ${isDarkMode ? 'border-gray-700 bg-gray-800' : 'border-gray-200 bg-gray-100'}`}>
+            {jobOrderInvoiceColumns.map((column, index) => (
+              <th
+                key={column.key}
+                className={`text-left py-3 px-3 font-normal whitespace-nowrap ${column.width} ${isDarkMode ? 'text-gray-400 bg-gray-800' : 'text-gray-600 bg-gray-100'
+                  } ${index < jobOrderInvoiceColumns.length - 1 ? (isDarkMode ? 'border-r border-gray-700' : 'border-r border-gray-200') : ''}`}
+              >
+                {column.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {paginatedJobOrderInvoices.length > 0 ? (
+            paginatedJobOrderInvoices.map((record) => (
+              <tr
+                key={record.id}
+                onClick={() => record.account_no && handleViewCustomer(record.account_no)}
+                className={`border-b transition-colors ${isDarkMode
+                  ? 'border-gray-800 hover:bg-gray-900'
+                  : 'border-gray-200 hover:bg-gray-50'
+                  } ${record.account_no ? 'cursor-pointer' : ''}`}
+              >
+                {jobOrderInvoiceColumns.map((column, index) => (
+                  <td
+                    key={column.key}
+                    className={`py-4 px-3 whitespace-nowrap ${isDarkMode ? 'text-white' : 'text-gray-900'
+                      } ${index < jobOrderInvoiceColumns.length - 1 ? (isDarkMode ? 'border-r border-gray-800' : 'border-r border-gray-200') : ''}`}
+                  >
+                    {renderJobOrderInvoiceCell(record, column.key)}
+                  </td>
+                ))}
+              </tr>
+            ))
+          ) : (
+            <tr>
+              <td colSpan={jobOrderInvoiceColumns.length} className={`px-4 py-12 text-center ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                {jobOrderInvoices.length > 0
+                  ? 'No Job Order Invoices found matching your filters'
+                  : 'No Job Order Invoices found.'}
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+
   const handleExport = () => {
+    if (activeTab === 'jobOrder') {
+      exportToCSV('job_order_invoices_export', jobOrderInvoiceColumns, filteredJobOrderInvoices, getJobOrderInvoiceValue);
+      return;
+    }
+
     if (!filteredRecords || filteredRecords.length === 0) return;
 
     const exportColumns = displayColumns
@@ -1241,13 +1482,16 @@ const Invoice: React.FC = () => {
 
             {/* All Level */}
             <button
-              onClick={() => setSelectedDate('All')}
+              onClick={() => {
+                setSelectedDate('All');
+                setActiveTab('invoice');
+              }}
               className={`w-full flex items-center justify-between px-4 py-3 text-sm transition-colors ${isDarkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'
-                } ${selectedDate === 'All'
+                } ${activeTab === 'invoice' && selectedDate === 'All'
                   ? ''
                   : isDarkMode ? 'text-gray-300' : 'text-gray-700'
                 }`}
-              style={selectedDate === 'All' ? {
+              style={activeTab === 'invoice' && selectedDate === 'All' ? {
                 backgroundColor: colorPalette?.primary ? `${colorPalette.primary}33` : 'rgba(249, 115, 22, 0.2)',
                 color: colorPalette?.primary || '#7c3aed'
               } : {}}
@@ -1256,11 +1500,11 @@ const Invoice: React.FC = () => {
                 <span>All Records</span>
               </div>
               <span
-                className={`px-2 py-1 rounded text-xs transition-colors ${selectedDate === 'All'
+                className={`px-2 py-1 rounded text-xs transition-colors ${activeTab === 'invoice' && selectedDate === 'All'
                   ? 'text-white'
                   : isDarkMode ? 'bg-gray-800 text-gray-400' : 'bg-gray-100 text-gray-500'
                   }`}
-                style={selectedDate === 'All' ? {
+                style={activeTab === 'invoice' && selectedDate === 'All' ? {
                   backgroundColor: colorPalette?.primary || '#7c3aed'
                 } : {}}
               >
@@ -1299,13 +1543,16 @@ const Invoice: React.FC = () => {
                   {dateItems.dates.map((item, index) => (
                     <button
                       key={index}
-                      onClick={() => setSelectedDate(item.date)}
+                      onClick={() => {
+                        setSelectedDate(item.date);
+                        setActiveTab('invoice');
+                      }}
                       className={`w-full flex items-center justify-between px-6 py-2.5 text-sm transition-colors ${isDarkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'
-                        } ${selectedDate === item.date
+                        } ${activeTab === 'invoice' && selectedDate === item.date
                           ? ''
                           : isDarkMode ? 'text-gray-400' : 'text-gray-600'
                         }`}
-                      style={selectedDate === item.date ? {
+                      style={activeTab === 'invoice' && selectedDate === item.date ? {
                         backgroundColor: colorPalette?.primary ? `${colorPalette.primary}33` : 'rgba(249, 115, 22, 0.2)',
                         color: colorPalette?.primary || '#7c3aed',
                         fontWeight: 500
@@ -1316,11 +1563,11 @@ const Invoice: React.FC = () => {
                         <span className="truncate">{item.date}</span>
                       </div>
                       <span
-                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${selectedDate === item.date
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${activeTab === 'invoice' && selectedDate === item.date
                           ? 'text-white'
                           : isDarkMode ? 'bg-gray-800 text-gray-500' : 'bg-gray-200 text-gray-500'
                           }`}
-                        style={selectedDate === item.date ? {
+                        style={activeTab === 'invoice' && selectedDate === item.date ? {
                           backgroundColor: colorPalette?.primary || '#7c3aed'
                         } : {}}
                       >
@@ -1331,6 +1578,35 @@ const Invoice: React.FC = () => {
                 </div>
               )}
             </div>
+
+            {/* Job Order Invoice: installation fee invoices, kept apart from the monthly invoices */}
+            <button
+              onClick={handleSelectJobOrderTab}
+              className={`w-full flex items-center justify-between px-4 py-3 text-sm transition-colors ${isDarkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'
+                } ${activeTab === 'jobOrder'
+                  ? ''
+                  : isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                } ${isDarkMode ? 'border-b border-gray-800' : 'border-b border-gray-100'}`}
+              style={activeTab === 'jobOrder' ? {
+                backgroundColor: colorPalette?.primary ? `${colorPalette.primary}33` : 'rgba(249, 115, 22, 0.2)',
+                color: colorPalette?.primary || '#7c3aed'
+              } : {}}
+            >
+              <div className="flex items-center">
+                <span className="font-medium">Job Order Invoice</span>
+              </div>
+              <span
+                className={`px-2 py-1 rounded text-xs transition-colors ${activeTab === 'jobOrder'
+                  ? 'text-white'
+                  : isDarkMode ? 'bg-gray-800 text-gray-400' : 'bg-gray-100 text-gray-500'
+                  }`}
+                style={activeTab === 'jobOrder' ? {
+                  backgroundColor: colorPalette?.primary || '#7c3aed'
+                } : {}}
+              >
+                {filteredJobOrderInvoices.length}
+              </span>
+            </button>
           </div>
 
           {isMobile && (
@@ -1394,10 +1670,11 @@ const Invoice: React.FC = () => {
                     setSearchQuery={setSearchQuery}
                     isDarkMode={isDarkMode}
                     colorPalette={colorPalette}
-                    placeholder="Search Invoice records..."
+                    placeholder={activeTab === 'jobOrder' ? 'Search Job Order Invoices...' : 'Search Invoice records...'}
                   />
                 </div>
               </div>
+              {activeTab === 'invoice' && (
               <button
                 onClick={() => setIsFunnelFilterOpen(true)}
                 title={Object.keys(activeFilters).length > 0
@@ -1430,8 +1707,9 @@ const Invoice: React.FC = () => {
               >
                 <Filter className="h-5 w-5" />
               </button>
+              )}
 
-              {userRole !== 'customer' && (
+              {userRole !== 'customer' && activeTab === 'invoice' && (
                 <div className="relative z-50 flex-shrink-0" ref={filterDropdownRef}>
                   <button
                     ref={columnsButtonRef}
@@ -1527,7 +1805,7 @@ const Invoice: React.FC = () => {
               )}
               <button
                 onClick={handleExport}
-                disabled={isLoading || filteredRecords.length === 0}
+                disabled={isExportDisabled}
                 title="Export to CSV"
                 className="relative p-2 rounded-lg transition-all duration-200 flex items-center justify-center shadow-sm disabled:opacity-50 border flex-shrink-0"
                 style={{
@@ -1536,12 +1814,12 @@ const Invoice: React.FC = () => {
                   color: colorPalette?.primary || '#7c3aed'
                 }}
                 onMouseEnter={(e) => {
-                  if (!isLoading && filteredRecords.length > 0 && colorPalette?.primary) {
+                  if (!isExportDisabled && colorPalette?.primary) {
                     e.currentTarget.style.backgroundColor = hexToRgba(colorPalette.primary, 0.1);
                   }
                 }}
                 onMouseLeave={(e) => {
-                  if (!isLoading && filteredRecords.length > 0) {
+                  if (!isExportDisabled) {
                     e.currentTarget.style.backgroundColor = '#ffffff';
                   }
                 }}
@@ -1550,8 +1828,10 @@ const Invoice: React.FC = () => {
               </button>
               <button
                 onClick={handleRefresh}
-                disabled={isLoading || !isFullyLoaded || isRefreshingManual}
-                title={!isFullyLoaded ? `Loading records... (${invoiceRecords.length}/${totalCount})` : isRefreshingManual ? "Checking for updates..." : "Refresh Records"}
+                disabled={isRefreshBusy}
+                title={activeTab === 'jobOrder'
+                  ? 'Refresh Job Order Invoices'
+                  : !isFullyLoaded ? `Loading records... (${invoiceRecords.length}/${totalCount})` : isRefreshingManual ? "Checking for updates..." : "Refresh Records"}
                 className="relative p-2 rounded-lg transition-all duration-200 flex items-center justify-center shadow-sm disabled:opacity-50 border flex-shrink-0"
                 style={{
                   backgroundColor: '#ffffff',
@@ -1559,17 +1839,17 @@ const Invoice: React.FC = () => {
                   color: colorPalette?.primary || '#7c3aed'
                 }}
                 onMouseEnter={(e) => {
-                  if (!isLoading && isFullyLoaded && !isRefreshingManual && colorPalette?.primary) {
+                  if (!isRefreshBusy && colorPalette?.primary) {
                     e.currentTarget.style.backgroundColor = hexToRgba(colorPalette.primary, 0.1);
                   }
                 }}
                 onMouseLeave={(e) => {
-                  if (!isLoading && isFullyLoaded && !isRefreshingManual) {
+                  if (!isRefreshBusy) {
                     e.currentTarget.style.backgroundColor = '#ffffff';
                   }
                 }}
               >
-                <RefreshCw className={`h-5 w-5 ${(isLoading || !isFullyLoaded || isRefreshingManual) ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`h-5 w-5 ${isRefreshBusy ? 'animate-spin' : ''}`} />
                 {hasNewData && (
                   <span className="absolute -top-1 -right-1 flex h-3 w-3">
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
@@ -1581,7 +1861,7 @@ const Invoice: React.FC = () => {
           </div>
 
           {/* Active Funnel Filters Row */}
-          {Object.keys(activeFilters || {}).length > 0 && (
+          {activeTab === 'invoice' && Object.keys(activeFilters || {}).length > 0 && (
             <div className={`px-4 py-2 border-b flex flex-wrap items-center gap-2 overflow-x-auto no-scrollbar ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
               <span className={`text-[10px] font-bold uppercase tracking-wider ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
                 Active Filters:
@@ -1657,7 +1937,7 @@ const Invoice: React.FC = () => {
 
           <div className="flex-1 overflow-hidden flex flex-col">
             <div className="flex-1 overflow-hidden">
-              {isLoading ? (
+              {activeTab === 'jobOrder' ? jobOrderInvoiceContent : isLoading ? (
                 <div className={`px-4 py-12 text-center ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
                   }`}>
                   <div className="animate-pulse flex flex-col items-center">
@@ -1773,16 +2053,30 @@ const Invoice: React.FC = () => {
                 </>
               )}
             </div>
-            {!isLoading && !error && filteredRecords.length > 0 && (
-              <PaginationControls
-                totalPages={totalPages}
-                itemsPerPage={itemsPerPage}
-                setItemsPerPage={setItemsPerPage}
-                isDarkMode={isDarkMode}
-                currentPage={currentPage}
-                totalDisplayCount={totalDisplayCount}
-                handlePageChange={handlePageChange}
-              />
+            {activeTab === 'jobOrder' ? (
+              !isLoadingJobOrderInvoices && !jobOrderInvoicesError && filteredJobOrderInvoices.length > 0 && (
+                <PaginationControls
+                  totalPages={jobOrderTotalPages}
+                  itemsPerPage={itemsPerPage}
+                  setItemsPerPage={setItemsPerPage}
+                  isDarkMode={isDarkMode}
+                  currentPage={currentPage}
+                  totalDisplayCount={filteredJobOrderInvoices.length}
+                  handlePageChange={handlePageChange}
+                />
+              )
+            ) : (
+              !isLoading && !error && filteredRecords.length > 0 && (
+                <PaginationControls
+                  totalPages={totalPages}
+                  itemsPerPage={itemsPerPage}
+                  setItemsPerPage={setItemsPerPage}
+                  isDarkMode={isDarkMode}
+                  currentPage={currentPage}
+                  totalDisplayCount={totalDisplayCount}
+                  handlePageChange={handlePageChange}
+                />
+              )
             )}
           </div>
         </div>

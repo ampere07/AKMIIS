@@ -47,6 +47,29 @@ export interface InstallationInvoice {
   url: string;
 }
 
+// A job order's installation fee invoice, as listed on the Invoice page's Job Order Invoice tab
+export interface JobOrderInvoiceRecord {
+  id: number;
+  invoice_no: string;
+  account_no: string | null;
+  invoice_date: string | null;
+  due_date: string | null;
+  installation_fee: number;
+  full_name: string;
+  contact_number: string | null;
+  email_address: string | null;
+  address: string;
+  barangay: string | null;
+  city: string | null;
+  region: string | null;
+  plan: string | null;
+  onsite_status: string | null;
+  invoice_url: string | null;
+  organization_id: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export interface InvoiceResponse {
   success: boolean;
   data: InvoiceRecord[];
@@ -95,6 +118,14 @@ export const invoiceService = {
         amount: parseFloat(jo.installation_fee) || 0,
         url: jo.invoice_url,
       }));
+  },
+
+  async getJobOrderInvoices(): Promise<JobOrderInvoiceRecord[]> {
+    const response = await apiClient.get<{ success: boolean; data?: JobOrderInvoiceRecord[]; message?: string }>('/job-order-invoice-records');
+    if (!response.data.success) {
+      throw new Error(response.data.message || 'Failed to fetch job order invoices');
+    }
+    return response.data.data || [];
   },
 
   async getInvoicesByAccountNo(accountNo: string, fast: boolean = true): Promise<InvoiceRecord[]> {

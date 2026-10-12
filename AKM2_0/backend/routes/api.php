@@ -2504,6 +2504,7 @@ Route::prefix('billing-generation')->group(function () {
 // Billing Records Routes - Direct database fetch (separate from billing-generation)
 Route::get('/soa-records', [\App\Http\Controllers\BillingRecordsController::class , 'getSOARecords']);
 Route::get('/invoice-records', [\App\Http\Controllers\BillingRecordsController::class , 'getInvoiceRecords']);
+Route::get('/job-order-invoice-records', [\App\Http\Controllers\BillingRecordsController::class , 'getJobOrderInvoiceRecords'])->middleware('auth:sanctum');
 
 
 // Advanced Payment Routes
