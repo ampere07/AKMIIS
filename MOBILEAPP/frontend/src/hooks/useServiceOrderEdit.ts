@@ -620,7 +620,7 @@ export const useServiceOrderEdit = (isOpen: boolean, serviceOrderData: any, onCl
       }
 
       // Update SO
-      const updatePayload = mapFormToApi(finalData, uploaded, currentUserEmail, serviceOrderData);
+      const updatePayload = mapFormToApi(finalData, uploaded, currentUserEmail, serviceOrderData, isTechnician);
       const res = await apiClient.put(`/service-orders/${serviceOrderId}`, updatePayload);
       if (!res.data?.success) throw new Error(res.data?.message || 'Update failed');
 
@@ -800,7 +800,7 @@ const mapApiToForm = (d: any): Partial<ServiceOrderEditFormData> => {
   };
 };
 
-const mapFormToApi = (f: ServiceOrderEditFormData, uploads: any, user: string, original: any) => {
+const mapFormToApi = (f: ServiceOrderEditFormData, uploads: any, user: string, original: any, isTechnician: boolean) => {
   const isReschedule = f.visitStatus === 'Reschedule';
 
   const manilaNow = dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
@@ -851,8 +851,6 @@ const mapFormToApi = (f: ServiceOrderEditFormData, uploads: any, user: string, o
         router_reading_image_url: uploads.router_reading_image_url || f.routerReadingImage || '',
         box_reading_image_url: uploads.box_reading_image_url || f.boxReadingImage || '',
         speedtest_image_url: uploads.speedtest_image_url || f.portLabelImage || '',
-        // Saved to the customer record by the backend
-        ...(f.addressCoordinates?.trim() ? { address_coordinates: f.addressCoordinates.trim() } : {})
       };
 
       if (!existingEndTime) {
@@ -881,6 +879,11 @@ const mapFormToApi = (f: ServiceOrderEditFormData, uploads: any, user: string, o
     if (!existingEndTime) {
       payload.end_time = manilaNow;
     }
+  }
+
+  // Technician only, optional. Saved to the customer record by the backend
+  if (isTechnician && f.addressCoordinates?.trim()) {
+    payload.address_coordinates = f.addressCoordinates.trim();
   }
 
   return payload;
