@@ -371,6 +371,17 @@ class RadiusQueueService
             return false;
         }
 
+        // Queued at onsite Done (InstallationAccessService::queueCreate): pinned to the
+        // barangay's server, with the group decided now — Restricted until the installation
+        // fee is paid.
+        if (!empty($params['job_order_id'])) {
+            return app(InstallationAccessService::class)->runQueuedCreate(
+                app(RouterosApiService::class),
+                $params,
+                fn (string $message) => $this->writeLog($message)
+            );
+        }
+
         $resolver = app(RadiusServerResolver::class);
 
         // A create places a NEW account, so pick the target server the same way

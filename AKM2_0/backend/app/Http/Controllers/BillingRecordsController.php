@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\StatementOfAccount;
 use App\Models\Invoice;
 use App\Models\BillingAccount;
+use App\Services\InstallationFeeNotificationService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -353,10 +354,10 @@ class BillingRecordsController extends Controller
     /**
      * Get all Job Order (installation fee) invoice records
      *
-     * A job order bills its installation fee once its onsite status becomes Done
-     * (InstallationFeeNotificationService): numbered JO-{id}, dated on the install date and
-     * due billing.due_days_add days later. invoice_url is the PDF on Google Drive; job orders
-     * completed before the PDF was introduced have none.
+     * A job order bills its installation fee when it is approved
+     * (InstallationFeeNotificationService): numbered JO-{id}, dated and due on the install
+     * date. invoice_url is the PDF on Google Drive; job orders completed before the PDF was
+     * introduced have none.
      */
     public function getJobOrderInvoiceRecords(Request $request): JsonResponse
     {
@@ -396,9 +397,7 @@ class BillingRecordsController extends Controller
                 $query->where('jo.organization_id', $organizationId);
             }
 
-            $dueDays = (int) config('billing.due_days_add', 7);
-
-            $records = $query->orderBy('jo.id', 'desc')->get()->map(function ($row) use ($dueDays) {
+            $records = $query->orderBy('jo.id', 'desc')->get()->map(function ($row) {
                 // The application is what the invoice PDF is built from; the customer covers
                 // job orders whose application is missing.
                 $hasApp = $row->app_first_name !== null || $row->app_last_name !== null;
@@ -433,7 +432,7 @@ class BillingRecordsController extends Controller
                     'invoice_no' => 'JO-' . $row->id,
                     'account_no' => $row->account_no,
                     'invoice_date' => $invoiceDate ? $invoiceDate->format('Y-m-d H:i:s') : null,
-                    'due_date' => $invoiceDate ? $invoiceDate->copy()->addDays($dueDays)->format('Y-m-d') : null,
+                    'due_date' => $invoiceDate ? InstallationFeeNotificationService::dueDate($invoiceDate)->format('Y-m-d') : null,
                     'installation_fee' => (float) $row->installation_fee,
                     'full_name' => $fullName,
                     'contact_number' => $pick($row->app_mobile_number, $row->c_contact_number),

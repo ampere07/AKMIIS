@@ -202,22 +202,27 @@ class PaymentWorkerService
             // the stale copy would mark a genuinely settled payment FAILED.
             $rawPayload = $claimed->callback_payload;
 
-            if ($rawPayload) {
-                $json = json_decode($rawPayload, true);
-                $gwStatus = strtoupper($json['status'] ?? '');
+            // Only a gateway-confirmed payment is posted. Every path that queues a payment
+            // (webhook, reconciliation, API_RETRY requeue) stores the gateway payload with it,
+            // so a row with none is unverified: posting it would reduce the balance — and
+            // reconnect the customer — on nothing but a status someone set by hand. A later
+            // webhook still moves such a row back to QUEUED with its payload.
+            $json = $rawPayload ? json_decode($rawPayload, true) : null;
+            $gwStatus = strtoupper(is_array($json) ? (string) ($json['status'] ?? '') : '');
 
-                $isLegitPaid = in_array($gwStatus, ['PAID', 'COMPLETED', 'SETTLED', 'PAYMENT_SUCCESS']);
+            $isLegitPaid = in_array($gwStatus, ['PAID', 'COMPLETED', 'SETTLED', 'PAYMENT_SUCCESS']);
 
-                if (!$isLegitPaid) {
-                    $this->workerLog("AUDIT FAIL: Ref $ref has payload but status is $gwStatus. Marking FAILED.");
+            if (!$isLegitPaid) {
+                $this->workerLog($rawPayload
+                    ? "AUDIT FAIL: Ref $ref has payload but status is $gwStatus. Marking FAILED."
+                    : "AUDIT FAIL: Ref $ref has no gateway confirmation payload. Marking FAILED.");
 
-                    DB::table('pending_payments')
-                        ->where('id', $id)
-                        ->update(['status' => 'FAILED', 'updated_at' => now()]);
+                DB::table('pending_payments')
+                    ->where('id', $id)
+                    ->update(['status' => 'FAILED', 'updated_at' => now()]);
 
-                    DB::commit();
-                    return;
-                }
+                DB::commit();
+                return;
             }
 
             DB::table('pending_payments')
@@ -613,7 +618,9 @@ class PaymentWorkerService
 
             if (!$radiusSuccess) {
                 $this->workerLog("[RECONNECT EXECUTE] All 3 attempts failed. Queuing for retry.");
-                RadiusQueueService::queue([
+                // One pending reconnect per account: a second settling payment while the
+                // first retry is still queued does not stack another one behind it.
+                RadiusQueueService::queueUnique([
                     'source_type' => 'payment_worker',
                     'source_id' => $billingAccount->id,
                     'account_no' => $accountNo,

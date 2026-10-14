@@ -10,13 +10,18 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Sends the installation fee invoice once a job order's onsite status becomes Done.
+ * Sends the installation fee invoice once a job order is approved.
  *
  * Mirrors the SOA notification flow (BillingNotificationService): a PDF rendered
  * from an email_templates design, an email carrying that PDF, and an SMS from
- * sms_templates. It runs before the job order is approved, so there is no
- * billing account yet — everything is read from the job order and its
- * application, and the job order ID stands in as the invoice number.
+ * sms_templates. Customer details are read from the job order and its application,
+ * and the job order ID stands in as the invoice number (JO-{id}).
+ *
+ * The invoice is due on the installation date. It is a notice for the fee approval
+ * put on the account balance, not an `invoices` row: monthly billing treats any
+ * invoice row in a month as that month's bill, and an earlier one as the end of
+ * first-bill proration, so a stored installation invoice would change the regular
+ * bills. The customer pays the balance through the payment portal.
  */
 class InstallationFeeNotificationService
 {
@@ -50,6 +55,14 @@ class InstallationFeeNotificationService
 
         if ($installationFee <= 0) {
             $results['skipped'] = true;
+            return $results;
+        }
+
+        // Billed once: a job order whose invoice is already on file (including one sent at
+        // onsite Done before the invoice moved to approval) is not sent a second one.
+        if (!empty($jobOrder->invoice_url)) {
+            $results['skipped'] = true;
+            $results['invoice_url'] = $jobOrder->invoice_url;
             return $results;
         }
 
@@ -138,6 +151,60 @@ class InstallationFeeNotificationService
         return $results;
     }
 
+    /**
+     * Re-render an invoice already on file and point job_orders.invoice_url at the new PDF.
+     *
+     * For correcting PDFs generated before the due date moved to the installation date. The
+     * customer is not notified again — no email, no SMS. The previous PDF is left on Google
+     * Drive, and its link is returned, so the change can be undone by restoring invoice_url.
+     *
+     * @return array{success: bool, old_url: string|null, new_url: string|null, due_date: string|null, error: string|null}
+     */
+    public function regenerateInvoice(JobOrder $jobOrder): array
+    {
+        $result = ['success' => false, 'old_url' => $jobOrder->invoice_url ?: null, 'new_url' => null, 'due_date' => null, 'error' => null];
+
+        $installationFee = (float) ($jobOrder->installation_fee ?? 0);
+        if ($installationFee <= 0) {
+            $result['error'] = 'No installation fee on this job order';
+            return $result;
+        }
+
+        $application = $jobOrder->application;
+        if (!$application) {
+            $result['error'] = 'No application on this job order';
+            return $result;
+        }
+
+        $data = $this->prepareData($jobOrder, $application, $installationFee);
+        $result['due_date'] = $data['Due_Date'];
+
+        $pdf = $this->generatePdf($jobOrder, $data);
+        if (!$pdf['success']) {
+            $result['error'] = 'PDF generation failed: ' . $pdf['error'];
+            return $result;
+        }
+
+        $result['new_url'] = $this->storeInvoiceUrl($jobOrder, $pdf['path']);
+        $this->deleteFile($pdf['path']);
+
+        if (!$result['new_url']) {
+            $result['error'] = 'Upload to Google Drive failed; invoice_url left unchanged';
+            return $result;
+        }
+
+        $result['success'] = true;
+
+        Log::info('Installation invoice regenerated', [
+            'job_order_id' => $jobOrder->id,
+            'due_date'     => $result['due_date'],
+            'old_url'      => $result['old_url'],
+            'new_url'      => $result['new_url'],
+        ]);
+
+        return $result;
+    }
+
     protected function prepareData(JobOrder $jobOrder, $application, float $installationFee): array
     {
         $customerName = preg_replace('/\s+/', ' ', trim(implode(' ', [
@@ -163,7 +230,11 @@ class InstallationFeeNotificationService
         $invoiceDate = $jobOrder->date_installed
             ? \Carbon\Carbon::parse($jobOrder->date_installed)
             : now();
-        $dueDate = $invoiceDate->copy()->addDays((int) config('billing.due_days_add', 7));
+        $dueDate = self::dueDate($invoiceDate);
+
+        $accountNo = $jobOrder->account_id
+            ? (string) (DB::table('billing_accounts')->where('id', $jobOrder->account_id)->value('account_no') ?? '')
+            : '';
 
         $amount = number_format($installationFee, 2);
         $brandName = DB::table('form_ui')->value('brand_name') ?? 'Your ISP';
@@ -180,6 +251,7 @@ class InstallationFeeNotificationService
             'Contact_No' => $application->mobile_number,
             'Email' => $application->email_address,
             'Plan' => $displayPlan,
+            'Account_No' => $accountNo,
             'Invoice_No' => 'JO-' . $jobOrder->id,
             'Job_Order_No' => $jobOrder->id,
             'Statement_Date' => $invoiceDate->format('F d, Y'),
@@ -194,6 +266,7 @@ class InstallationFeeNotificationService
 
             // SMS-style placeholders
             'customer_name' => $customerName,
+            'account_no' => $accountNo,
             'plan_name' => $displayPlan,
             'installation_fee' => $amount,
             'amount' => $amount,
@@ -205,6 +278,15 @@ class InstallationFeeNotificationService
             'company_name' => $brandName,
             'portal_url' => 'sync.akmiis.com',
         ];
+    }
+
+    /**
+     * The installation fee is due on the installation date itself — no due-day offset,
+     * grace period or proration, none of which apply to a one-time fee.
+     */
+    public static function dueDate(\Carbon\Carbon $installationDate): \Carbon\Carbon
+    {
+        return $installationDate->copy()->startOfDay();
     }
 
     protected function generatePdf(JobOrder $jobOrder, array $data): array
