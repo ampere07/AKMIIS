@@ -1287,7 +1287,60 @@ class TransactionController extends Controller
                 \Log::info('[TRANSACTION RECONNECT SKIP] No plan found');
                 return 'no_plan';
             }
-            \Log::info('[TRANSACTION RECONNECT PROCEED] Conditions met - Proceeding with reconnection. Current Status Active: ' . ($isAlreadyActive ? 'Yes' : 'No') . ', Balance: ₱' . $balance);
+
+            $manualRadiusService = app(ManualRadiusOperationsService::class);
+
+            // Step 4: Reconnect only a customer RADIUS has actually cut off. An account already
+            // in a plan group was never disconnected (its router is just offline), so the
+            // payment is settled as it stands: no RADIUS reconnect, no reconnection log, no
+            // reconnect SMS/email. When the group can't be read, reconnect as before so a
+            // cut-off customer who paid is never left offline.
+            $radiusGroup = $manualRadiusService->currentGroup($username);
+            if (ManualRadiusOperationsService::isConnectedGroup($radiusGroup)) {
+                // Connected, but RADIUS still holds another plan (a plan change): move it to
+                // the customer's plan as a group update, which logs no reconnection. If RADIUS
+                // doesn't confirm it, the queued reconnect applies it the same way later.
+                $planChanged = !ManualRadiusOperationsService::sameGroup($radiusGroup, ManualRadiusOperationsService::planGroup($plan));
+                if ($planChanged) {
+                    $groupParams = [
+                        'accountNumber' => $accountNo,
+                        'username' => $username,
+                        'plan' => $plan,
+                        'updatedBy' => $updatedByUser,
+                        'remarks' => 'Transaction Approval Plan Update'
+                    ];
+                    $update = $manualRadiusService->updateGroup($groupParams);
+
+                    if (!empty($update['applied'])) {
+                        \Log::info("[TRANSACTION RECONNECT PLAN] Account {$accountNo} moved from '{$radiusGroup}' to plan '{$plan}' - no reconnection logged.");
+                    } else {
+                        \Log::warning("[TRANSACTION RECONNECT PLAN] Plan update for {$accountNo} not confirmed: " . ($update['message'] ?? 'not applied') . '. Queuing for retry.');
+                        \App\Services\RadiusQueueService::queue([
+                            'organization_id' => null,
+                            'source_type' => 'transaction_approval',
+                            'source_id' => $billingAccount->id,
+                            'account_no' => $accountNo,
+                            'operation' => 'reconnect_user',
+                            'params' => $groupParams,
+                            'last_error' => $update['message'] ?? 'Group update not confirmed',
+                            'created_by' => $updatedByUser,
+                        ]);
+                    }
+                }
+
+                if (!$isAlreadyActive) {
+                    $billingAccount->billing_status_id = 1;
+                    $billingAccount->updated_at = now();
+                    $billingAccount->updated_by = Auth::id();
+                    $billingAccount->save();
+                    \Log::info('[TRANSACTION RECONNECT DB] Updated billing_status_id to 1 for Account: ' . $accountNo);
+                }
+
+                \Log::info("[TRANSACTION RECONNECT SKIP] Account {$accountNo} already connected in RADIUS (group '{$radiusGroup}') - payment settled, no reconnect.");
+                return $planChanged ? 'plan_updated' : 'already_connected';
+            }
+
+            \Log::info('[TRANSACTION RECONNECT PROCEED] Conditions met - Proceeding with reconnection. Current Status Active: ' . ($isAlreadyActive ? 'Yes' : 'No') . ', Balance: ₱' . $balance . ", RADIUS group: '" . ($radiusGroup ?? 'unknown') . "'");
 
             // Step 5: Prepare parameters for ManualRadiusOperationsService
             $params = [
@@ -1305,7 +1358,6 @@ class TransactionController extends Controller
             // 3. Update DB Status (again)
             \Log::info('[TRANSACTION RECONNECT EXECUTE] Calling ManualRadiusOperationsService for ' . $username);
 
-            $manualRadiusService = new ManualRadiusOperationsService();
             $radiusSuccess = false;
             $lastRadiusError = '';
             

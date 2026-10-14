@@ -333,6 +333,8 @@ class InstallationAccessFlowTest extends TestCase
         $paymentId = $this->makePayment('REF-PAID', 1500, 'QUEUED', ['status' => 'PAID', 'id' => 'inv-1']);
 
         $radius = Mockery::mock(ManualRadiusOperationsService::class);
+        // Held in the Restricted group until the fee is paid, so the payment reconnects it.
+        $radius->shouldReceive('currentGroup')->andReturn(InstallationAccessService::RESTRICTED_GROUP);
         $radius->shouldReceive('reconnectUser')->once()
             ->with(Mockery::on(fn ($p) => $p['username'] === self::USERNAME && $p['plan'] === self::PLAN))
             ->andReturn(['status' => 'success']);
@@ -380,6 +382,7 @@ class InstallationAccessFlowTest extends TestCase
         $this->assertSame('QUEUED', DB::table('pending_payments')->where('id', $paymentId)->value('status'));
 
         $radius = Mockery::mock(ManualRadiusOperationsService::class);
+        $radius->shouldReceive('currentGroup')->andReturn(InstallationAccessService::RESTRICTED_GROUP);
         $radius->shouldReceive('reconnectUser')->once()->andReturn(['status' => 'success']);
         $worker = $this->workerWith($radius);
 
@@ -406,6 +409,8 @@ class InstallationAccessFlowTest extends TestCase
         $paymentId = $this->makePayment('REF-RADIUS-DOWN', 1500, 'QUEUED', ['status' => 'PAID'], 'ACC-0077');
 
         $radius = Mockery::mock(ManualRadiusOperationsService::class);
+        // RADIUS is down: the group can't be read, so the payment still tries to reconnect.
+        $radius->shouldReceive('currentGroup')->andReturn(null);
         $radius->shouldReceive('reconnectUser')->times(3)->andReturn(['status' => 'error', 'message' => 'Connection timed out']);
         $worker = $this->workerWith($radius);
 

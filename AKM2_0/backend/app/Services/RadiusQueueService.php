@@ -238,10 +238,22 @@ class RadiusQueueService
 
             try {
                 $params = json_decode($item->params, true);
+
+                // A queued reconnect runs only for a customer RADIUS still has cut off.
+                $radiusGroup = $item->operation === 'reconnect_user'
+                    ? app(ManualRadiusOperationsService::class)->currentGroup((string) ($params['username'] ?? ''))
+                    : null;
+
+                if ($this->failIfAlreadyConnected($item, $params, $radiusGroup, $thisAttempt)) {
+                    $results['failed']++;
+                    $this->writeLog("");
+                    continue;
+                }
+
                 $this->writeLog("  [EXEC] Executing {$item->operation}...");
 
                 $errorMessage = null;
-                $success = $this->executeOperation($item->operation, $params, $errorMessage);
+                $success = $this->executeOperation($item->operation, $params, $errorMessage, $radiusGroup);
 
                 if ($success) {
                     // Mark as success
@@ -291,7 +303,11 @@ class RadiusQueueService
         return $results;
     }
 
-    private function executeOperation(string $operation, array $params, &$errorMessage = null): bool
+    /**
+     * @param string|null $radiusGroup for reconnect_user, the customer's User Manager group as
+     *                                 read just before (null when it couldn't be read)
+     */
+    private function executeOperation(string $operation, array $params, &$errorMessage = null, ?string $radiusGroup = null): bool
     {
         switch ($operation) {
             case 'create_user':
@@ -303,8 +319,21 @@ class RadiusQueueService
 
             case 'reconnect_user':
                 $service = app(ManualRadiusOperationsService::class);
-                $result = $service->reconnectUser($params);
-                $reconnectSucceeded = (($result['status'] ?? '') === 'success');
+
+                // Still connected, on another plan (failIfAlreadyConnected has already taken the
+                // same-plan case): a plan change. Apply it as a group update, which keeps the
+                // customer online and logs no reconnection.
+                if (ManualRadiusOperationsService::isConnectedGroup($radiusGroup)) {
+                    $this->writeLog("  [PLAN] Connected in '{$radiusGroup}' - applying plan '" . ($params['plan'] ?? '') . "' as a group update, not a reconnect");
+                    $result = $service->updateGroup($params);
+                    $reconnectSucceeded = (($result['status'] ?? '') === 'success') && !empty($result['applied']);
+                    if (($result['status'] ?? '') === 'success' && empty($result['applied'])) {
+                        $result['message'] = 'Group update not confirmed on any RADIUS server';
+                    }
+                } else {
+                    $result = $service->reconnectUser($params);
+                    $reconnectSucceeded = (($result['status'] ?? '') === 'success');
+                }
 
                 // Auto-fail open pullout service orders regardless of whether the RADIUS
                 // reconnect itself succeeded on this run. The customer has already paid (the
@@ -533,6 +562,48 @@ class RadiusQueueService
         }
 
         return $stale->count();
+    }
+
+    /**
+     * Fail a queued reconnect whose customer is already connected in RADIUS on their plan.
+     *
+     * Running it would only cut their session and write a reconnection log for an outage
+     * that isn't there, and billing prorates reconnections. A customer who is cut off
+     * (Restricted, Disconnected), whose group couldn't be read, or who sits on another plan
+     * (a plan change, applied by executeOperation as a group update) is left to run.
+     */
+    private function failIfAlreadyConnected(object $item, ?array $params, ?string $radiusGroup, int $attempt): bool
+    {
+        if ($item->operation !== 'reconnect_user' || !ManualRadiusOperationsService::isConnectedGroup($radiusGroup)) {
+            return false;
+        }
+
+        $planGroup = ManualRadiusOperationsService::planGroup((string) ($params['plan'] ?? ''));
+        if ($planGroup !== '' && !ManualRadiusOperationsService::sameGroup($radiusGroup, $planGroup)) {
+            return false;
+        }
+
+        // The reconnect was queued because the account was settled, so its open pullouts are
+        // closed exactly as the reconnect path would have closed them.
+        app(PulloutServiceOrderCloser::class)
+            ->closeIfSettled($params['accountNumber'] ?? '', null, 'radius queue retry');
+
+        $reason = "Not needed - already connected in RADIUS (group '{$radiusGroup}'); not reconnected, no reconnection logged";
+
+        DB::table('radius_operation_queue')
+            ->where('id', $item->id)
+            ->update([
+                'status'       => 'failed',
+                'attempts'     => $attempt,
+                'last_error'   => $reason,
+                'completed_at' => now(),
+                'updated_at'   => now(),
+            ]);
+
+        $this->writeLog("  [FAILED] {$reason}");
+        Log::channel('radiusrelated')->info('[Radius_Queue] [FAILED] reconnect_user for account ' . ($item->account_no ?? 'N/A') . ' - ' . $reason);
+
+        return true;
     }
 
     /**

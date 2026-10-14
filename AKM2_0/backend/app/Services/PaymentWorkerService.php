@@ -581,7 +581,59 @@ class PaymentWorkerService
                 return 'no_plan';
             }
 
-            $this->workerLog("[RECONNECT PROCEED] Conditions met - Proceeding with reconnection. Current Status Active: " . ($isAlreadyActive ? 'Yes' : 'No') . ", Balance: ₱{$balance}");
+            // Step 4: Reconnect only a customer RADIUS has actually cut off. An account already
+            // in a plan group was never disconnected (its router is just offline), so the
+            // payment is settled as it stands: no RADIUS reconnect, no reconnection log, no
+            // reconnect SMS/email. When the group can't be read, reconnect as before so a
+            // cut-off customer who paid is never left offline.
+            $radiusGroup = $this->manualRadiusService->currentGroup($username);
+            if (ManualRadiusOperationsService::isConnectedGroup($radiusGroup)) {
+                // Connected, but RADIUS still holds another plan (a plan change): move it to
+                // the customer's plan as a group update, which logs no reconnection. If RADIUS
+                // doesn't confirm it, the queued reconnect applies it the same way later.
+                $planChanged = !ManualRadiusOperationsService::sameGroup($radiusGroup, ManualRadiusOperationsService::planGroup($plan));
+                if ($planChanged) {
+                    $groupParams = [
+                        'accountNumber' => $accountNo,
+                        'username' => $username,
+                        'plan' => $plan,
+                        'updatedBy' => 'Payment Worker',
+                        'remarks' => 'Payment Worker Plan Update'
+                    ];
+                    $update = $this->manualRadiusService->updateGroup($groupParams);
+
+                    if (!empty($update['applied'])) {
+                        $this->workerLog("[RECONNECT PLAN] Account {$accountNo} moved from '{$radiusGroup}' to plan '{$plan}' - no reconnection logged.");
+                    } else {
+                        $this->workerLog("[RECONNECT PLAN] Plan update for {$accountNo} not confirmed: " . ($update['message'] ?? 'not applied') . ". Queuing for retry.");
+                        RadiusQueueService::queueUnique([
+                            'source_type' => 'payment_worker',
+                            'source_id' => $billingAccount->id,
+                            'account_no' => $accountNo,
+                            'operation' => 'reconnect_user',
+                            'params' => $groupParams,
+                            'last_error' => $update['message'] ?? 'Group update not confirmed',
+                            'created_by' => 'Payment Worker',
+                        ]);
+                    }
+                }
+
+                if (!$isAlreadyActive) {
+                    DB::table('billing_accounts')
+                        ->where('id', $billingAccount->id)
+                        ->update([
+                            'billing_status_id' => 1,
+                            'updated_at' => now(),
+                            'updated_by' => 'Payment Worker'
+                        ]);
+                    $this->workerLog("[RECONNECT DB] Updated billing_status_id to 1 for Account: {$accountNo}");
+                }
+
+                $this->workerLog("[RECONNECT SKIP] Account {$accountNo} already connected in RADIUS (group '{$radiusGroup}') - payment settled, no reconnect.");
+                return $planChanged ? 'plan_updated' : 'already_connected';
+            }
+
+            $this->workerLog("[RECONNECT PROCEED] Conditions met - Proceeding with reconnection. Current Status Active: " . ($isAlreadyActive ? 'Yes' : 'No') . ", Balance: ₱{$balance}, RADIUS group: '" . ($radiusGroup ?? 'unknown') . "'");
 
             // Step 5: Prepare parameters for ManualRadiusOperationsService
             $params = [
