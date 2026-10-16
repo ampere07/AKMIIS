@@ -92,55 +92,51 @@ class GenerateDailyBillingsCron extends Command
                 'status' => $accountsCount > 0 ? 'READY_TO_PROCESS' : 'NO_ACCOUNTS_FOUND'
             ]);
 
+            $unifiedResults = [
+                'statements' => ['success' => 0, 'failed' => 0, 'skipped' => 0],
+                'invoices' => ['success' => 0, 'failed' => 0, 'skipped' => 0],
+                'notifications' => [],
+            ];
+
             if ($accountsCount === 0) {
                 $logger->info('No accounts scheduled for billing today', [
                     'billing_day' => $targetBillingDay,
-                    'message' => 'Cron executed successfully but no billing generated - no accounts due today'
+                    'message' => 'No bills to generate today; overdue and DC notices still run'
                 ]);
-                
-                $endTime = microtime(true);
-                $duration = round($endTime - $startTime, 2);
-                
-                $logger->info('=================================================================');
-                $logger->info('Daily Billing Generation Cron Job Completed (No Generation Needed)', [
-                    'timestamp' => Carbon::now()->format('Y-m-d H:i:s'),
-                    'duration_seconds' => $duration,
-                    'status' => 'SUCCESS',
-                    'accounts_processed' => 0
+            } else {
+                $logger->info('Starting Unified Billing generation (SOA + Invoice + Notification)', [
+                    'billing_day' => $targetBillingDay,
+                    'accounts_to_process' => $accountsCount
                 ]);
-                $logger->info('=================================================================');
-                
-                return Command::SUCCESS;
+
+                $unifiedResults = $this->billingService->generateUnifiedBilling(
+                    $targetBillingDay,
+                    $today,
+                    1
+                );
+
+                $logger->info('SOA generation completed', [
+                    'success' => $unifiedResults['statements']['success'],
+                    'failed' => $unifiedResults['statements']['failed'],
+                    'skipped_already_generated' => $unifiedResults['statements']['skipped'] ?? 0,
+                    'total_accounts' => $accountsCount
+                ]);
+
+                $logger->info('Invoice generation completed', [
+                    'success' => $unifiedResults['invoices']['success'],
+                    'failed' => $unifiedResults['invoices']['failed'],
+                    'skipped_already_generated' => $unifiedResults['invoices']['skipped'] ?? 0,
+                    'total_accounts' => $accountsCount
+                ]);
+
+                $logger->info('Notifications completed', [
+                    'count' => count($unifiedResults['notifications'] ?? [])
+                ]);
             }
 
-            $logger->info('Starting Unified Billing generation (SOA + Invoice + Notification)', [
-                'billing_day' => $targetBillingDay,
-                'accounts_to_process' => $accountsCount
-            ]);
-
-            $unifiedResults = $this->billingService->generateUnifiedBilling(
-                $targetBillingDay,
-                $today,
-                1
-            );
-
-            $logger->info('SOA generation completed', [
-                'success' => $unifiedResults['statements']['success'],
-                'failed' => $unifiedResults['statements']['failed'],
-                'skipped_already_generated' => $unifiedResults['statements']['skipped'] ?? 0,
-                'total_accounts' => $accountsCount
-            ]);
-
-            $logger->info('Invoice generation completed', [
-                'success' => $unifiedResults['invoices']['success'],
-                'failed' => $unifiedResults['invoices']['failed'],
-                'skipped_already_generated' => $unifiedResults['invoices']['skipped'] ?? 0,
-                'total_accounts' => $accountsCount
-            ]);
-
-            $logger->info('Notifications completed', [
-                'count' => count($unifiedResults['notifications'] ?? [])
-            ]);
+            // Overdue and DC notices follow due dates, not billing days. The days they fall on
+            // (one and three days after a due date) rarely have bills of their own, so they run
+            // every day: when they ran only after a billing run, none went out after Sep 2 2026.
 
             // [NEW] Generate Overdue Notices
             $logger->info('Starting Overdue Notice generation');

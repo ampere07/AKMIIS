@@ -44,10 +44,14 @@ class ProcessEmailQueueCron extends Command
             // Process SMS
             $smsStats = $this->smsQueueService->processPendingSms(50);
 
+            // Retry SMS the provider rejected (up to 3 tries, 5 minutes apart)
+            $smsRetryStats = $this->smsQueueService->retryFailedSms(3, 20);
+
             $logger->info('Queue processing cron job completed', [
                 'timestamp' => now()->toDateTimeString(),
                 'emails' => $emailStats,
-                'sms' => $smsStats
+                'sms' => $smsStats,
+                'sms_retry' => $smsRetryStats
             ]);
 
             return Command::SUCCESS;
