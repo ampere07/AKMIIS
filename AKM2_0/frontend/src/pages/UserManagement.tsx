@@ -175,7 +175,7 @@ const UserManagement: React.FC<{ agentOnly?: boolean }> = ({ agentOnly = false }
   };
 
   return (
-    <div className={`h-full flex flex-col md:flex-row overflow-hidden pb-16 md:pb-0 ${isDarkMode ? 'bg-gray-950 text-white' : 'bg-gray-50 text-gray-900'}`}>
+    <div data-testid="user-management-screen" className={`h-full flex flex-col md:flex-row overflow-hidden pb-16 md:pb-0 ${isDarkMode ? 'bg-gray-950 text-white' : 'bg-gray-50 text-gray-900'}`}>
       {/* Users List Sidebar */}
       <div className={`flex-1 min-h-0 flex flex-col min-w-0 ${mobileView === 'details' ? 'hidden md:flex' : ''}`}>
         {/* Header */}

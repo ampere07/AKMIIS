@@ -22,6 +22,13 @@ class BillingAccount extends Model
         return preg_replace('/[^a-z]/', '', strtolower((string) $generationType)) === 'prepaid';
     }
 
+    public static function hasSettledBalance(?string $accountNo): bool
+    {
+        $balance = static::where('account_no', $accountNo)->value('account_balance');
+
+        return $balance !== null && (float) $balance <= 0.01;
+    }
+
     protected $fillable = [
         'customer_id',
         'account_no',

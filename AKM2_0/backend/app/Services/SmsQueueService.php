@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\BillingAccount;
 use App\Models\SmsQueue;
 use App\Services\ItexmoSmsService;
 use Illuminate\Support\Collection;
@@ -38,7 +39,8 @@ class SmsQueueService
             return [
                 'processed' => 0,
                 'sent' => 0,
-                'failed' => 0
+                'failed' => 0,
+                'withdrawn' => 0
             ];
         }
 
@@ -76,10 +78,18 @@ class SmsQueueService
         $stats = [
             'processed' => $jobs->count(),
             'sent' => 0,
-            'failed' => 0
+            'failed' => 0,
+            'withdrawn' => 0
         ];
 
         foreach ($jobs as $job) {
+            if (BillingAccount::hasSettledBalance($job->account_no)) {
+                $job->delete();
+                $stats['withdrawn']++;
+                Log::info('SMS withdrawn from queue: account balance is settled', ['id' => $job->id, 'account_no' => $job->account_no]);
+                continue;
+            }
+
             $result = $this->smsService->send([
                 'contact_no' => $job->contact_no,
                 'message' => $job->message
