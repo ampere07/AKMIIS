@@ -440,8 +440,12 @@ class LcpNapLocationController extends Controller
                 ], 422);
             }
 
-            $folderName = "(lcpnap)" . $request->lcpnap_name;
-            $folderId = $this->googleDriveService->createFolder($folderName);
+            // Only an edit that brings a new image needs the Drive folder. Creating it on every
+            // save made text-only edits slow, and failed them whenever Drive did.
+            $hasNewImage = $request->hasFile('reading_image') || $request->hasFile('image') || $request->hasFile('image_2');
+            $folderId = $hasNewImage
+                ? $this->googleDriveService->createFolder("(lcpnap)" . $request->lcpnap_name)
+                : null;
 
             if ($request->hasFile('reading_image')) {
                 $lcpnap->reading_image_url = $this->uploadImageToDrive(

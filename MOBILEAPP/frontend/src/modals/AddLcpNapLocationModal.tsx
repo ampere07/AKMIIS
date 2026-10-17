@@ -81,6 +81,12 @@ const INITIAL_FORM: FormDataState = {
 
 const INITIAL_PREVIEWS = { reading_image: null as string | null, image: null as string | null, image_2: null as string | null };
 
+const REQUIRED_FIELD_LABELS: Record<string, string> = {
+  lcpnap_name: 'LCPNAP', street: 'Street', region: 'Region', city: 'City', barangay: 'Barangay',
+  lcp_name: 'LCP', nap_name: 'NAP', port_total: 'Port Total', coordinates: 'Coordinates',
+  reading_image: 'Reading Image', image: 'Image', image_2: 'Image 2',
+};
+
 const getImageUrl = (url: string | null | undefined): string | null => {
   if (!url) return null;
   if (url.includes('drive.google.com')) {
@@ -473,12 +479,20 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({ isOpen,
     if (!formData.nap_name) newErrors.nap_name = 'Required';
     if (!formData.port_total) newErrors.port_total = 'Required';
     if (!formData.coordinates.trim()) newErrors.coordinates = 'Required';
-    if (!formData.reading_image) newErrors.reading_image = 'Required';
-    if (!formData.image) newErrors.image = 'Required';
-    if (!formData.image_2) newErrors.image_2 = 'Required';
+    // On edit the stored images only show as previews and are kept unless a new one is
+    // picked, so an image already on the record counts. Requiring a new file here made
+    // every edit fail until all three images were uploaded again.
+    const hasImage = (field: 'reading_image' | 'image' | 'image_2') => !!formData[field] || !!imagePreviews[field];
+    if (!hasImage('reading_image')) newErrors.reading_image = 'Required';
+    if (!hasImage('image')) newErrors.image = 'Required';
+    if (!hasImage('image_2')) newErrors.image_2 = 'Required';
 
     if (Object.keys(newErrors).length > 0) {
       setErrors(newErrors);
+      // The marks sit next to fields that can be far from the Save button; say what is missing.
+      setResultType('error');
+      setResultMessage(`Please complete: ${Object.keys(newErrors).map(field => REQUIRED_FIELD_LABELS[field] || field).join(', ')}`);
+      setShowResultModal(true);
       return;
     }
 

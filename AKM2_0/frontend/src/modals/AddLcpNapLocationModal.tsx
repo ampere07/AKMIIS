@@ -66,6 +66,11 @@ interface ApiResponse<T = any> {
   error?: string;
 }
 
+const REQUIRED_FIELD_LABELS: Record<string, string> = {
+  lcp_name: 'LCP', nap_name: 'NAP', port_total: 'PORT TOTAL', lcpnap_name: 'LCPNAP',
+  coordinates: 'Coordinates', image: 'Image', image_2: 'Image 2',
+};
+
 const getDriveDirectUrl = (url: string | undefined): string => {
   if (!url) return '';
   if (url.includes('drive.google.com') || url.includes('docs.google.com')) {
@@ -371,7 +376,7 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
     }
   };
 
-  const validateForm = (): boolean => {
+  const validateForm = (): Record<string, string> => {
     const newErrors: Record<string, string> = {};
 
     if (!formData.lcp_name) {
@@ -397,7 +402,7 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
     }
 
     setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    return newErrors;
   };
 
   const handleImageUpload = async (field: 'reading_image' | 'image' | 'image_2', file: File) => {
@@ -460,7 +465,15 @@ const AddLcpNapLocationModal: React.FC<AddLcpNapLocationModalProps> = ({
     // Synchronous guard: `loading` only disables the button after a re-render, so a
     // quick double click used to send two saves of the same LCPNAP.
     if (submittingRef.current) return;
-    if (!validateForm()) return;
+    const validationErrors = validateForm();
+    if (Object.keys(validationErrors).length > 0) {
+      // The red marks can sit below the fold of this long form, which made Save look
+      // like it did nothing; say what is missing.
+      setResultType('error');
+      setResultMessage(`Please complete: ${Object.keys(validationErrors).map(field => REQUIRED_FIELD_LABELS[field] || field).join(', ')}`);
+      setShowResultModal(true);
+      return;
+    }
     submittingRef.current = true;
 
     setLoading(true);

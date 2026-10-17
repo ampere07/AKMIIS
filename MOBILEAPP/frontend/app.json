@@ -3,7 +3,7 @@
     "name": "AKM",
     "slug": "akm",
     "scheme": "akm-app",
-    "version": "2.5.64",
+    "version": "2.5.65",
     "orientation": "portrait",
     "icon": "./assets/applogo.png",
     "userInterfaceStyle": "light",
