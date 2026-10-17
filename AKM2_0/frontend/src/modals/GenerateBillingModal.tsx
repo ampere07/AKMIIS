@@ -166,13 +166,16 @@ const GenerateBillingModal: React.FC<GenerateBillingModalProps> = ({
         const invId = data.invoice?.id ? `#${data.invoice.id}` : '';
         const emailStatus = data.notifications?.email_queued ? '✓ Email queued' : '✗ Email not sent';
         const smsStatus = data.notifications?.sms_sent ? '✓ SMS sent' : '✗ SMS not sent';
+        const notificationStatus = data.notifications?.balance_settled
+          ? 'No balance due · no email or SMS sent'
+          : `${emailStatus} · ${smsStatus}`;
         const chargeNote = charge > 0 ? `\nService Charge Applied: ₱${charge.toFixed(2)}` : '';
 
         setAlert({
           isOpen: true,
           type: 'success',
           title: 'Billing Generated Successfully!',
-          message: `Customer: ${data.customer_name || selectedAccountNo}${chargeNote}\nSOA ${soaId} & Invoice ${invId} created.\n${emailStatus} · ${smsStatus}`,
+          message: `Customer: ${data.customer_name || selectedAccountNo}${chargeNote}\nSOA ${soaId} & Invoice ${invId} created.\n${notificationStatus}`,
         });
       } else {
         setAlert({ isOpen: true, type: 'error', title: 'Generation Failed', message: result.message || 'An unexpected error occurred.' });
@@ -281,6 +284,7 @@ const GenerateBillingModal: React.FC<GenerateBillingModalProps> = ({
                     return (
                       <button
                         key={accNo}
+                        aria-label={`Select customer ${accNo}`}
                         className="w-full text-left flex items-center justify-between px-4 py-3 text-sm transition-colors"
                         style={{
                           backgroundColor: isSelected ? `${primary}20` : 'transparent',
@@ -325,7 +329,7 @@ const GenerateBillingModal: React.FC<GenerateBillingModalProps> = ({
           <div className="absolute left-3 top-1/2 -translate-y-1/2 font-medium" style={{ color: subtext }}>
             ₱
           </div>
-          <input
+          <input aria-label="Service Charge (optional · ₱)"
             id="billing-service-charge"
             type="text"
             inputMode="decimal"

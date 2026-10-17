@@ -179,13 +179,16 @@ const GenerateBillingModal: React.FC<GenerateBillingModalProps> = ({
         const invId = data.invoice?.id ? `#${data.invoice.id}` : '';
         const emailStatus = data.notifications?.email_queued ? 'Email queued' : 'Email not sent';
         const smsStatus = data.notifications?.sms_sent ? 'SMS sent' : 'SMS not sent';
+        const notificationStatus = data.notifications?.balance_settled
+          ? 'No balance due - no email or SMS sent'
+          : `${emailStatus} - ${smsStatus}`;
         const chargeNote = charge > 0 ? `\nService Charge Applied: PHP ${charge.toFixed(2)}` : '';
 
         setAlert({
           show: true,
           type: 'success',
           title: 'Billing Generated Successfully!',
-          message: `Customer: ${data.customer_name || selectedAccountNo}${chargeNote}\nSOA ${soaId} & Invoice ${invId} created.\n${emailStatus} - ${smsStatus}`,
+          message: `Customer: ${data.customer_name || selectedAccountNo}${chargeNote}\nSOA ${soaId} & Invoice ${invId} created.\n${notificationStatus}`,
         });
       } else {
         setAlert({

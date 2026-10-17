@@ -1493,7 +1493,7 @@ class EnhancedBillingGenerationServiceWithNotifications
         $total = 0;
 
         $discounts = Discount::where('account_no', $account->account_no)
-            ->whereIn('status', ['Unused', 'Permanent', 'Monthly'])
+            ->withStatus(['Unused', 'Permanent', 'Monthly'])
             ->get();
 
         foreach ($discounts as $discount) {
@@ -1692,7 +1692,7 @@ class EnhancedBillingGenerationServiceWithNotifications
     protected function markDiscountsAsUsed(BillingAccount $account, int $userId, string $invoiceId): void
     {
         $discounts = Discount::where('account_no', $account->account_no)
-            ->whereIn('status', ['Unused', 'Permanent', 'Monthly'])
+            ->withStatus(['Unused', 'Permanent', 'Monthly'])
             ->get();
 
         foreach ($discounts as $discount) {
@@ -1890,7 +1890,12 @@ class EnhancedBillingGenerationServiceWithNotifications
 
                 // Use Notification Service to Generate PDF and Send Notifications
                 $notificationResult = $this->notificationService->notifyOverdue($inv);
-                
+
+                if ($notificationResult['balance_settled']) {
+                    $this->log('info', "   Skipping Inv: {$inv->id} (Account balance is settled - no overdue notice)");
+                    continue;
+                }
+
                 $pdfUrl = $notificationResult['pdf_url'] ?? null;
 
                 // Resolve account_id from billing_accounts using account_no
@@ -1977,6 +1982,11 @@ class EnhancedBillingGenerationServiceWithNotifications
 
                 // Use Notification Service
                 $notificationResult = $this->notificationService->notifyDcNotice($inv);
+
+                if ($notificationResult['balance_settled']) {
+                    $this->log('info', "   Skipping Inv: {$inv->id} (Account balance is settled - no DC notice)");
+                    continue;
+                }
 
                 $pdfUrl = $notificationResult['pdf_url'] ?? null;
                 
