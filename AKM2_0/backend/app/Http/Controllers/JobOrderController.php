@@ -17,6 +17,7 @@ use App\Models\AuditTrailLog;
 use App\Models\User;
 use App\Models\Role;
 use App\Models\OnlineStatus;
+use App\Support\AgentReferral;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Validator;
@@ -26,6 +27,8 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Hash;
 
 use App\Services\GoogleDriveService;
+use App\Services\InstallationAccessService;
+use App\Services\InstallationFeeNotificationService;
 use App\Services\PppoeUsernameService;
 use App\Services\RadiusServerResolver;
 use App\Services\RouterosApiService;
@@ -60,8 +63,11 @@ class JobOrderController extends Controller
                 } else {
                     $query->whereNull('organization_id');
                 }
+                if (AgentReferral::isAgent($currentUser)) {
+                    AgentReferral::restrictToLastMonth($query);
+                }
             }
-            
+
             if ($request->has('assigned_email')) {
                 $assignedEmail = $request->query('assigned_email');
                 \Log::info('Filtering job orders by assigned_email: ' . $assignedEmail);
@@ -435,8 +441,11 @@ class JobOrderController extends Controller
                 } else {
                     $query->whereNull('organization_id');
                 }
+                if (AgentReferral::isAgent($currentUser)) {
+                    AgentReferral::restrictToLastMonth($query);
+                }
             }
-            
+
             $jobOrder = $query->with(['application', 'items', 'billingAccount.customer'])->findOrFail($id);
 
             return response()->json([
@@ -889,18 +898,13 @@ class JobOrderController extends Controller
 
             DB::commit();
 
-            // Sent only after commit so a rolled-back save never bills the customer
-            $installationFeeNotification = null;
-            if ($becameDone) {
-                $installationFeeNotification = app(\App\Services\InstallationFeeNotificationService::class)
-                    ->notify($jobOrder);
-            }
+            // The installation fee invoice is no longer sent here: it goes out at approval,
+            // once the customer has an account number to pay against in the payment portal.
 
             return response()->json([
                 'success' => true,
                 'message' => 'Job order updated successfully',
                 'data' => $jobOrder,
-                'installation_fee_notification' => $installationFeeNotification,
             ]);
         } catch (\Exception $e) {
             DB::rollBack();
@@ -1435,6 +1439,24 @@ class JobOrderController extends Controller
             // OLT must not fail an approval that otherwise succeeded.
             $this->syncSmartOltOnApproval($jobOrder, $technicalDetail, $customer, $accountNumber);
 
+            // Internet access: activated now when no installation fee is due, otherwise held
+            // in the Restricted group until the payment worker sees the fee paid. Post-commit
+            // and best-effort for the same reason as the SmartOLT sync above; a failed
+            // activation is queued for retry.
+            $internetAccess = app(InstallationAccessService::class)->applyAfterApproval(
+                $jobOrder,
+                $billingAccount,
+                $generatedUsername,
+                $application->desired_plan,
+                $application->barangay,
+                $application->city
+            );
+
+            // The installation fee invoice, due on the installation date. Sent here rather than
+            // at onsite Done so it carries the account number the payment portal takes. The
+            // approval guard above runs it once per job order.
+            $installationFeeNotification = app(InstallationFeeNotificationService::class)->notify($jobOrder);
+
             // Send Welcome SMS
             $this->sendWelcomeSms($customer, $accountNumber, $generatedUsername, $generatedPassword, $application->desired_plan);
 
@@ -1525,6 +1547,8 @@ class JobOrderController extends Controller
                     'user_username' => $accountNumber,
                     'username' => $generatedUsername,
                     'password' => $generatedPassword,
+                    'internet_access' => $internetAccess,
+                    'installation_fee_notification' => $installationFeeNotification,
                 ]
             ]);
 
@@ -2000,7 +2024,13 @@ class JobOrderController extends Controller
                 $plan = preg_replace('/\s+(?:P|₱)?\d+.*/i', '', $plan);
                 $plan = trim($plan);
             }
-            
+
+            // A new installation goes on the device in the Restricted group, not its plan
+            // group: no internet until the job order is approved and the installation fee
+            // on the balance is paid. The payment worker moves it to the plan group then.
+            $installationAccess = app(InstallationAccessService::class);
+            $group = $installationAccess->groupFor($jobOrder, (string) $plan);
+
             // Create the account on the barangay's assigned server only, retrying up to 3
             // times. There is no fallback to another radius_config.
             //
@@ -2022,7 +2052,11 @@ class JobOrderController extends Controller
 
             for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
                 try {
-                    if ($api->addUser($radiusConfig, $pppoeUsername, $pppoePassword, $plan)) {
+                    // An account already on the device keeps its old group through addUser(),
+                    // so it is moved into the restricted group explicitly.
+                    if ($api->addUser($radiusConfig, $pppoeUsername, $pppoePassword, $group)
+                        && ($group !== InstallationAccessService::RESTRICTED_GROUP
+                            || $installationAccess->enforceGroup($api, $radiusConfig, $pppoeUsername, $group))) {
                         $radiusSubmitted = true;
                         $radiusError = null;
                         break;
@@ -2036,7 +2070,7 @@ class JobOrderController extends Controller
                     \Log::channel('radiusrelated')->error('RADIUS API Error for JobOrder: ' . $id, [
                         'error' => $radiusError,
                         'username' => $pppoeUsername,
-                        'group' => $plan,
+                        'group' => $group,
                         'attempt' => $attempt,
                         'radius_config_id' => $radiusConfig->id,
                         'radius_ip' => $radiusConfig->ip,
@@ -2064,6 +2098,14 @@ class JobOrderController extends Controller
                 ];
             }
 
+            // Credentials already on the job order: the save goes ahead as before, but the
+            // create is queued for retry instead of leaving the job order Done with no
+            // account on the device.
+            $radiusQueued = false;
+            if (!$radiusSubmitted) {
+                $radiusQueued = $installationAccess->queueCreate($jobOrder, $radiusConfig, $pppoeUsername, $pppoePassword, (string) $plan, $radiusError);
+            }
+
             return [
                 'success' => true,
                 'message' => $credentialsExist ? 'RADIUS credentials already exist' : 'RADIUS account created successfully',
@@ -2071,11 +2113,12 @@ class JobOrderController extends Controller
                     'job_order_id' => $id,
                     'username' => $pppoeUsername,
                     'password' => $pppoePassword,
-                    'group' => $plan,
+                    'group' => $group,
+                    'plan_group' => $plan,
                     'credentials_exist' => $credentialsExist,
                     'radius_response' => [
                         'submitted' => $radiusSubmitted,
-                        'status' => $radiusSubmitted ? 'success' : 'failed',
+                        'status' => $radiusSubmitted ? 'success' : ($radiusQueued ? 'queued' : 'failed'),
                         'error' => $radiusError
                     ]
                 ]

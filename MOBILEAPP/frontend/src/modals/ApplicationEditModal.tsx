@@ -19,8 +19,9 @@ import { SearchablePicker, SearchablePickerTrigger } from '../components/Searcha
 import { planService, Plan } from '../services/planService';
 import apiClient from '../config/api';
 import { useAddressOptions } from '../hooks/useAddressOptions';
+import { AGENT_APPLICATION_STATUSES } from '../utils/agentReferral';
 
-type PickerKey = 'region' | 'city' | 'barangay' | 'desired_plan' | 'promo';
+type PickerKey = 'region' | 'city' | 'barangay' | 'desired_plan' | 'promo' | 'status';
 
 interface PickerOption {
   id: string;
@@ -47,7 +48,7 @@ interface PickedImage {
 const TEXT_KEYS = [
   'first_name', 'middle_initial', 'last_name', 'email_address', 'mobile_number', 'secondary_mobile_number',
   'installation_address', 'landmark', 'region', 'city', 'barangay', 'location', 'desired_plan', 'promo',
-  'long_lat',
+  'long_lat', 'status', 'remarks',
 ] as const;
 
 type FormKey = typeof TEXT_KEYS[number];
@@ -73,8 +74,11 @@ const ApplicationEditModal: React.FC<ApplicationEditModalProps> = ({ isOpen, app
     barangay: optionsFrom(address.barangays),
     desired_plan: plans.map((p) => ({ id: String(p.id), label: p.description || p.name, value: `${p.name} - P${Number(p.price || 0).toFixed(2)}` })),
     promo: optionsFrom(promos),
-  }), [address.regions, address.cities, address.barangays, plans, promos]);
-  const pickerTitles: Record<PickerKey, string> = { region: 'Select Region', city: 'Select City/Municipality', barangay: 'Select Barangay', desired_plan: 'Select Plan', promo: 'Select Promo' };
+    // The current status stays selectable even if the agent list does not offer it, so saving never blanks it
+    status: Array.from(new Set([...AGENT_APPLICATION_STATUSES, application?.status].filter(Boolean)))
+      .map((name) => ({ id: name, label: name, value: name })),
+  }), [address.regions, address.cities, address.barangays, plans, promos, application?.status]);
+  const pickerTitles: Record<PickerKey, string> = { region: 'Select Region', city: 'Select City/Municipality', barangay: 'Select Barangay', desired_plan: 'Select Plan', promo: 'Select Promo', status: 'Select Status' };
 
   const primary = colorPalette?.primary || '#7c3aed';
 
@@ -303,6 +307,8 @@ const ApplicationEditModal: React.FC<ApplicationEditModalProps> = ({ isOpen, app
 
             {picker('desired_plan', 'Desired Plan', true)}
             {picker('promo', 'Promo')}
+            {picker('status', 'Status')}
+            {field('Remarks', 'remarks', { placeholder: 'Remarks', multiline: true })}
             {readOnly('Referred By', application?.referred_by || 'None')}
             {readOnly('Terms and Conditions', application?.terms_agreed ? 'Agreed' : 'Not agreed')}
 

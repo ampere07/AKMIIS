@@ -367,9 +367,15 @@ class XenditPaymentController extends Controller
 
             // Update payment status
             if ($newStatus !== 'PENDING') {
+                // A posted or in-flight payment is never rewritten, and a payment already
+                // confirmed paid is never downgraded by a late or out-of-order EXPIRED/FAILED
+                // callback: that would overwrite the paid payload the worker posts from, and
+                // reconciliation only sweeps PENDING rows, so the payment would be lost.
+                $untouchable = $isPaid ? ['PAID', 'PROCESSING'] : ['PAID', 'PROCESSING', 'QUEUED'];
+
                 $rowsUpdated = DB::table('pending_payments')
                     ->where('reference_no', $ref)
-                    ->where('status', '!=', 'PAID')
+                    ->whereNotIn('status', $untouchable)
                     ->update([
                         'status' => $newStatus,
                         'callback_payload' => $rawPayload,

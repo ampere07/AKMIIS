@@ -11,7 +11,6 @@ import { JobOrder } from '../types/jobOrder';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { techInOutService } from '../services/techInOutService';
 import TimeInOutModal from '../modals/TimeInOutModal';
-import { agentOwnsReferral, getOnsiteStatus, isActiveOnsiteStatus } from '../utils/agentReferral';
 
 
 const StatusText = React.memo(({ status, type }: { status?: string | null, type: 'onsite' | 'billing' }) => {
@@ -361,9 +360,7 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
   const itemsPerPage = 15;
 
   // Debounce search input to avoid recomputing heavy filter on every keystroke
-  const [userEmail, setUserEmail] = useState<string>('');
   const [userRoleId, setUserRoleId] = useState<number | null>(null);
-  const [userFullName, setUserFullName] = useState<string>('');
 
   // Debounce search input to avoid recomputing heavy filter on every keystroke
   useEffect(() => {
@@ -403,10 +400,8 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
           setAuthUserData(userData);
           const rName = userData.role || '';
           setUserRole(rName);
-          setUserEmail(userData.email || '');
           const rId = userData.role_id ? Number(userData.role_id) : null;
           setUserRoleId(rId);
-          setUserFullName(userData.full_name || '');
 
           // Check time in status for technicians
           const isTech = rId === 2 || rName.toLowerCase() === 'technician';
@@ -488,17 +483,7 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
         userRoleId === 1 || userRoleId === 7 || userRoleId === 8 ||
         userRole.toLowerCase() === 'superadmin' || userRole.toLowerCase() === 'administrator' || userRole.toLowerCase() === 'headtech';
 
-      // Role-based filtering: Agents (role_id 4) only see their own referrals
-      if (!isSuperUser && (userRole.toLowerCase() === 'agent' || userRoleId === 4)) {
-        const referredBy = jobOrder.Referred_By || jobOrder.referred_by || '';
-        const matchesAgent = agentOwnsReferral(referredBy, userFullName, userEmail);
-
-        if (!matchesAgent) return false;
-
-        // Agents only see active job orders here (in progress / reschedule).
-        // Completed ("done") ones are shown on the Agent History page instead.
-        if (!isActiveOnsiteStatus(getOnsiteStatus(jobOrder))) return false;
-      }
+      // Agents see every job order, in any status, read-only
 
       // Hide job orders with onsite status "done", "completed", or "failed" after 1 day
       // Only applicable for technicians
@@ -567,7 +552,7 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
 
       return true;
     });
-  }, [jobOrders, debouncedSearch, statusFilter, userRole, userRoleId, userFullName, userEmail, authUserData, filterValues, getClientFullName, getClientFullAddress]);
+  }, [jobOrders, debouncedSearch, statusFilter, userRole, userRoleId, authUserData, filterValues, getClientFullName, getClientFullAddress]);
 
   const sortedJobOrders = useMemo(() => {
     return [...filteredJobOrders].sort((a, b) => {

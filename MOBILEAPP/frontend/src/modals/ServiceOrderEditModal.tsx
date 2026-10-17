@@ -367,15 +367,6 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
 
                           {renderInput('visitRemarks', 'Visit Remarks')}
 
-                          <View style={styles.inputGroup}>
-                            <LocationPicker
-                              value={formData.addressCoordinates}
-                              onChange={(coordinates) => handleInputChange('addressCoordinates', coordinates)}
-                              isDarkMode={isDarkMode}
-                              label="Address Coordinates"
-                            />
-                          </View>
-
                           {/* SIGNATURE SECTION */}
                           <View style={styles.inputGroup}>
                             <Text style={[styles.label, { color: isDarkMode ? '#d1d5db' : '#374151' }]}>
@@ -567,6 +558,18 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                         </>
                       )}
                     </>
+                  )}
+
+                  {/* Technician only — always shown, optional */}
+                  {isTechnician && (
+                    <View style={styles.inputGroup}>
+                      <LocationPicker
+                        value={formData.addressCoordinates}
+                        onChange={(coordinates) => handleInputChange('addressCoordinates', coordinates)}
+                        isDarkMode={isDarkMode}
+                        label="Address Coordinates"
+                      />
+                    </View>
                   )}
 
                   <View style={styles.inputGroup}>

@@ -8,7 +8,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FlashList } from '@shopify/flash-list';
 import { paymentService, PendingPayment } from '../services/paymentService';
-import { useCustomerDataContext } from '../contexts/CustomerDataContext';
+import { useCustomerDataContext, InstallationInvoice } from '../contexts/CustomerDataContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { API_BASE_URL } from '../config/api';
 
@@ -233,6 +233,37 @@ const BillCard = React.memo(({ record, type, primaryColor, onDownload, isGenerat
     );
 });
 
+// Installation fee invoice of a job order (job_orders.invoice_url), shown above the Invoices list
+const InstallationInvoiceCard = React.memo(({ invoice, primaryColor }: { invoice: InstallationInvoice, primaryColor: string }) => (
+    <View style={styles.card}>
+        <View style={[styles.cardRow, { marginBottom: 14 }]}>
+            <View>
+                <Text style={styles.labelText}>Installation Invoice</Text>
+                <Text style={styles.valueText}>{formatDate(invoice.date || undefined)}</Text>
+            </View>
+            <View style={styles.alignEnd}>
+                <Text style={styles.labelText}>Ref No.</Text>
+                <Text style={styles.valueText}>{invoice.invoiceNo}</Text>
+            </View>
+        </View>
+        <View style={styles.cardRow}>
+            <View>
+                <Text style={styles.labelText}>Installation Fee</Text>
+                <Text style={[styles.amountText, { color: '#111827' }]}>{formatCurrency(invoice.amount)}</Text>
+            </View>
+            <Pressable
+                onPress={() => Linking.openURL(invoice.url)}
+                accessibilityLabel={`Open installation invoice ${invoice.invoiceNo}`}
+                style={[styles.pdfBtnBase, { backgroundColor: primaryColor + '10', borderColor: primaryColor + '20' }]}
+            >
+                <Download width={14} height={14} color={primaryColor} />
+                <Text style={[styles.pdfText, { color: primaryColor }]}>PDF</Text>
+            </Pressable>
+        </View>
+        <View style={styles.divider} />
+    </View>
+));
+
 const HistoryCard = React.memo(({ record }: { record: PaymentRecord }) => {
     const isPositive = record.status === 'Completed' || record.status === 'PAID';
     return (
@@ -267,7 +298,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa' }) => {
     const { width, height } = useWindowDimensions();
     const isMobile = width < 768;
     const isShort = height < 700;
-    const { customerDetail, payments: paymentRecords, soaRecords, invoiceRecords, isLoading: contextLoading, silentRefresh } = useCustomerDataContext();
+    const { customerDetail, payments: paymentRecords, soaRecords, invoiceRecords, installationInvoices, isLoading: contextLoading, silentRefresh } = useCustomerDataContext();
     const accountNo = customerDetail?.billingAccount?.accountNo || '';
     const balance = Number(customerDetail?.billingAccount?.accountBalance || 0);
     const [activeTab, setActiveTab] = useState<'soa' | 'invoices' | 'payments'>(initialTab);
@@ -644,13 +675,20 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa' }) => {
                         tintColor={primaryColor}
                     />
                 }
-                ListEmptyComponent={() => (
+                ListHeaderComponent={activeTab === 'invoices' && installationInvoices.length > 0 ? () => (
+                    <View>
+                        {installationInvoices.map((invoice) => (
+                            <InstallationInvoiceCard key={`installation-${invoice.id}`} invoice={invoice} primaryColor={primaryColor} />
+                        ))}
+                    </View>
+                ) : undefined}
+                ListEmptyComponent={() => (activeTab === 'invoices' && installationInvoices.length > 0 ? null : (
                     <View style={styles.emptyContainer}>
                         <Text style={styles.emptyTitle}>
                             {activeTab === 'soa' ? 'No Statements' : activeTab === 'invoices' ? 'No Invoices' : 'No History'}
                         </Text>
                     </View>
-                )}
+                ))}
                 renderItem={({ item }) => (
                     activeTab === 'payments'
                         ? <HistoryCard record={item as any} />

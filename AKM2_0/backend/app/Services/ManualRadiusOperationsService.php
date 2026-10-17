@@ -281,9 +281,7 @@ class ManualRadiusOperationsService
             }
 
             // Clean plan name (strip price suffix like "SWIFT 1000", "STARTER - P799.00", etc.)
-            $cleanPlan = preg_replace('/\s*-\s*(?:P|₱)?\d+.*/i', '', $rawPlan);
-            $cleanPlan = preg_replace('/\s+(?:P|₱)?\d+.*/i', '', $cleanPlan);
-            $cleanPlan = trim($cleanPlan);
+            $cleanPlan = self::planGroup($rawPlan);
             $this->writeLog("Clean Plan: $cleanPlan");
 
             // Get RADIUS configurations
@@ -434,16 +432,14 @@ class ManualRadiusOperationsService
             }
 
             // Clean plan name (strip price suffix like "SWIFT 1000", "STARTER - P799.00", etc.)
-            $cleanPlan = preg_replace('/\s*-\s*(?:P|₱)?\d+.*/i', '', $rawPlan);
-            $cleanPlan = preg_replace('/\s+(?:P|₱)?\d+.*/i', '', $cleanPlan);
-            $cleanPlan = trim($cleanPlan);
+            $cleanPlan = self::planGroup($rawPlan);
             $this->writeLog("Clean Plan: $cleanPlan");
 
             // Get RADIUS configurations
             $radiusEndpoints = $this->getRadiusEndpoints();
 
             // Perform RADIUS operations without forcing session disconnect
-            $this->radiusOps(
+            $applied = $this->radiusOps(
                 $radiusEndpoints,
                 $username,
                 $cleanPlan,
@@ -453,13 +449,18 @@ class ManualRadiusOperationsService
                 $updatedBy
             );
 
-            $this->writeLog("[SUCCESS] User group updated successfully");
+            $this->writeLog($applied
+                ? "[SUCCESS] User group updated successfully"
+                : "[WARNING] Group change not confirmed on any RADIUS server");
             $this->writeLog("=== UPDATE GROUP END ===");
 
+            // 'applied' says whether RADIUS actually holds the new group; 'status' stays
+            // 'success' as before for callers that only read it.
             return [
                 'status' => 'success',
                 'message' => 'User group updated successfully',
-                'output' => 'Success: User group updated'
+                'output' => 'Success: User group updated',
+                'applied' => $applied,
             ];
 
         } catch (Throwable $e) {
@@ -809,6 +810,61 @@ class ManualRadiusOperationsService
         } else {
             $this->writeLog("[WARNING] RADIUS updated, but database update affected 0 rows");
         }
+    }
+
+    /**
+     * The User Manager group the account is in right now, read from whichever RADIUS server
+     * holds it. Null when that can't be read: no server answered, or the account isn't on any.
+     */
+    public function currentGroup(string $username): ?string
+    {
+        try {
+            $located = $this->findRadiusUser($this->getRadiusEndpoints(), $username);
+        } catch (Throwable $e) {
+            $this->writeLog("[LOOKUP] Could not read the group for '$username': " . $e->getMessage());
+            return null;
+        }
+
+        return $located ? (string) $located['group'] : null;
+    }
+
+    /**
+     * Whether a User Manager group gives the customer internet: any group other than the
+     * cut-off ones, Restricted and Disconnected (the same names RadiusStatusSyncService
+     * reports, with or without the "Mikrotik-Group:" prefix). An unknown or empty group
+     * is not counted as connected.
+     */
+    public static function isConnectedGroup(?string $group): bool
+    {
+        $bare = self::bareGroup($group);
+
+        return $bare !== '' && !in_array($bare, ['restricted', 'disconnected'], true);
+    }
+
+    /**
+     * Whether two User Manager group names are the same group, ignoring case and the
+     * "Mikrotik-Group:" prefix.
+     */
+    public static function sameGroup(?string $a, ?string $b): bool
+    {
+        return self::bareGroup($a) !== '' && self::bareGroup($a) === self::bareGroup($b);
+    }
+
+    /**
+     * The User Manager group for a plan label: the plan name without its price suffix
+     * ("SWIFT 1000", "STARTER - P799.00" -> "SWIFT", "STARTER").
+     */
+    public static function planGroup(string $rawPlan): string
+    {
+        $cleanPlan = preg_replace('/\s*-\s*(?:P|₱)?\d+.*/i', '', $rawPlan);
+        $cleanPlan = preg_replace('/\s+(?:P|₱)?\d+.*/i', '', $cleanPlan);
+
+        return trim($cleanPlan);
+    }
+
+    private static function bareGroup(?string $group): string
+    {
+        return strtolower(trim((string) preg_replace('/^\s*Mikrotik-Group:/i', '', (string) $group)));
     }
 
     /**

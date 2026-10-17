@@ -16,6 +16,13 @@ use Illuminate\Support\Facades\DB;
 
 class BillingNotificationService
 {
+    /**
+     * The bill SMS sent when the StatementofAccount template is missing or inactive, so a
+     * template switched off by mistake can't silently stop bill texts. Same wording as the
+     * template.
+     */
+    private const DEFAULT_SOA_SMS = 'Hi {{customer_name}}, your bill for {{soa_date}} is now available. Amount Due: {{amount}}. Due Date: {{due_date}}. Please pay via portal.akmiis.com to avoid disconnection. Ignore if paid.';
+
     protected EmailQueueService $emailQueueService;
     protected SmsQueueService $smsQueueService;
     protected ItexmoSmsService $smsService;
@@ -201,21 +208,19 @@ class BillingNotificationService
 
             $pdfUrl = null;
             $filename = null;
-            
+
+            // Set the time to send at 8:00 AM GMT+8 (Asia/Manila)
+            $timeSent = \Carbon\Carbon::now('Asia/Manila')->setTime(8, 0, 0)->format('Y-m-d H:i:s');
+
+            // Built before the email branch: a customer with a phone but no email still gets the SMS.
+            $smsMessage = $customer->contact_number_primary
+                ? $this->generateOverdueSmsMessage($account, $invoice)
+                : null;
 
             if ($customer->email_address) {
                 $emailData = $this->prepareEmailData($account, $invoice, null);
-                
+
                 $templateCode = config('billing.templates.overdue_email', 'OVERDUE_DESIGN');
-                
-                // Set the time to send at 8:00 AM GMT+8 (Asia/Manila)
-                $timeSent = \Carbon\Carbon::now('Asia/Manila')->setTime(8, 0, 0)->format('Y-m-d H:i:s');
-                
-                // Prepare SMS Message for queueing
-                $smsMessage = null;
-                if ($customer->contact_number_primary) {
-                    $smsMessage = $this->generateOverdueSmsMessage($account, $invoice);
-                }
 
                 $emailQueued = $this->emailQueueService->queueFromTemplate(
                     $templateCode,
@@ -292,21 +297,19 @@ class BillingNotificationService
 
             $pdfUrl = null;
             $filename = null;
-            
+
+            // Set the time to send at 8:00 AM GMT+8 (Asia/Manila)
+            $timeSent = \Carbon\Carbon::now('Asia/Manila')->setTime(8, 0, 0)->format('Y-m-d H:i:s');
+
+            // Built before the email branch: a customer with a phone but no email still gets the SMS.
+            $smsMessage = $customer->contact_number_primary
+                ? $this->generateDcNoticeSmsMessage($account, $invoice)
+                : null;
 
             if ($customer->email_address) {
                 $emailData = $this->prepareEmailData($account, $invoice, null);
-                
+
                 $templateCode = config('billing.templates.dc_notice_email', 'DCNOTICE_DESIGN');
-                
-                // Set the time to send at 8:00 AM GMT+8 (Asia/Manila)
-                $timeSent = \Carbon\Carbon::now('Asia/Manila')->setTime(8, 0, 0)->format('Y-m-d H:i:s');
-                
-                // Prepare SMS Message for queueing
-                $smsMessage = null;
-                if ($customer->contact_number_primary) {
-                    $smsMessage = $this->generateDcNoticeSmsMessage($account, $invoice);
-                }
 
                 $emailQueued = $this->emailQueueService->queueFromTemplate(
                     $templateCode,
@@ -400,8 +403,19 @@ class BillingNotificationService
             );
             
             if ($emailQueued === null) {
-                Log::error("Email template '{$templateCode}' not found for account {$account->account_no}");
-                return false;
+                // The template is missing or inactive: send a plain bill email rather than none.
+                Log::error("Email template '{$templateCode}' missing or inactive; sending the built-in bill email", [
+                    'account_no' => $account->account_no,
+                ]);
+
+                $this->emailQueueService->queueEmail([
+                    'account_no' => $account->account_no,
+                    'recipient_email' => $customer->email_address,
+                    'subject' => ($soa ? 'Statement of Account' : 'Billing Invoice') . ' - Account ' . $account->account_no,
+                    'body_html' => $this->fallbackBillingEmailBody($emailData, $pdfResult['url'] ?? null),
+                    'attachment_path' => $tempPdfPath,
+                    'time_sent' => $timeSent,
+                ]);
             }
 
             // DO NOT delete temp file here - let email processor delete it after sending
@@ -423,6 +437,36 @@ class BillingNotificationService
         }
     }
 
+    /**
+     * The bill email used when the SOA / invoice email template is missing or inactive.
+     */
+    protected function fallbackBillingEmailBody(array $data, ?string $pdfUrl): string
+    {
+        $paymentLink = config('app.payment_link', 'https://sync.akmiis.com');
+
+        $rows = '';
+        foreach ([
+            'Account No.' => $data['Account_No'] ?? '',
+            'Plan' => $data['Plan'] ?? '',
+            'Statement Date' => $data['Statement_Date'] ?? '',
+            'Amount Due' => 'PHP ' . ($data['Amount_Due'] ?? '0.00'),
+            'Total Amount Due' => 'PHP ' . ($data['Total_Due'] ?? '0.00'),
+            'Due Date' => $data['Due_Date'] ?? '',
+        ] as $label => $value) {
+            if ($value !== '') {
+                $rows .= '<tr><td style="padding:4px 16px 4px 0;color:#555;">' . e($label) . '</td><td><strong>' . e($value) . '</strong></td></tr>';
+            }
+        }
+
+        return '<div style="font-family:Arial,sans-serif;color:#333;line-height:1.6;">'
+            . '<p>Hi ' . e($data['Full_Name'] ?? '') . ',</p>'
+            . '<p>Your bill is now available.</p>'
+            . '<table>' . $rows . '</table>'
+            . ($pdfUrl ? '<p>View your statement: <a href="' . e($pdfUrl) . '">' . e($pdfUrl) . '</a></p>' : '')
+            . '<p>Please pay via <a href="' . e($paymentLink) . '">' . e($paymentLink) . '</a> on or before the due date to avoid disconnection. Ignore this if you have already paid.</p>'
+            . '</div>';
+    }
+
     protected function generateBillingSmsMessage(BillingAccount $account, ?Invoice $invoice, ?StatementOfAccount $soa): ?string
     {
         try {
@@ -431,40 +475,44 @@ class BillingNotificationService
                 ->where('template_type', 'StatementofAccount')
                 ->where('is_active', 1)
                 ->first();
-                
-            if ($template) {
-                $totalDue = $soa ? $soa->total_amount_due : $invoice->total_amount;
-                $amountDue = $soa ? $soa->amount_due : $invoice->total_amount;
-                $dueDate = $soa ? $soa->due_date : $invoice->due_date;
-                $paymentLink = config('app.payment_link', 'https://sync.akmiis.com');
-                
-                $message = $template->message_content;
-                
-                $planNameRaw = $account->plan ? $account->plan->plan_name : ($account->customer->desired_plan ?? 'N/A');
-                $planNameFormatted = str_replace('₱', 'P', $planNameRaw);
-                $customerName = preg_replace('/\s+/', ' ', trim($customer->full_name));
 
-                $message = str_replace('{{customer_name}}', $customerName, $message);
-                $message = str_replace('{{account_no}}', $account->account_no, $message);
-                $message = str_replace('{{plan_name}}', $planNameFormatted, $message);
-                $message = str_replace('{{plan_nam}}', $planNameFormatted, $message);
-                $message = str_replace('{{amount_due}}', number_format($amountDue, 2), $message);
-                $message = str_replace('{{total_amount}}', number_format($totalDue, 2), $message);
-                $message = str_replace('{{total_due}}', number_format($totalDue, 2), $message);
-                $message = str_replace('{{amount}}', number_format($amountDue, 2), $message);
-                $message = str_replace('{{balance}}', number_format($totalDue, 2), $message);
-                $message = str_replace('{{due_date}}', $dueDate->format('M d, Y'), $message);
-                $message = str_replace('{{payment_link}}', $paymentLink, $message);
-                
-                $soaDateStr = $soa && $soa->statement_date ? $soa->statement_date->format('M d, Y') : date('M d, Y');
-                $message = str_replace('{{soa_date}}', $soaDateStr, $message);
-                $message = str_replace('{{soa_data}}', $soaDateStr, $message);
-                
-                return $this->replaceGlobalVariables($message);
+            // A missing or inactive template used to skip the SMS without a trace while the
+            // email still went out (bills of Sep 19 - Oct 4 2026). Send the built-in text.
+            $message = trim((string) ($template->message_content ?? ''));
+            if ($message === '') {
+                Log::error('SOA SMS template missing or inactive; sending the built-in bill SMS', [
+                    'template_type' => 'StatementofAccount',
+                    'account_no' => $account->account_no,
+                ]);
+                $message = self::DEFAULT_SOA_SMS;
             }
-            
-            Log::warning('SOA SMS Template not found or inactive', ['template_type' => 'SOA']);
-            return null;
+
+            $totalDue = $soa ? $soa->total_amount_due : $invoice->total_amount;
+            $amountDue = $soa ? $soa->amount_due : $invoice->total_amount;
+            $dueDate = $soa ? $soa->due_date : $invoice->due_date;
+            $paymentLink = config('app.payment_link', 'https://sync.akmiis.com');
+
+            $planNameRaw = $account->plan ? $account->plan->plan_name : ($account->customer->desired_plan ?? 'N/A');
+            $planNameFormatted = str_replace('₱', 'P', $planNameRaw);
+            $customerName = preg_replace('/\s+/', ' ', trim($customer->full_name));
+
+            $message = str_replace('{{customer_name}}', $customerName, $message);
+            $message = str_replace('{{account_no}}', $account->account_no, $message);
+            $message = str_replace('{{plan_name}}', $planNameFormatted, $message);
+            $message = str_replace('{{plan_nam}}', $planNameFormatted, $message);
+            $message = str_replace('{{amount_due}}', number_format($amountDue, 2), $message);
+            $message = str_replace('{{total_amount}}', number_format($totalDue, 2), $message);
+            $message = str_replace('{{total_due}}', number_format($totalDue, 2), $message);
+            $message = str_replace('{{amount}}', number_format($amountDue, 2), $message);
+            $message = str_replace('{{balance}}', number_format($totalDue, 2), $message);
+            $message = str_replace('{{due_date}}', $dueDate ? $dueDate->format('M d, Y') : '', $message);
+            $message = str_replace('{{payment_link}}', $paymentLink, $message);
+
+            $soaDateStr = $soa && $soa->statement_date ? $soa->statement_date->format('M d, Y') : date('M d, Y');
+            $message = str_replace('{{soa_date}}', $soaDateStr, $message);
+            $message = str_replace('{{soa_data}}', $soaDateStr, $message);
+
+            return $this->replaceGlobalVariables($message);
         } catch (\Exception $e) {
             Log::error('Failed to generate billing SMS message', [
                 'error' => $e->getMessage(),

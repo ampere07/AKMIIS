@@ -23,6 +23,7 @@ import { userService } from '../services/userService';
 import { User as UserType } from '../types/api';
 import { getBillingRecords, getBillingRecordDetails, BillingDetailRecord } from '../services/billingService';
 import { getAllInventoryItems } from '../services/inventoryItemService';
+import { isAgentUser } from '../utils/agentReferral';
 
 const PlanListDetails = React.lazy(() => import('./PlanListDetails'));
 const UserDetails = React.lazy(() => import('./UserDetails'));
@@ -321,6 +322,8 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
 
   const hasPermission = (permission: string): boolean => {
     const lowerRole = (userRole || '').toLowerCase().trim();
+    // Agents view job orders read-only, whatever permissions their role carries
+    if (isAgentUser(lowerRole, roleId)) return false;
     if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) {
       return true;
     }

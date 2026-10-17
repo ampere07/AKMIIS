@@ -118,7 +118,6 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
   const [hasNewData, setHasNewData] = useState<boolean>(false);
   const [userRole, setUserRole] = useState<string>('');
   const [roleId, setRoleId] = useState<string | number | null>(null);
-  const [agentName, setAgentName] = useState<string>('');
   const [users, setUsers] = useState<User[]>([]);
   const [isLoadingUsers, setIsLoadingUsers] = useState<boolean>(true);
   const [displayMode, setDisplayMode] = useState<DisplayMode>('table');
@@ -424,23 +423,6 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
           ]);
         }
 
-        // Try getting full_name directly first, then fallback to parts
-        let fullName = userData.full_name || '';
-
-        if (!fullName) {
-          const firstName = userData.first_name || '';
-          const middleInitial = userData.middle_initial ? userData.middle_initial.trim() : '';
-          const lastName = userData.last_name || '';
-
-          fullName = [
-            firstName,
-            middleInitial ? `${middleInitial}.` : '',
-            lastName
-          ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
-        }
-
-        setAgentName(fullName);
-
         if ((userData.role && userData.role.toLowerCase() === 'technician' || String(userData.role_id) === '2') && userData.email) {
           setTechnicianEmail(userData.email);
         }
@@ -664,9 +646,10 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
   }, [silentRefresh, technicianEmail]);
 
 
+  // Agents see every job order in their organization, read-only
   const accessibleJobOrders = useMemo(() => {
-    // First filter by organization — only show records matching the current user's org
-    let filtered = jobOrders.filter((jo: JobOrder) => {
+    // Only show records matching the current user's org
+    return jobOrders.filter((jo: JobOrder) => {
       if (currentUserOrgId) {
         // User belongs to an org: only show jobs assigned to that same org
         return jo.organization_id === currentUserOrgId;
@@ -675,18 +658,7 @@ const JobOrderPage: React.FC<JobOrderPageProps> = ({ autoOpenJobOrderId }) => {
         return !jo.organization_id;
       }
     });
-
-    // Then filter by agent if applicable
-    const isAgent = userRole?.toLowerCase() === 'agent' || String(roleId) === '4';
-    if (isAgent && agentName) {
-      const lowerAgentName = agentName.toLowerCase().trim();
-      return filtered.filter((jo: JobOrder) => {
-        const referredBy = (jo.Referred_By || jo.referred_by || '').toLowerCase().trim();
-        return referredBy === lowerAgentName;
-      });
-    }
-    return filtered;
-  }, [jobOrders, userRole, roleId, agentName, currentUserOrgId]);
+  }, [jobOrders, currentUserOrgId]);
 
   // Update selectedJobOrder with fresh data after refresh
   useEffect(() => {

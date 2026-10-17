@@ -42,6 +42,18 @@ class SmsQueue extends Model
                      });
     }
 
+    /**
+     * Failed texts worth another try: fewer than $maxAttempts so far, the last one at least
+     * $waitMinutes ago, and queued within the last day, so old failures are never resent.
+     */
+    public function scopeRetryable($query, int $maxAttempts = 3, int $waitMinutes = 5)
+    {
+        return $query->where('status', 'failed')
+                     ->where('attempts', '<', $maxAttempts)
+                     ->where('updated_at', '<=', now()->subMinutes($waitMinutes))
+                     ->where('created_at', '>=', now()->subDay());
+    }
+
     public function markAsSent(): void
     {
         $this->update([

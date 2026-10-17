@@ -5,8 +5,11 @@ namespace App\Http\Controllers;
 use App\Models\StatementOfAccount;
 use App\Models\Invoice;
 use App\Models\BillingAccount;
+use App\Services\InstallationFeeNotificationService;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -343,6 +346,122 @@ class BillingRecordsController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to fetch invoice records',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get all Job Order (installation fee) invoice records
+     *
+     * A job order bills its installation fee when it is approved
+     * (InstallationFeeNotificationService): numbered JO-{id}, dated and due on the install
+     * date. invoice_url is the PDF on Google Drive; job orders completed before the PDF was
+     * introduced have none.
+     */
+    public function getJobOrderInvoiceRecords(Request $request): JsonResponse
+    {
+        try {
+            $authUser = auth()->user();
+            $organizationId = $authUser ? $authUser->organization_id : null;
+            $roleId = $authUser ? $authUser->role_id : null;
+            $isSuperAdmin = !$authUser || $roleId == 7 || !$organizationId;
+
+            $query = DB::table('job_orders as jo')
+                ->leftJoin('applications as app', 'app.id', '=', 'jo.application_id')
+                ->leftJoin('billing_accounts as ba', 'ba.id', '=', 'jo.account_id')
+                ->leftJoin('customers as c', 'c.id', '=', 'ba.customer_id')
+                ->where(function ($q) {
+                    $q->where(function ($done) {
+                        $done->where('jo.onsite_status', 'Done')->where('jo.installation_fee', '>', 0);
+                    })->orWhere(function ($withPdf) {
+                        $withPdf->whereNotNull('jo.invoice_url')->where('jo.invoice_url', '<>', '');
+                    });
+                })
+                ->select([
+                    'jo.id', 'jo.installation_fee', 'jo.date_installed', 'jo.onsite_status', 'jo.invoice_url',
+                    'jo.organization_id', 'jo.created_at', 'jo.updated_at', 'ba.account_no',
+                    'app.first_name as app_first_name', 'app.middle_initial as app_middle_initial', 'app.last_name as app_last_name',
+                    'app.mobile_number as app_mobile_number', 'app.email_address as app_email_address',
+                    'app.installation_address as app_installation_address', 'app.location as app_location',
+                    'app.barangay as app_barangay', 'app.city as app_city', 'app.region as app_region',
+                    'app.desired_plan as app_desired_plan',
+                    'c.first_name as c_first_name', 'c.middle_initial as c_middle_initial', 'c.last_name as c_last_name',
+                    'c.contact_number_primary as c_contact_number', 'c.email_address as c_email_address',
+                    'c.address as c_address', 'c.location as c_location',
+                    'c.barangay as c_barangay', 'c.city as c_city', 'c.region as c_region',
+                    'c.desired_plan as c_desired_plan',
+                ]);
+
+            if (!$isSuperAdmin && $organizationId) {
+                $query->where('jo.organization_id', $organizationId);
+            }
+
+            $records = $query->orderBy('jo.id', 'desc')->get()->map(function ($row) {
+                // The application is what the invoice PDF is built from; the customer covers
+                // job orders whose application is missing.
+                $hasApp = $row->app_first_name !== null || $row->app_last_name !== null;
+                $pick = fn ($appValue, $customerValue) => $hasApp ? $appValue : $customerValue;
+
+                $fullName = preg_replace('/\s+/', ' ', trim(implode(' ', array_filter([
+                    $pick($row->app_first_name, $row->c_first_name),
+                    $pick($row->app_middle_initial, $row->c_middle_initial),
+                    $pick($row->app_last_name, $row->c_last_name),
+                ]))));
+
+                $barangay = $pick($row->app_barangay, $row->c_barangay);
+                $city = $pick($row->app_city, $row->c_city);
+                $region = $pick($row->app_region, $row->c_region);
+                $address = implode(', ', array_filter([
+                    $pick($row->app_installation_address, $row->c_address),
+                    $pick($row->app_location, $row->c_location),
+                    $barangay,
+                    $city,
+                    $region,
+                ]));
+
+                $plan = $pick($row->app_desired_plan, $row->c_desired_plan);
+                if ($plan && strpos($plan, ' - P') !== false) {
+                    $plan = trim(explode(' - P', $plan)[0]);
+                }
+
+                $invoiceDate = $row->date_installed ? Carbon::parse($row->date_installed) : null;
+
+                return [
+                    'id' => $row->id,
+                    'invoice_no' => 'JO-' . $row->id,
+                    'account_no' => $row->account_no,
+                    'invoice_date' => $invoiceDate ? $invoiceDate->format('Y-m-d H:i:s') : null,
+                    'due_date' => $invoiceDate ? InstallationFeeNotificationService::dueDate($invoiceDate)->format('Y-m-d') : null,
+                    'installation_fee' => (float) $row->installation_fee,
+                    'full_name' => $fullName,
+                    'contact_number' => $pick($row->app_mobile_number, $row->c_contact_number),
+                    'email_address' => $pick($row->app_email_address, $row->c_email_address),
+                    'address' => $address,
+                    'barangay' => $barangay,
+                    'city' => $city,
+                    'region' => $region,
+                    'plan' => $plan,
+                    'onsite_status' => $row->onsite_status,
+                    'invoice_url' => $row->invoice_url ?: null,
+                    'organization_id' => $row->organization_id,
+                    'created_at' => $row->created_at,
+                    'updated_at' => $row->updated_at,
+                ];
+            });
+
+            return response()->json([
+                'success' => true,
+                'data' => $records->values(),
+                'total' => $records->count(),
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error fetching job order invoice records: ' . $e->getMessage());
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch job order invoice records',
                 'error' => $e->getMessage()
             ], 500);
         }

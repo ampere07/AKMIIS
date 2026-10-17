@@ -202,22 +202,27 @@ class PaymentWorkerService
             // the stale copy would mark a genuinely settled payment FAILED.
             $rawPayload = $claimed->callback_payload;
 
-            if ($rawPayload) {
-                $json = json_decode($rawPayload, true);
-                $gwStatus = strtoupper($json['status'] ?? '');
+            // Only a gateway-confirmed payment is posted. Every path that queues a payment
+            // (webhook, reconciliation, API_RETRY requeue) stores the gateway payload with it,
+            // so a row with none is unverified: posting it would reduce the balance — and
+            // reconnect the customer — on nothing but a status someone set by hand. A later
+            // webhook still moves such a row back to QUEUED with its payload.
+            $json = $rawPayload ? json_decode($rawPayload, true) : null;
+            $gwStatus = strtoupper(is_array($json) ? (string) ($json['status'] ?? '') : '');
 
-                $isLegitPaid = in_array($gwStatus, ['PAID', 'COMPLETED', 'SETTLED', 'PAYMENT_SUCCESS']);
+            $isLegitPaid = in_array($gwStatus, ['PAID', 'COMPLETED', 'SETTLED', 'PAYMENT_SUCCESS']);
 
-                if (!$isLegitPaid) {
-                    $this->workerLog("AUDIT FAIL: Ref $ref has payload but status is $gwStatus. Marking FAILED.");
+            if (!$isLegitPaid) {
+                $this->workerLog($rawPayload
+                    ? "AUDIT FAIL: Ref $ref has payload but status is $gwStatus. Marking FAILED."
+                    : "AUDIT FAIL: Ref $ref has no gateway confirmation payload. Marking FAILED.");
 
-                    DB::table('pending_payments')
-                        ->where('id', $id)
-                        ->update(['status' => 'FAILED', 'updated_at' => now()]);
+                DB::table('pending_payments')
+                    ->where('id', $id)
+                    ->update(['status' => 'FAILED', 'updated_at' => now()]);
 
-                    DB::commit();
-                    return;
-                }
+                DB::commit();
+                return;
             }
 
             DB::table('pending_payments')
@@ -576,7 +581,59 @@ class PaymentWorkerService
                 return 'no_plan';
             }
 
-            $this->workerLog("[RECONNECT PROCEED] Conditions met - Proceeding with reconnection. Current Status Active: " . ($isAlreadyActive ? 'Yes' : 'No') . ", Balance: ₱{$balance}");
+            // Step 4: Reconnect only a customer RADIUS has actually cut off. An account already
+            // in a plan group was never disconnected (its router is just offline), so the
+            // payment is settled as it stands: no RADIUS reconnect, no reconnection log, no
+            // reconnect SMS/email. When the group can't be read, reconnect as before so a
+            // cut-off customer who paid is never left offline.
+            $radiusGroup = $this->manualRadiusService->currentGroup($username);
+            if (ManualRadiusOperationsService::isConnectedGroup($radiusGroup)) {
+                // Connected, but RADIUS still holds another plan (a plan change): move it to
+                // the customer's plan as a group update, which logs no reconnection. If RADIUS
+                // doesn't confirm it, the queued reconnect applies it the same way later.
+                $planChanged = !ManualRadiusOperationsService::sameGroup($radiusGroup, ManualRadiusOperationsService::planGroup($plan));
+                if ($planChanged) {
+                    $groupParams = [
+                        'accountNumber' => $accountNo,
+                        'username' => $username,
+                        'plan' => $plan,
+                        'updatedBy' => 'Payment Worker',
+                        'remarks' => 'Payment Worker Plan Update'
+                    ];
+                    $update = $this->manualRadiusService->updateGroup($groupParams);
+
+                    if (!empty($update['applied'])) {
+                        $this->workerLog("[RECONNECT PLAN] Account {$accountNo} moved from '{$radiusGroup}' to plan '{$plan}' - no reconnection logged.");
+                    } else {
+                        $this->workerLog("[RECONNECT PLAN] Plan update for {$accountNo} not confirmed: " . ($update['message'] ?? 'not applied') . ". Queuing for retry.");
+                        RadiusQueueService::queueUnique([
+                            'source_type' => 'payment_worker',
+                            'source_id' => $billingAccount->id,
+                            'account_no' => $accountNo,
+                            'operation' => 'reconnect_user',
+                            'params' => $groupParams,
+                            'last_error' => $update['message'] ?? 'Group update not confirmed',
+                            'created_by' => 'Payment Worker',
+                        ]);
+                    }
+                }
+
+                if (!$isAlreadyActive) {
+                    DB::table('billing_accounts')
+                        ->where('id', $billingAccount->id)
+                        ->update([
+                            'billing_status_id' => 1,
+                            'updated_at' => now(),
+                            'updated_by' => 'Payment Worker'
+                        ]);
+                    $this->workerLog("[RECONNECT DB] Updated billing_status_id to 1 for Account: {$accountNo}");
+                }
+
+                $this->workerLog("[RECONNECT SKIP] Account {$accountNo} already connected in RADIUS (group '{$radiusGroup}') - payment settled, no reconnect.");
+                return $planChanged ? 'plan_updated' : 'already_connected';
+            }
+
+            $this->workerLog("[RECONNECT PROCEED] Conditions met - Proceeding with reconnection. Current Status Active: " . ($isAlreadyActive ? 'Yes' : 'No') . ", Balance: ₱{$balance}, RADIUS group: '" . ($radiusGroup ?? 'unknown') . "'");
 
             // Step 5: Prepare parameters for ManualRadiusOperationsService
             $params = [
@@ -613,7 +670,9 @@ class PaymentWorkerService
 
             if (!$radiusSuccess) {
                 $this->workerLog("[RECONNECT EXECUTE] All 3 attempts failed. Queuing for retry.");
-                RadiusQueueService::queue([
+                // One pending reconnect per account: a second settling payment while the
+                // first retry is still queued does not stack another one behind it.
+                RadiusQueueService::queueUnique([
                     'source_type' => 'payment_worker',
                     'source_id' => $billingAccount->id,
                     'account_no' => $accountNo,

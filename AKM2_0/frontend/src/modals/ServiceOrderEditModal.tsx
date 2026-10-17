@@ -878,8 +878,12 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     const currentAssigned = (formData.assignedEmail || '').trim();
     const originalAssigned = (originalAssignedEmail || '').trim();
     const technicianChanged = !!originalAssigned && currentAssigned !== originalAssigned;
+    // A rescheduled visit is no longer on-site, so it can be reassigned even though the
+    // start_time has no end_time yet — the backend resets both timers on reassignment.
+    const storedVisitStatus = String(serviceOrderData?.visitStatus || serviceOrderData?.visit_status || '').toLowerCase().trim();
+    const isRescheduled = formData.visitStatus === 'Reschedule' || ['reschedule', 'rescheduled', 'resched'].includes(storedVisitStatus);
 
-    if (startTime && technicianChanged) {
+    if (startTime && technicianChanged && !isRescheduled) {
       const findName = (email: string) =>
         [{ name: 'None', email: 'None' }, ...technicianUsers].find(t => t.email === email)?.name || email;
       const originalTechName = findName(originalAssigned);
@@ -1156,9 +1160,12 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
             router_model: updatedFormData.routerModel,
           } : {}),
           ...(showNewVlan ? { new_vlan: updatedFormData.newVlan } : {}),
-          // Saved to the customer record by the backend
-          ...(updatedFormData.addressCoordinates.trim() ? { address_coordinates: updatedFormData.addressCoordinates.trim() } : {}),
         } : {}),
+
+        // Technician only, optional. Saved to the customer record by the backend
+        ...(isTechnician && updatedFormData.addressCoordinates.trim()
+          ? { address_coordinates: updatedFormData.addressCoordinates.trim() }
+          : {}),
 
         concern: updatedFormData.concern,
         concern_remarks: updatedFormData.concernRemarks,
@@ -1923,13 +1930,6 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                       )}
                     </div>
 
-                    <LocationPicker
-                      value={formData.addressCoordinates}
-                      onChange={(coordinates) => handleInputChange('addressCoordinates', coordinates)}
-                      isDarkMode={isDarkMode}
-                      label="Address Coordinates"
-                    />
-
                     <div>
                       <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
                         }`}>Client Signature</label>
@@ -2267,7 +2267,15 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
               </>
             )}
 
-
+            {/* Technician only — always shown, optional */}
+            {isTechnician && (
+              <LocationPicker
+                value={formData.addressCoordinates}
+                onChange={(coordinates) => handleInputChange('addressCoordinates', coordinates)}
+                isDarkMode={isDarkMode}
+                label="Address Coordinates"
+              />
+            )}
 
             {isTechnician ? (
               <div>
