@@ -943,6 +943,7 @@ class BillingGenerationController extends Controller
                         'email_queued'  => $notifResult['email_queued'] ?? false,
                         'sms_sent'      => $notifResult['sms_sent'] ?? false,
                         'pdf_generated' => $notifResult['pdf_generated'] ?? false,
+                        'balance_settled' => $notifResult['balance_settled'] ?? false,
                         'errors'        => $notifResult['errors'] ?? [],
                     ];
                 } catch (\Exception $e) {

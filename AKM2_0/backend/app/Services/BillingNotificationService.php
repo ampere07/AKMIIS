@@ -43,6 +43,7 @@ class BillingNotificationService
             'email_queued' => false,
             'sms_sent' => false,
             'pdf_generated' => false,
+            'balance_settled' => false,
             'errors' => []
         ];
 
@@ -51,6 +52,12 @@ class BillingNotificationService
 
             if (!$customer) {
                 throw new \Exception("Customer not found for account {$account->account_no}");
+            }
+
+            if (BillingAccount::hasSettledBalance($account->account_no)) {
+                $results['balance_settled'] = true;
+                Log::info('Skipping billing reminder: account balance is settled', ['account_no' => $account->account_no]);
+                return $results;
             }
 
             // PDF generation is for SOA only — Invoice does not have a PDF template.
@@ -174,6 +181,7 @@ class BillingNotificationService
             'email_queued' => false,
             'sms_sent' => false,
             'pdf_generated' => false,
+            'balance_settled' => false,
             'errors' => []
         ];
 
@@ -183,6 +191,12 @@ class BillingNotificationService
 
             if (!$customer) {
                 throw new \Exception("Customer not found for invoice {$invoice->id}");
+            }
+
+            if (BillingAccount::hasSettledBalance($account->account_no)) {
+                $results['balance_settled'] = true;
+                Log::info('Skipping billing reminder: account balance is settled', ['account_no' => $account->account_no]);
+                return $results;
             }
 
             $pdfUrl = null;
@@ -258,6 +272,7 @@ class BillingNotificationService
             'email_queued' => false,
             'sms_sent' => false,
             'pdf_generated' => false,
+            'balance_settled' => false,
             'errors' => []
         ];
 
@@ -267,6 +282,12 @@ class BillingNotificationService
 
             if (!$customer) {
                 throw new \Exception("Customer not found for invoice {$invoice->id}");
+            }
+
+            if (BillingAccount::hasSettledBalance($account->account_no)) {
+                $results['balance_settled'] = true;
+                Log::info('Skipping billing reminder: account balance is settled', ['account_no' => $account->account_no]);
+                return $results;
             }
 
             $pdfUrl = null;
